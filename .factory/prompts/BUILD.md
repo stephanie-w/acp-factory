@@ -1,0 +1,1 @@
+Read relevant project instructions (AGENTS.md) and the approved specification. Implement the task strictly according to the specification and acceptance criteria with appropriate tests. Do not modify or reformat unrelated files outside `## Files to Touch`. Commit your changes locally on the current branch and do not push or merge.

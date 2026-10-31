@@ -1,0 +1,48 @@
+# .factory/config.toml — Multi-stage acp-factory configuration
+version = "1"
+
+[agent]
+name = "opencode"
+timeout = 600
+
+[retry]
+max_attempts = 3
+keep_worktree_on_failure = true
+
+[stages.triage]
+agent = "opencode"
+mode = "plan"
+read_only = true
+persona = "personas/triage.md"
+prompt = "prompts/TRIAGE.md"
+
+[stages.spec]
+agent = "opencode"
+mode = "plan"
+read_only = true
+persona = "personas/architect.md"
+prompt = "prompts/SPEC.md"
+
+[stages.build]
+agent = "opencode"
+read_only = false
+pre = ["uv sync"]
+persona = "personas/implementer.md"
+prompt = "prompts/BUILD.md"
+checks = ["lint", "test"]
+
+[stages.review]
+agent = "opencode"
+read_only = true
+persona = "personas/reviewer.md"
+prompt = "prompts/REVIEW.md"
+
+[checks.lint]
+command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run ruff check"
+
+[checks.test]
+command = "uv run pytest"
+
+[checks.review]
+persona = "personas/reviewer.md"
+prompt = "prompts/REVIEW.md"

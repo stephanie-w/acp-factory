@@ -1,0 +1,19 @@
+# Python & tooling caches
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# acp-factory runtime artifacts & worktrees
+.factory/runs/
+.worktrees/
+demos/
+apm_modules/

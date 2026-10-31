@@ -1,0 +1,52 @@
+[project]
+name = "acp-factory"
+version = "0.1.0"
+description = "ACP-driven automated coding task runner with sequential verification checks and self-healing feedback loops, powered by acpterm."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "acpterm",
+    "agent-client-protocol>=0.11.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.2",
+    "rich>=15.0.0",
+    "typer>=0.27.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "ruff>=0.9.0",
+    "ty>=0.0.1a0",
+]
+
+[tool.uv.sources]
+acpterm = { path = "/home/stephanie/DEV/acpterm", editable = true }
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.12"]
+build-backend = "uv_build"
+
+[project.scripts]
+acp-factory = "acp_factory.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+extend-exclude = ["demos"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "RUF"]
+ignore = ["B008", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ty.src]
+exclude = ["demos"]
