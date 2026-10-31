@@ -214,3 +214,74 @@ def test_resolve_persona_and_missing_skill_errors(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError, match="Skill 'missing-skill' not found"):
         resolve_skill_paths(["missing-skill"], workspace=tmp_path)
+
+
+def test_builtin_skills_and_nested_apm_resolution(tmp_path: Path) -> None:
+    builtin_names = [
+        "issue-triage",
+        "spec-writer",
+        "tdd-builder",
+        "code-reviewer",
+        "security-auditor",
+    ]
+    resolved_builtins = resolve_skill_paths(builtin_names, workspace=tmp_path)
+    assert len(resolved_builtins) == 5
+    for path in resolved_builtins:
+        assert path.name == "SKILL.md"
+        assert path.is_file()
+
+    # Verify .agents/skills and nested apm_modules/<org>/<repo>/skills/<skill>/SKILL.md resolution
+    agents_skill = tmp_path / ".agents" / "skills" / "mlops-iac" / "SKILL.md"
+    agents_skill.parent.mkdir(parents=True)
+    agents_skill.write_text("# MLOps IaC Skill", encoding="utf-8")
+
+    nested_apm_skill = (
+        tmp_path
+        / "apm_modules"
+        / "org"
+        / "coding-ai-resources"
+        / "skills"
+        / "ml-endpoints"
+        / "SKILL.md"
+    )
+    nested_apm_skill.parent.mkdir(parents=True)
+    nested_apm_skill.write_text("# ML Endpoints Skill", encoding="utf-8")
+
+    custom_resolved = resolve_skill_paths(
+        ["mlops-iac", "ml-endpoints"], workspace=tmp_path
+    )
+    assert custom_resolved == [agents_skill.resolve(), nested_apm_skill.resolve()]
+
+
+def test_scaffolded_multi_stage_config_resolves_all_stages_and_skills(
+    tmp_path: Path,
+) -> None:
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["init", "--multi-stage", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+
+    cfg = FactoryConfig.discover(tmp_path)
+    for stage_name, expected_skills in (
+        ("triage", ["issue-triage"]),
+        ("spec", ["spec-writer"]),
+        ("build", ["tdd-builder"]),
+        ("review", ["code-reviewer", "security-auditor"]),
+    ):
+        stage_cfg = cfg.with_overrides(
+            stage=stage_name, workspace=tmp_path, task="Test issue #1"
+        )
+        assert stage_cfg.agent.skills == expected_skills
+        client = FactoryACPClient(
+            workspace=tmp_path,
+            agent_config=stage_cfg.agent,
+            config_dir=stage_cfg.config_dir,
+        )
+        assert len(client.skill_paths) == len(expected_skills)
+        assert client.persona_text is not None
+
+    assert "security" in cfg.named_checks
+    assert cfg.named_checks["security"].skills == ["security-auditor"]

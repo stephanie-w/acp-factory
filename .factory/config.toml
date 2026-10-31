@@ -14,6 +14,7 @@ agent = "opencode"
 mode = "plan"
 read_only = true
 persona = "personas/triage.md"
+skills = ["issue-triage"]
 prompt = "prompts/TRIAGE.md"
 
 [stages.spec]
@@ -21,6 +22,7 @@ agent = "opencode"
 mode = "plan"
 read_only = true
 persona = "personas/architect.md"
+skills = ["spec-writer"]
 prompt = "prompts/SPEC.md"
 
 [stages.build]
@@ -28,6 +30,7 @@ agent = "opencode"
 read_only = false
 pre = ["uv sync"]
 persona = "personas/implementer.md"
+skills = ["tdd-builder"]
 prompt = "prompts/BUILD.md"
 checks = ["lint", "test"]
 
@@ -35,6 +38,7 @@ checks = ["lint", "test"]
 agent = "opencode"
 read_only = true
 persona = "personas/reviewer.md"
+skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/REVIEW.md"
 
 [checks.lint]
@@ -45,4 +49,10 @@ command = "uv run pytest"
 
 [checks.review]
 persona = "personas/reviewer.md"
+skills = ["code-reviewer"]
 prompt = "prompts/REVIEW.md"
+
+[checks.security]
+persona = "personas/security.md"
+skills = ["security-auditor"]
+prompt = "prompts/SECURITY.md"

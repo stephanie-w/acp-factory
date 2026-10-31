@@ -69,13 +69,20 @@ def resolve_skill_paths(
     Search order for each skill entry:
     1. Absolute path (file or directory containing SKILL.md)
     2. Relative to config_dir or workspace (file or directory containing SKILL.md)
-    3. `.factory/skills/<skill>/SKILL.md`, `skills/<skill>/SKILL.md`, `apm_modules/<skill>/SKILL.md`
+    3. `.factory/skills/<skill>/SKILL.md`, `skills/<skill>/SKILL.md`, `.agents/skills/<skill>/SKILL.md`,
+       `.apm/skills/<skill>/SKILL.md`, `apm_modules/<skill>/SKILL.md`, or nested under `apm_modules/`
     """
     resolved_paths: list[Path] = []
     search_roots: list[Path] = []
     if config_dir is not None:
         search_roots.append(config_dir.resolve())
     search_roots.append(workspace.resolve())
+    bundled_repo_root = Path(__file__).resolve().parents[3]
+    if (
+        bundled_repo_root not in search_roots
+        and (bundled_repo_root / "skills").is_dir()
+    ):
+        search_roots.append(bundled_repo_root)
 
     for entry in skills:
         raw = entry.strip()
@@ -104,20 +111,30 @@ def resolve_skill_paths(
                 for subdir in (
                     ".factory/skills",
                     "skills",
-                    "apm_modules",
+                    ".agents/skills",
                     ".apm/skills",
+                    "apm_modules",
                 ):
                     skill_file = (root / subdir / raw / "SKILL.md").resolve()
                     if skill_file.is_file():
                         found = skill_file
                         break
+
+                if found is None:
+                    apm_dir = root / "apm_modules"
+                    if apm_dir.is_dir():
+                        matches = sorted(apm_dir.glob(f"**/skills/{raw}/SKILL.md"))
+                        if not matches:
+                            matches = sorted(apm_dir.glob(f"**/{raw}/SKILL.md"))
+                        if matches:
+                            found = matches[0].resolve()
                 if found is not None:
                     break
 
         if found is None:
             raise FileNotFoundError(
                 f"Skill '{raw}' not found. Expected a SKILL.md file path or skill package "
-                f"in .factory/skills/, skills/, or apm_modules/ under {workspace}."
+                f"in .factory/skills/, skills/, .agents/skills/, or apm_modules/ under {workspace}."
             )
         if found not in resolved_paths:
             resolved_paths.append(found)
