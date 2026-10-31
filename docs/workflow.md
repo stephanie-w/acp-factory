@@ -100,18 +100,51 @@ stateDiagram-v2
 
 ---
 
-## 3. Per-Stage Agent Customization (`acpterm` + `apm`)
+## 3. Per-Stage Agent Customization, Domain-Agnostic Core & `apm` Skills
 
-Each stage in `.factory/config.toml` can customize its ACP agent independently:
+### A. Domain-Agnostic Factory Core vs. Pluggable Domain Skills
+`acp-factory` separates **universal factory governance** from **domain/tech-stack specifics**:
 
-- **`agent` & `model`**: Select any agent configured in `~/.acpterm/config.json` (`opencode`, `kiro`, `agy`) and override its model per stage.
-- **`mode` & `read_only`**: Enforce `read_only = true` and `mode = "plan"` on `triage`, `spec`, and `review`.
-- **`persona`**: Prepend a role-specific Markdown persona (`.factory/personas/{triage,architect,implementer,reviewer}.md`).
-- **`skills`**: Attach stage-specific `SKILL.md` files (from `.factory/skills/`, `skills/`, or `apm_modules/` managed via `apm install`) as ACP `resources`.
+1. **Universal Factory Core (`.factory/personas/`, `.factory/prompts/`, and bundled `skills/`)**:
+   - **Triage (`issue-triage`)**: Fact-checks claims against the repository, distinguishes `DUPLICATE` vs. `ALSO_FIXES`, and enforces single-PR sizing (**< ~400 changed lines** in one cohesive area) or outputs a build-order `### Suggested Split` (`STATUS: TOO_BIG`).
+   - **Specification (`spec-writer`)**: Produces a falsifiable `## Acceptance Criteria` table (`| ID | Done when | How to check |` using `AC-1`, `AC-2`, ...) and applies the **cost-to-undo + dependency/compute/IAM filter** to decide between `## Assumptions` (`STATUS: SPEC_READY`) and `## Open Questions` (`STATUS: NEEDS_HUMAN` with 2-3 options + recommendation).
+   - **Builder (`tdd-builder`)**: Turns each `AC-n` row into an executable local check/test first, implements minimal root-cause changes within `## Files to Touch`, probes bad/borderline inputs (including `NaN`/`Inf`/`null`/batch boundaries), and follows the 7-point quality standard.
+   - **Reviewer (`code-reviewer` & `security-auditor`)**: Skeptically verifies `git diff` against every `AC-n` row, checks test effectiveness (revert-test heuristic: would existing tests fail if the fix were broken?), traces untrusted input from source to sink with concrete exploit/trigger proof, classifies risk (`LOW` / `MEDIUM` / `HIGH` with path elevation rules), and grades findings (`blocking`, `major`, `minor`).
+
+2. **Adapting `AC-n` ("How to check") Across Software, MLOps & Cloud IaC**:
+   - Because agents run inside isolated local git worktrees without live production cloud credentials or GPU clusters, `How to check` in `AC-n` is generalized by domain:
+     - **Python / Application / ML Serving Endpoints**: `pytest` unit/contract tests using lightweight model stubs/fixtures and borderline payload checks (`NaN`, `Inf`, empty/oversized batches).
+     - **ML & Data Pipelines (Kubeflow, Vertex, Airflow, Argo, CI)**: Offline DAG/workflow compilation and artifact schema dry-run checks.
+     - **Cloud IaC & Containers (Terraform/OpenTofu, Helm, K8s, Docker)**: Static and plan-time local validation (`terraform fmt -check && terraform validate`, `tflint`, `helm template`, `kubeconform`) — **never** live cloud mutations.
+
+3. **Workspace & Catalog Skills via `apm` (`~/DEV/coding-ai-resources`)**:
+   - Target workspaces bring their own `apm.yml` and run `apm install` as a `pre` / `setup` command in `.factory/config.toml` (deploying project skills into `.agents/skills/` or `apm_modules/`).
+   - `resolve_skill_paths` searches the target workspace first (`.factory/skills/`, `skills/`, `.agents/skills/`, `.apm/skills/`, `apm_modules/`) and falls back to `acp-factory`'s bundled `skills/` directory so built-in skills work out-of-the-box on any repository.
 
 ---
 
-## 4. Safe Iteration with `--dry-run` & Read-Only Agent `gh` Guardrail
+## 4. Standalone Branch Review & Pull Request Creation (`acp-factory review`)
+
+When you have an existing working branch in a repository without a GitHub Issue, you can run the standalone `review` command:
+
+```bash
+# Review current branch in read-only mode and preview PR creation:
+acp-factory review "Short claim/description of what the branch does" \
+  --workspace /path/to/repo \
+  --create-pr \
+  --dry-run
+
+# If REVISION_NEEDED, run a fresh builder revision round on the branch:
+acp-factory run \
+  "Revision round: Read .factory/runs/<run-id>/pr-<branch>-body.md, fix [blocking]/[major] findings, and commit." \
+  --stage build \
+  --skill tdd-builder \
+  --workspace /path/to/repo
+```
+
+---
+
+## 5. Safe Iteration with `--dry-run` & Read-Only Agent `gh` Guardrail
 
 While tuning personas, stage prompts, and `apm` skills, you can run in **Dry-Run Mode** (`--dry-run` on the CLI or `dry_run = true` in `.factory/config.toml`):
 

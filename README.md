@@ -75,7 +75,18 @@ Or automatically process the next actionable issue in the repository queue:
 acp-factory next
 ```
 
-### 3. Run an Ad-Hoc Stage or Task Locally
+### 3. Review a Standalone Working Branch (With Optional PR Creation)
+
+Review any checked-out branch in a target repository (even without a GitHub Issue or `.factory/` setup) using the bundled `code-reviewer` and `security-auditor` skills:
+
+```bash
+acp-factory review "Short description of what this branch changes" \
+  --workspace /path/to/repo \
+  --create-pr \
+  --dry-run
+```
+
+### 4. Run an Ad-Hoc Stage or Task Locally
 
 Run the `build` stage with its configured persona, skills, and checks:
 
@@ -83,14 +94,14 @@ Run the `build` stage with its configured persona, skills, and checks:
 acp-factory run "Implement pagination for GET /items" --stage build
 ```
 
-Override agent, persona, or attach an `apm` skill on the CLI:
+Override agent, persona, or attach a skill on the CLI:
 
 ```bash
 acp-factory run "Review the pagination implementation" \
   --stage review \
   --agent opencode \
   --persona .factory/personas/reviewer.md \
-  --skill llm_judge \
+  --skill code-reviewer \
   --read-only
 ```
 

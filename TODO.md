@@ -55,8 +55,11 @@
   - [x] Enhanced `resolve_skill_paths` to support `.agents/skills/`, nested `apm_modules/`, and bundled fallback skills.
 - [x] **Persona & Prompt Hardening (`.factory/personas/` & `.factory/prompts/`)**:
   - [x] Added single-PR sizing heuristics (`<400` lines + build-order `SPLIT`), falsifiable `AC-n` acceptance tables (`| ID | Done when | How to check |`), cost-to-undo human question filtering, 7-point builder quality standards, `blocking`/`major`/`minor` severity rubrics, `LOW`/`MEDIUM`/`HIGH` risk path classification, and `security.md` / `SECURITY.md`.
-- [ ] **Dynamic Catalog Skill Picker (`~/DEV/coding-ai-resources`)**:
-  - [ ] Add a meta-skill / `triage`-`spec` step that inspects the target workspace & issue domain and selects the appropriate domain skills (e.g., MLOps, Terraform/IaC, ML endpoints, Python TDD) from `~/DEV/coding-ai-resources` via `apm`.
+- [x] **Standalone Branch Review & Pull Request Command (`acp-factory review`)**:
+  - [x] Added `acp-factory review [DESCRIPTION] --workspace ... [--branch ...] [--base main] [--create-pr] [--dry-run]` to review working branches outside the GitHub Issue pipeline and optionally push/open standalone PRs when `STATUS: ACCEPTED`.
+- [ ] **Domain-Specific Skill Packs & Catalog Picker (`~/DEV/coding-ai-resources`)**:
+  - [ ] Keep `acp-factory` core domain-agnostic while authoring domain skill packs in `~/DEV/coding-ai-resources` (e.g. `mlops-iac` for Terraform/Helm/K8s offline validation & IAM/cost escalation, `ml-endpoints-pipelines` for DAG compilation & stubbed model boundary checks).
+  - [ ] Add a dynamic catalog skill picker (in `triage` / `spec`) that inspects the target workspace (`pyproject.toml`, `*.tf`, `Dockerfile`, pipeline DAGs, `apm.yml`) and attaches the matching domain skills from `~/DEV/coding-ai-resources`.
 
 ---
 
