@@ -288,3 +288,66 @@ async def test_readonly_gh_shim_blocks_mutating_commands(tmp_path: Path) -> None
     _, stderr = await proc.communicate()
     assert proc.returncode == 1
     assert "Mutating 'gh' commands are disabled for agents" in stderr.decode("utf-8")
+
+
+async def test_run_branch_review_standalone_and_create_pr(tmp_path: Path) -> None:
+    from acp_factory.runner.loop import run_branch_review
+
+    accepted_outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.4,
+        last_response_text=(
+            "### Risk Classification: LOW\n"
+            "- **Reason**: Isolated feature branch.\n\n"
+            "### Findings\n- None.\n\n"
+            "STATUS: ACCEPTED"
+        ),
+    )
+
+    with (
+        patch(
+            "acp_factory.runner.worktree._run_git",
+            new=AsyncMock(return_value=(0, "feat/my-branch", "")),
+        ),
+        patch(
+            "acp_factory.runner.loop.run_factory",
+            new=AsyncMock(return_value=accepted_outcome),
+        ),
+        patch(
+            "acp_factory.runner.loop.push_and_create_or_update_standalone_pr",
+            new=AsyncMock(return_value="https://github.com/org/repo/pull/99"),
+        ) as mock_pr,
+    ):
+        # 1. Dry-run with --create-pr generates local PR body and manual git/gh commands
+        dry_res = await run_branch_review(
+            tmp_path,
+            description="Add pipeline retry logic",
+            create_pr=True,
+            dry_run=True,
+        )
+        assert dry_res.succeeded is True
+        assert dry_res.dry_run_plan is not None
+        assert dry_res.dry_run_plan.pr_body_file is not None
+        assert dry_res.dry_run_plan.pr_body_file.exists()
+        pr_body_text = dry_res.dry_run_plan.pr_body_file.read_text(encoding="utf-8")
+        assert "### Risk Classification: LOW" in pr_body_text
+        assert "Isolated feature branch." in pr_body_text
+        assert any(
+            "gh pr create --base main --head feat/my-branch" in cmd
+            for cmd in dry_res.dry_run_plan.commands
+        )
+        mock_pr.assert_not_awaited()
+
+        # 2. Live mode with --create-pr pushes and creates PR when ACCEPTED
+        live_res = await run_branch_review(
+            tmp_path,
+            description="Add pipeline retry logic",
+            create_pr=True,
+            dry_run=False,
+        )
+        assert live_res.succeeded is True
+        mock_pr.assert_awaited_once()
+        assert live_res.stage_verdict is not None
+        assert "pull/99" in live_res.stage_verdict.summary

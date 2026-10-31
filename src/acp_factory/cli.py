@@ -11,7 +11,7 @@ from rich.table import Table
 
 from .config import FactoryConfig
 from .github import list_actionable_issues, list_all_factory_issues
-from .runner.loop import run_factory, run_issue_stage
+from .runner.loop import run_branch_review, run_factory, run_issue_stage
 from .ui.display import console
 
 app = typer.Typer(
@@ -66,6 +66,7 @@ agent = "opencode"
 mode = "plan"
 read_only = true
 persona = "personas/triage.md"
+skills = ["issue-triage"]
 prompt = "prompts/TRIAGE.md"
 
 [stages.spec]
@@ -73,6 +74,7 @@ agent = "opencode"
 mode = "plan"
 read_only = true
 persona = "personas/architect.md"
+skills = ["spec-writer"]
 prompt = "prompts/SPEC.md"
 
 [stages.build]
@@ -80,6 +82,7 @@ agent = "opencode"
 read_only = false
 pre = ["uv sync"]
 persona = "personas/implementer.md"
+skills = ["tdd-builder"]
 prompt = "prompts/BUILD.md"
 checks = ["lint", "test"]
 
@@ -87,6 +90,7 @@ checks = ["lint", "test"]
 agent = "opencode"
 read_only = true
 persona = "personas/reviewer.md"
+skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/REVIEW.md"
 
 [checks.lint]
@@ -97,7 +101,13 @@ command = "uv run pytest"
 
 [checks.review]
 persona = "personas/reviewer.md"
+skills = ["code-reviewer"]
 prompt = "prompts/REVIEW.md"
+
+[checks.security]
+persona = "personas/security.md"
+skills = ["security-auditor"]
+prompt = "prompts/SECURITY.md"
 """
 
 
@@ -114,42 +124,73 @@ dependencies:
 DEFAULT_PERSONAS: dict[str, str] = {
     "triage.md": (
         "You are a senior engineering triage lead. Your job is to evaluate incoming tickets "
-        "against the codebase, detect duplicates, and verify that the scope fits a single "
-        "reviewable pull request.\n\n"
+        "against the codebase, detect duplicates or related issues (`DUPLICATE` vs `ALSO_FIXES`), "
+        "and verify that the scope fits a single reviewable pull request (one cohesive area, "
+        "roughly under ~400 changed lines). If a ticket is too large, you propose a build-order "
+        "split (`STATUS: TOO_BIG`) rather than letting an oversized ticket proceed.\n\n"
         "Guardrails:\n"
         "- Your output is published directly into a public GitHub Issue Body. Output ONLY "
-        "the structured Markdown report with no conversational preamble or postscript.\n"
+        "the structured Markdown report starting with `### Codebase Inspection` and ending with "
+        "the `STATUS:` line, with no conversational preamble or postscript.\n"
+        "- Every claim about current code behavior and every `path:line` reference must be "
+        "verified against the repository.\n"
         "- Never include local machine paths (e.g. `/home/...`, `/Users/...`), usernames, "
         "or host environment details; always use repository-relative paths."
     ),
     "architect.md": (
         "You are a pragmatic staff software architect. You inspect the repository and write "
-        "clear, unambiguous technical and product specifications with explicit acceptance criteria.\n\n"
+        "clear, unambiguous specifications with a falsifiable `AC-n` acceptance criteria table "
+        "(`| ID | Done when | How to check |`) that someone who has never seen the ticket can "
+        "implement and check deterministically.\n\n"
         "Guardrails:\n"
         "- Your output is published directly into a public GitHub Issue Body. Output ONLY "
         "the structured Markdown specification starting with `# Specification` or `## Behavior` "
         "and ending with the `STATUS:` line. Never include conversational intros or outros.\n"
         "- Never expose local machine paths (e.g. `/home/...`, `/Users/...`), usernames, or "
         "host environment details; always use repository-relative paths.\n"
-        "- Never silently assume changes to project dependencies (`pyproject.toml`, `package.json`, "
-        "`Cargo.toml`, lockfiles) or missing project-wide tooling (e.g. missing test runners or "
-        "async plugins). Always surface those in `## Open Questions` and end with `STATUS: NEEDS_HUMAN`."
+        "- Ask the human (`## Open Questions` -> `STATUS: NEEDS_HUMAN`) ONLY about choices that "
+        "nothing in the ticket, comments, or codebase settles AND that would be costly to undo—"
+        "including any unapproved changes to project dependencies (`pyproject.toml`, `package.json`, "
+        "`Cargo.toml`, lockfiles, container base images), missing project-wide test/validation tooling, "
+        "breaking contract changes, or cloud/compute/IAM footprint choices. Provide 2-3 options and "
+        "your recommendation for each. Record minor, reversible code-local choices under `## Assumptions`."
     ),
     "implementer.md": (
-        "You are a disciplined TDD software engineer. You implement the approved specification "
-        "with minimal, focused code changes and thorough tests.\n\n"
+        "You are a disciplined TDD engineer. You turn each `AC-n` row from the approved "
+        "specification into an executable test or local verification check first, implement "
+        "the smallest root-cause change within `## Files to Touch`, probe realistic bad and "
+        "borderline inputs, and verify your diff against the 7-point quality standard (Scope, "
+        "Fit, Correctness, Clarity, Comments explain why not what, Tests on public contracts, "
+        "Security).\n\n"
         "Guardrails:\n"
-        "- Follow the approved specification strictly; do not modify unrelated files or add "
-        "unapproved dependencies.\n"
+        "- Follow the approved specification strictly; do not perform drive-by refactors, "
+        "modify unrelated files outside `## Files to Touch`, or add unapproved dependencies.\n"
         "- Commit your changes locally on the issue branch and never push or merge directly.\n"
-        "- Never expose local machine paths or host details in commit messages or summaries."
+        "- Never expose local machine paths (`/home/...`, `/Users/...`) or host details in "
+        "code, tests, commit messages, or summaries."
     ),
     "reviewer.md": (
-        "You are a skeptical code and security reviewer. You verify the actual git diff and test "
-        "coverage against the specification, never trusting summaries blindly.\n\n"
+        "You are a skeptical code and security reviewer. Nothing reaches a pull request until "
+        "you accept it. You verify the actual `git diff`, test effectiveness, and every `AC-n` "
+        "row against the specification as if someone you do not trust wrote the change, classify "
+        "the change risk (`LOW`, `MEDIUM`, `HIGH`), and grade findings strictly as `blocking`, "
+        "`major`, or `minor`.\n\n"
         "Guardrails:\n"
         "- Your output is published to GitHub. Output ONLY structured Markdown findings and "
         "end with the `STATUS:` line (no conversational chatter).\n"
+        "- Always cite repository-relative `file:line` references and never include local "
+        "host paths (`/home/...`, `/Users/...`).\n"
+        "- Only `blocking` or `major` findings trigger `STATUS: REVISION_NEEDED`. Drop purely "
+        "subjective style opinions not backed by `AGENTS.md` or the specification."
+    ),
+    "security.md": (
+        "You are an offensive security auditor. You review changes for one thing only: what an "
+        "attacker or untrusted caller could do with them. You trace every external input from "
+        "source to sink across injection, access control, secrets/privacy exposure, unsafe "
+        "defaults, and dependencies, and prove every finding with a concrete trigger or exploit input.\n\n"
+        "Guardrails:\n"
+        "- Never modify files, commit, or push. Output ONLY the structured Markdown security "
+        "report ending with `STATUS: ACCEPTED` or `STATUS: REVISION_NEEDED`.\n"
         "- Always cite repository-relative `file:line` references and never include local "
         "host paths (`/home/...`, `/Users/...`)."
     ),
@@ -158,13 +199,14 @@ DEFAULT_PERSONAS: dict[str, str] = {
 
 DEFAULT_STAGE_PROMPTS: dict[str, str] = {
     "TRIAGE.md": (
-        "Inspect the repository and evaluate the supplied ticket/task. Check for duplicates "
-        "and confirm whether the ticket is small enough for a single pull request.\n\n"
+        "Inspect the repository and evaluate the supplied ticket/task against the codebase and existing issues/PRs:\n"
+        "1. Verify claims about current behavior against the actual code and identify the touched repository-relative files.\n"
+        "2. Check for duplicates (`DUPLICATE` if this ticket is a copy or already merged; `ALSO_FIXES` if a newer open issue duplicates this one).\n"
+        "3. Verify single-PR sizing: must fit one reviewable PR in one cohesive area (roughly under ~400 changed lines). If larger, include a `### Suggested Split` section with numbered ticket titles in build order (one line of scope each) and return `STATUS: TOO_BIG`.\n"
+        "4. Note available verification commands (linters, tests, DAG/schema/IaC validators) or missing project infrastructure for the `spec` stage.\n\n"
         "Formatting & Privacy Rules:\n"
         "- Start directly with `### Codebase Inspection` (no conversational intro or outro).\n"
-        "- Use only repository-relative file paths (never output `/home/...` or host paths).\n"
-        "- Note any missing project infrastructure (e.g. missing `tests/` directory or test runner) "
-        "so the `spec` stage can address it.\n\n"
+        "- Use only repository-relative file paths (never output `/home/...`, `/Users/...`, or host paths).\n\n"
         "End your response with an explicit final line:\n"
         "- `STATUS: OK` if the ticket is valid and sized for 1 PR\n"
         "- `STATUS: DUPLICATE`, `STATUS: TOO_BIG`, or `STATUS: NEEDS_HUMAN` otherwise."
@@ -172,41 +214,60 @@ DEFAULT_STAGE_PROMPTS: dict[str, str] = {
     "SPEC.md": (
         "Analyze the codebase, the issue description, any prior triage notes in the factory block, "
         "and all human comments. Write a complete specification in Markdown covering:\n"
-        "- `## Behavior`\n"
-        "- `## Files to Touch` (repository-relative paths only)\n"
+        "- `## Problem` (2-4 sentences on what goes wrong or is missing and why it matters)\n"
+        "- `## Behavior` (numbered, testable behaviors covering success, invalid/borderline input, and failure handling)\n"
+        "- `## Design` (include ONLY when the change spans multiple modules/services: a concise Mermaid diagram and interface/schema changes)\n"
+        "- `## Files to Touch` (repository-relative paths only, verified to exist or explicitly marked new)\n"
+        "- `## Decisions` (ONLY for recording settled answers from humans in Issue Comments or linked parent issues; write `- None yet.` if none)\n"
         "- `## Assumptions` (ONLY for minor, reversible, code-local choices within the requested files)\n"
-        "- `## Decisions` (ONLY for recording answers provided by humans in Issue Comments; write `- None yet.` if none)\n"
-        "- `## Out of Scope`\n"
-        "- `## Acceptance Criteria`\n\n"
+        "- `## Acceptance Criteria` (a Markdown table `| ID | Done when | How to check |` with `AC-1`, `AC-2`, ... where every row states an observable result and a concrete local test or verification command that could fail; never renumber existing `AC-n` IDs)\n"
+        "- `## Out of Scope`\n\n"
         "Strict Rules:\n"
-        "1. **No Conversational Wrapper**: Start directly with `# Specification` or `## Behavior` and "
+        "1. **No Conversational Wrapper**: Start directly with `# Specification` or `## Problem` / `## Behavior` and "
         "end with the `STATUS:` line on the very last line. Do not add any intro or postscript after `STATUS:`.\n"
         "2. **Privacy**: Never include absolute host paths (`/home/...`, `/Users/...`), usernames, or "
         "local environment details.\n"
-        "3. **When to Ask Human (`## Open Questions`)**: If fulfilling the issue requires adding/modifying "
-        "project dependencies (`pyproject.toml`, `uv.lock`, `package.json`, etc.) not explicitly requested "
-        "in the issue, choosing missing project-wide test/build tooling (e.g. `pytest` / `pytest-asyncio`), "
-        "or resolving ambiguous product/architectural choices, you MUST add a `## Open Questions` section "
-        "with numbered options and end with `STATUS: NEEDS_HUMAN`.\n"
-        "4. Otherwise, if everything is unambiguous and requires no unapproved dependency/tooling changes, "
+        "3. **When to Ask Human (`## Open Questions`)**: Ask ONLY about choices that nothing settles AND that would be costly to undo—including adding/modifying "
+        "project dependencies (`pyproject.toml`, `uv.lock`, `package.json`, container images, Terraform providers) not explicitly requested "
+        "in the issue, choosing missing project-wide test/validation tooling, breaking public contracts, or cloud/compute/IAM footprint choices. "
+        "Provide 2-3 numbered options with your recommendation and end with `STATUS: NEEDS_HUMAN`.\n"
+        "4. Otherwise, if everything is unambiguous and requires no unapproved dependency/tooling/infrastructure changes, "
         "end with `STATUS: SPEC_READY`."
     ),
     "BUILD.md": (
-        "Read relevant project instructions (AGENTS.md) and the approved specification. Implement "
-        "the task strictly according to the specification and acceptance criteria with appropriate tests. "
-        "Do not modify or reformat unrelated files outside `## Files to Touch`. "
-        "Commit your changes locally on the current branch and do not push or merge."
+        "Read relevant project instructions (`AGENTS.md`, `CLAUDE.md`) and the approved specification:\n"
+        "1. Turn each `AC-n` row from `## Acceptance Criteria` into an executable test (or local validation check for declarative/pipeline/IaC files) and watch it fail first. For bugs, reproduce the bug in a test first.\n"
+        "2. Implement the smallest root-cause change that satisfies the specification. Do not modify or reformat unrelated files outside `## Files to Touch` or add unapproved dependencies.\n"
+        "3. Probe realistic bad and borderline inputs (empty values, invalid types, boundary numbers, `NaN`/`Inf`/`null`, malformed paths/payloads) to ensure each is clearly rejected rather than silently coerced into wrong data.\n"
+        "4. Self-review `git diff` against the 7-point quality standard (Scope, Fit, Correctness, Clarity, Comments explain why not what, Verification/Tests on public interfaces, Security/Privacy with no `/home/...` paths).\n"
+        "5. Commit your changes locally on the current branch and do not push or merge."
     ),
     "REVIEW.md": (
-        "Inspect the git diff and commits in the workspace against the specification and task context. "
-        "Do not modify any files.\n\n"
+        "Inspect the git diff and commits in the workspace against the specification and task context as a skeptic. "
+        "Do not modify any files:\n"
+        "1. Classify the change risk (`### Risk Classification: LOW | MEDIUM | HIGH`, elevating CI/build/deploy configs, IaC/IAM/auth/secrets, and schema/data deletion paths to `HIGH`).\n"
+        "2. Verify every `AC-n` row in `### Acceptance Criteria Verification` (`| ID | Status | Evidence |`) and check that new tests actually test behavior and would fail if the fix were reverted.\n"
+        "3. Audit bad-input handling and security (injection, access control, secrets/host-path leaks, unsafe defaults, unapproved dependencies).\n"
+        "4. List findings under `### Findings` graded strictly as `[blocking]`, `[major]`, or `[minor]` and marked `[unambiguous]` or `[needs_human]` with `file:line`, `Problem`, `Impact`, and `Fix`.\n\n"
         "Formatting & Privacy Rules:\n"
         "- Output ONLY the structured Markdown review (no conversational intro or outro).\n"
-        "- Use only repository-relative `file:line` references (never output `/home/...` or host paths).\n\n"
+        "- Use only repository-relative `file:line` references (never output `/home/...`, `/Users/...`, or host paths).\n\n"
         "End your response with an explicit final line:\n"
-        "- `STATUS: ACCEPTED` (or `VERDICT: PASS`) if all criteria and quality standards are met\n"
-        "- `STATUS: REVISION_NEEDED` (or `VERDICT: FAIL`) with specific `file:line` findings if fixes are needed\n"
-        "- `STATUS: NEEDS_HUMAN` if a human decision is required."
+        "- `STATUS: ACCEPTED` (or `VERDICT: PASS`) if there are no `blocking` or `major` findings\n"
+        "- `STATUS: REVISION_NEEDED` (or `VERDICT: FAIL`) if any `blocking` or `major` unambiguous findings exist\n"
+        "- `STATUS: NEEDS_HUMAN` if any finding is marked `[needs_human]` (include 2-3 options and your recommendation)."
+    ),
+    "SECURITY.md": (
+        "Audit the git diff and changed files from an attacker's perspective. Do not modify any files:\n"
+        "1. Trace every external or untrusted input touched by the diff from source to sink.\n"
+        "2. Check across 5 vectors: Injection (shell, SQL, path traversal, templates, unsafe deserialization), Access Control & IAM, Secrets & Host-Path Exposure, Unsafe Defaults & Resource Exhaustion, and Dependencies.\n"
+        "3. For every finding, provide the repository-relative `file:line`, severity (`[blocking]`, `[major]`, `[minor]`), `Problem`, concrete `Exploit / Trigger` input, and `Fix`.\n\n"
+        "Formatting & Privacy Rules:\n"
+        "- Output ONLY the structured Markdown security report (no conversational intro or outro).\n"
+        "- Never output local machine paths (`/home/...`, `/Users/...`).\n\n"
+        "End your response with an explicit final line:\n"
+        "- `STATUS: ACCEPTED` (or `VERDICT: PASS`) if there are no `blocking` or `major` security findings\n"
+        "- `STATUS: REVISION_NEEDED` (or `VERDICT: FAIL`) if any `blocking` or `major` security findings exist."
     ),
 }
 
@@ -487,6 +548,91 @@ def issue_cmd(
         console.print(
             f"[bold green]✓ Issue #{issue_number}[/bold green] stage [cyan]{v.stage}[/cyan] "
             f"-> label [bold yellow]{v.target_label}[/bold yellow] ({v.summary})"
+        )
+    raise typer.Exit(code=outcome.exit_code)
+
+
+@app.command("review")
+def review_cmd(
+    description: Annotated[
+        str | None,
+        typer.Argument(
+            help="Optional description of the change (checked as a claim against the diff)."
+        ),
+    ] = None,
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", "-w", help="Target workspace directory."),
+    ] = Path("."),
+    branch: Annotated[
+        str | None,
+        typer.Option(
+            "--branch",
+            "-b",
+            help="Branch to review (defaults to currently checked-out branch in workspace).",
+        ),
+    ] = None,
+    base: Annotated[
+        str,
+        typer.Option(
+            "--base",
+            help="Base branch to compare against.",
+        ),
+    ] = "main",
+    create_pr: Annotated[
+        bool,
+        typer.Option(
+            "--create-pr/--no-create-pr",
+            help="Push branch and open/update a standalone GitHub Pull Request if review passes.",
+        ),
+    ] = False,
+    title: Annotated[
+        str | None,
+        typer.Option(
+            "--title",
+            help="Explicit Pull Request title when used with --create-pr.",
+        ),
+    ] = None,
+    config_file: Annotated[
+        Path | None,
+        typer.Option("--config", "-c", help="Path to configuration file."),
+    ] = None,
+    dry_run: Annotated[
+        bool | None,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Run the review live, save the PR/review body locally, and print manual git/gh commands.",
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Log raw ACP JSON-RPC messages."),
+    ] = False,
+) -> None:
+    """Review a working branch without a GitHub Issue and optionally open a standalone Pull Request."""
+    try:
+        outcome = asyncio.run(
+            run_branch_review(
+                workspace.resolve(),
+                description=description,
+                branch=branch,
+                base=base,
+                create_pr=create_pr,
+                pr_title=title,
+                config_file=config_file,
+                dry_run=dry_run,
+                verbose=verbose,
+            )
+        )
+    except Exception as exc:
+        console.print(f"[bold red]Branch Review Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if outcome.stage_verdict:
+        v = outcome.stage_verdict
+        color = "green" if v.status == "accepted" else "yellow"
+        console.print(
+            f"[bold {color}]Review Verdict:[/bold {color}] [cyan]{v.status}[/cyan] ({v.summary})"
         )
     raise typer.Exit(code=outcome.exit_code)
 

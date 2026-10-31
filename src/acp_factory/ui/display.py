@@ -178,17 +178,21 @@ class FactoryDisplay:
         self.console.print(Panel(grid, title=title, border_style=border, expand=False))
 
     def show_dry_run_plan(self, plan: DryRunPlan) -> None:
-        """Render the generated Issue Body preview and manual `gh` commands in --dry-run mode."""
+        """Render the generated Issue/PR Body preview and manual `gh` commands in --dry-run mode."""
         self.console.print()
         if plan.updated_factory_block:
+            panel_title = (
+                f"[bold cyan]Dry-Run Preview: Issue #{plan.issue_number} Factory Block[/bold cyan]"
+                if plan.issue_number > 0
+                else "[bold cyan]Dry-Run Preview: Standalone Branch Review[/bold cyan]"
+            )
+            saved_file = plan.issue_body_file or plan.pr_body_file
             self.console.print(
                 Panel(
                     Text(plan.updated_factory_block),
-                    title=f"[bold cyan]Dry-Run Preview: Issue #{plan.issue_number} Factory Block[/bold cyan]",
+                    title=panel_title,
                     subtitle=(
-                        f"[dim]Saved to {plan.issue_body_file}[/dim]"
-                        if plan.issue_body_file
-                        else None
+                        f"[dim]Saved to {saved_file}[/dim]" if saved_file else None
                     ),
                     border_style="cyan",
                 )

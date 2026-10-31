@@ -322,6 +322,121 @@ async def push_and_create_or_update_pr(
     return pr_url
 
 
+async def push_and_create_or_update_standalone_pr(
+    branch: str,
+    *,
+    base: str = "main",
+    pr_title: str,
+    pr_body: str,
+    cwd: Path,
+) -> str:
+    """Push `branch` to origin and open or update a standalone GitHub Pull Request (no issue required)."""
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "push",
+        "-u",
+        "origin",
+        branch,
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _stdout_b, stderr_b = await proc.communicate()
+    if proc.returncode != 0:
+        err = stderr_b.decode("utf-8", errors="replace").strip()
+        raise GitHubError(f"git push origin {branch} failed: {err}")
+
+    clean_body = f"{pr_body.strip()}\n"
+    existing_json = await run_gh(
+        [
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "number,url",
+        ],
+        cwd=cwd,
+    )
+    existing = json.loads(existing_json) if existing_json else []
+    if existing:
+        pr_num = str(existing[0]["number"])
+        pr_url = str(existing[0]["url"])
+        await run_gh(
+            ["pr", "edit", pr_num, "--title", pr_title, "--body-file", "-"],
+            cwd=cwd,
+            input_text=clean_body,
+        )
+        return pr_url
+
+    return await run_gh(
+        [
+            "pr",
+            "create",
+            "--base",
+            base,
+            "--head",
+            branch,
+            "--title",
+            pr_title,
+            "--body-file",
+            "-",
+        ],
+        cwd=cwd,
+        input_text=clean_body,
+    )
+
+
+def build_dry_run_standalone_pr_plan(
+    branch: str,
+    *,
+    base: str = "main",
+    pr_title: str,
+    pr_body: str,
+    verdict: StageVerdict,
+    workspace: Path,
+    run_dir: Path | None = None,
+    create_pr: bool = False,
+) -> DryRunPlan:
+    """Save standalone review/PR body locally and build manual `git`/`gh` commands for `--dry-run`."""
+    out_dir = run_dir or (workspace / ".factory" / "runs" / "dry-run")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cwd = Path.cwd().resolve()
+    ws_resolved = workspace.resolve()
+    outside_workspace = cwd != ws_resolved
+
+    safe_branch = branch.replace("/", "-")
+    pr_body_file = out_dir / f"pr-{safe_branch}-body.md"
+    pr_body_file.write_text(f"{pr_body.strip()}\n", encoding="utf-8")
+
+    commands: list[str] = []
+    if create_pr and verdict.publish_pr:
+        if outside_workspace:
+            commands.append(f"cd {shlex.quote(str(ws_resolved))}")
+        rel_pr_file = _rel_or_abs(pr_body_file, ws_resolved)
+        commands.append(f"git push -u origin {shlex.quote(branch)}")
+        commands.append(
+            f"gh pr create --base {shlex.quote(base)} --head {shlex.quote(branch)} "
+            f"--title {shlex.quote(pr_title)} "
+            f"--body-file {shlex.quote(str(rel_pr_file))}"
+        )
+    else:
+        rel_pr_file = _rel_or_abs(pr_body_file, cwd)
+        commands.append(f"# Review verdict: {verdict.status} (saved to {rel_pr_file})")
+
+    return DryRunPlan(
+        issue_number=0,
+        stage="review",
+        target_label=verdict.target_label,
+        updated_factory_block=verdict.updated_factory_block,
+        pr_body_file=pr_body_file,
+        commands=commands,
+    )
+
+
 def build_dry_run_gh_plan(
     task: TaskContext,
     verdict: StageVerdict,
