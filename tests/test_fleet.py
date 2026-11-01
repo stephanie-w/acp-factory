@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from acp_factory.config import FactoryConfig
 from acp_factory.github import build_repo_admission
+from acp_factory.runner.loop import FactoryRunOutcome
 from acp_factory.runner.worktree import (
     detect_default_branch,
     ensure_fleet_repo_checkout,
@@ -30,7 +31,6 @@ def test_fleet_config_parsing_and_defaults() -> None:
         {
             "fleet": {
                 "workspaces_dir": "~/.acp-factory/repos",
-                "org": "acme",
                 "repositories": {"acme/core": "~/DEV/core", "acme/api": "auto"},
                 "max_active_branches_per_repo": 2,
                 "max_review_rounds": 5,
@@ -39,7 +39,6 @@ def test_fleet_config_parsing_and_defaults() -> None:
     )
     assert cfg.fleet is not None
     assert cfg.fleet.workspaces_dir == "~/.acp-factory/repos"
-    assert cfg.fleet.org == "acme"
     assert cfg.fleet.repositories == {"acme/core": "~/DEV/core", "acme/api": "auto"}
     assert cfg.fleet.max_active_branches_per_repo == 2
     assert cfg.fleet.max_review_rounds == 5
@@ -73,7 +72,6 @@ def test_build_repo_admission_pr_ready_counts_as_contending() -> None:
         _task(2, LABEL_BUILD),
     ]
     admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=1)
-    assert admission.has_active_branch is True
     assert admission.active_branch_count == 1
     assert admission.active_branch_issues[0].issue_number == 1
 
@@ -267,3 +265,112 @@ def test_dry_run_plan_accepted_review_shows_commands() -> None:
     assert "Run these commands manually" in out
     assert "git push -u origin feat/x" in out
     assert "Review Not Accepted" not in out
+
+
+async def test_advance_fleet_repo_threads_central_config(tmp_path: Path) -> None:
+    """The fleet runner passes the central config so per-repo stages inherit governance (Finding 1)."""
+    from acp_factory.runner.loop import _advance_fleet_repo
+    from acp_factory.task import LABEL_SPEC
+    from acp_factory.ui.display import FactoryDisplay
+
+    central = FactoryConfig.model_validate(
+        {
+            "fleet": {
+                "repositories": {"acme/core": "auto"},
+                "max_review_rounds": 4,
+            },
+            "stages": {
+                "spec": {"persona": "personas/architect.md", "checks": []}
+            },
+        }
+    )
+
+    spec_task = TaskContext(
+        issue_number=1, title="x", labels=[LABEL_SPEC], url="https://github.com/acme/core/issues/1"
+    )
+
+    with (
+        patch(
+            "acp_factory.runner.loop.ensure_fleet_repo_checkout",
+            new=AsyncMock(return_value=tmp_path),
+        ),
+        patch(
+            "acp_factory.runner.loop.detect_default_branch",
+            new=AsyncMock(return_value="main"),
+        ),
+        patch(
+            "acp_factory.runner.loop.list_actionable_issues",
+            new=AsyncMock(return_value=[spec_task]),
+        ),
+        patch(
+            "acp_factory.runner.loop.run_issue_stage",
+            new=AsyncMock(
+                return_value=FactoryRunOutcome(
+                    succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
+                )
+            ),
+        ) as mock_run,
+    ):
+        result = await _advance_fleet_repo(
+            central,
+            "acme/core",
+            "auto",
+            dry_run=True,
+            verbose=False,
+            display=FactoryDisplay(),
+        )
+        assert result.error is None
+        # Central config was threaded into run_issue_stage as base_config
+        called_kwargs = mock_run.call_args.kwargs
+        assert called_kwargs["base_config"] is central
+
+
+async def test_advance_fleet_repo_pr_ready_blocks_new_build(tmp_path: Path) -> None:
+    """A pr-ready issue blocks a second build branch; the pr-ready task is never run (Finding 2)."""
+    from acp_factory.runner.loop import _advance_fleet_repo
+    from acp_factory.task import LABEL_BUILD, LABEL_PR_READY
+    from acp_factory.ui.display import FactoryDisplay
+
+    central = FactoryConfig.model_validate({"fleet": {"repositories": {"acme/core": "auto"}}})
+
+    pr_ready_task = TaskContext(
+        issue_number=1, title="awaiting merge", labels=[LABEL_PR_READY]
+    )
+    build_task = TaskContext(issue_number=2, title="next build", labels=[LABEL_BUILD])
+
+    with (
+        patch(
+            "acp_factory.runner.loop.ensure_fleet_repo_checkout",
+            new=AsyncMock(return_value=tmp_path),
+        ),
+        patch(
+            "acp_factory.runner.loop.detect_default_branch",
+            new=AsyncMock(return_value="main"),
+        ),
+        patch(
+            "acp_factory.runner.loop.list_actionable_issues",
+            new=AsyncMock(return_value=[pr_ready_task, build_task]),
+        ),
+        patch(
+            "acp_factory.runner.loop.run_issue_stage",
+            new=AsyncMock(
+                return_value=FactoryRunOutcome(
+                    succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
+                )
+            ),
+        ) as mock_run,
+    ):
+        result = await _advance_fleet_repo(
+            central,
+            "acme/core",
+            "auto",
+            dry_run=True,
+            verbose=False,
+            display=FactoryDisplay(),
+        )
+        assert result.error is None
+        # The pr-ready issue (1) is never passed to run_issue_stage; build (2) is not run either
+        # because pr-ready occupies the single active-branch slot.
+        run_numbers = [c.args[1] for c in mock_run.call_args_list]
+        assert 1 not in run_numbers
+        assert 2 not in run_numbers

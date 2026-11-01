@@ -805,7 +805,13 @@ def status_cmd(
 
             repo_cols = await collect_fleet_status(base_cfg)
             any_rows = False
-            for repo_slug, tasks in repo_cols:
+            for repo_slug, tasks, error in repo_cols:
+                if error:
+                    table.add_row(
+                        repo_slug, "-", "-", "-", f"[bold red]Error: {error}[/bold red]"
+                    )
+                    any_rows = True
+                    continue
                 if not tasks:
                     table.add_row(repo_slug, "-", "-", "-", "[dim]Idle[/dim]")
                     any_rows = True

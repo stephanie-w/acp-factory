@@ -436,11 +436,17 @@ async def run_issue_stage(
     display: FactoryDisplay | None = None,
     verbose: bool = False,
     base_ref: str | None = None,
+    base_config: FactoryConfig | None = None,
 ) -> FactoryRunOutcome:
-    """Execute the active GitHub label stage for a specific issue and transition its label."""
+    """Execute the active GitHub label stage for a specific issue and transition its label.
+
+    `base_config` (when provided) is the central/governance configuration to use
+    instead of re-discovering from `workspace`; fleet runs pass the fleet config here
+    so per-repo stages inherit central prompts/personas/skills via `resolve_repo_stage`.
+    """
     ui = display or FactoryDisplay()
     resolved_workspace = workspace.resolve()
-    base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
+    base_cfg = base_config or FactoryConfig.discover(resolved_workspace, config_file)
     effective_dry_run = base_cfg.dry_run if dry_run is None else dry_run
 
     task: TaskContext = await fetch_issue(issue_number, cwd=resolved_workspace)
@@ -545,7 +551,22 @@ async def run_issue_stage(
 
     # Use persistent issue worktree for `build` and `review` stages
     use_issue_worktree = stage in ("build", "review")
-    if stage in base_cfg.stages:
+    if base_config is not None:
+        # Fleet mode: resolve the stage from the central governance config, overlaying
+        # the target repository's own `pre`/`[checks.*]` via `resolve_repo_stage`.
+        cfg = base_config.resolve_repo_stage(
+            stage,
+            resolved_workspace,
+            workspace=resolved_workspace,
+        )
+        cfg = cfg.with_overrides(
+            task=task_context_md,
+            worktree=use_issue_worktree,
+            dry_run=effective_dry_run,
+        )
+        if stage not in cfg.stages:
+            cfg.active_stage = stage
+    elif stage in base_cfg.stages:
         cfg = base_cfg.with_overrides(
             stage=stage,
             workspace=resolved_workspace,
@@ -886,6 +907,7 @@ async def _advance_fleet_repo(
                 dry_run=dry_run,
                 display=display,
                 verbose=verbose,
+                base_config=config,
             )
             if outcome.exit_code == 0:
                 result.issues_processed += 1
@@ -910,16 +932,21 @@ async def _advance_fleet_repo(
                 dry_run=dry_run,
                 display=display,
                 verbose=verbose,
+                base_config=config,
             )
             if outcome.exit_code == 0:
                 result.issues_processed += 1
 
-        # Branch-contending stages: advance the single active issue, or the oldest queued build.
+        # Branch-contending stages: a `pr-ready` issue blocks a new build (Human Gate 2
+        # awaiting merge) and is never run; otherwise advance the single active build/review.
         branch_tasks = sorted(
             admission.active_branch_issues, key=lambda t: t.issue_number
         )
-        if branch_tasks:
-            task = branch_tasks[0]
+        runnable_tasks = [
+            t for t in branch_tasks if t.current_stage in ("build", "review")
+        ]
+        if runnable_tasks:
+            task = runnable_tasks[0]
             outcome = await run_issue_stage(
                 checkout,
                 task.issue_number,
@@ -928,6 +955,7 @@ async def _advance_fleet_repo(
                 display=display,
                 verbose=verbose,
                 base_ref=base_ref,
+                base_config=config,
             )
             if outcome.exit_code == 0:
                 result.issues_processed += 1
@@ -969,11 +997,13 @@ async def run_fleet_next(
 
 async def collect_fleet_status(
     config: FactoryConfig,
-) -> list[tuple[str, list[TaskContext]]]:
-    """Return `(repo_slug, tasks)` for each fleet repository for `status --fleet`."""
+) -> list[tuple[str, list[TaskContext], str | None]]:
+    """Return `(repo_slug, tasks, error)` for each fleet repository for `status --fleet`."""
     repos = _fleet_repos(config)
-    out: list[tuple[str, list[TaskContext]]] = []
+    out: list[tuple[str, list[TaskContext], str | None]] = []
     for repo_slug, repo_value in repos.items():
+        tasks: list[TaskContext] = []
+        error: str | None = None
         try:
             checkout = await ensure_fleet_repo_checkout(
                 repo_slug,
@@ -981,7 +1011,7 @@ async def collect_fleet_status(
                 workspaces_dir=config.fleet.workspaces_dir if config.fleet else None,
             )
             tasks = await list_all_factory_issues(checkout, repo_slug=repo_slug)
-        except Exception:
-            tasks = []
-        out.append((repo_slug, tasks))
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        out.append((repo_slug, tasks, error))
     return out

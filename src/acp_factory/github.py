@@ -10,9 +10,7 @@ from pathlib import Path
 
 from .task import (
     ALL_FACTORY_STAGE_LABELS,
-    LABEL_BUILD,
     LABEL_PR_READY,
-    LABEL_REVIEW,
     StageVerdict,
     TaskContext,
     clean_spec_block,
@@ -195,13 +193,6 @@ class RepoAdmission:
         """Count issues currently holding a branch-contending label (build/review/pr-ready)."""
         return len(self.active_branch_issues)
 
-    @property
-    def has_active_branch(self) -> bool:
-        return self.active_branch_count > 0
-
-
-_BRANCH_CONTENDING_LABELS = (LABEL_BUILD, LABEL_REVIEW, LABEL_PR_READY)
-
 
 def build_repo_admission(
     repo_slug: str,
@@ -219,7 +210,7 @@ def build_repo_admission(
     actionable: list[TaskContext] = []
     for task in tasks:
         stage = task.current_stage
-        if stage in ("build", "review") or LABEL_PR_READY in task.labels:
+        if _is_branch_contending(task):
             if len(active) < max_active_branches_per_repo:
                 active.append(task)
         if stage is not None:
@@ -228,6 +219,13 @@ def build_repo_admission(
         repo_slug=repo_slug,
         active_branch_issues=active,
         actionable_issues=actionable,
+    )
+
+
+def _is_branch_contending(task: TaskContext) -> bool:
+    """Return True when a task holds a branch/PR-contending stage or label."""
+    return task.current_stage in ("build", "review", "pr-ready") or (
+        LABEL_PR_READY in task.labels
     )
 
 

@@ -82,7 +82,6 @@ Add a `[fleet]` section to `.factory/config.toml` to run the same 5-stage workfl
 ```toml
 [fleet]
 workspaces_dir = "~/.acp-factory/repos"
-# org = "acme"   # optional: auto-discover active repos
 
 [fleet.repositories]
 "acme/core-lib" = "~/DEV/core-lib"   # existing local checkout

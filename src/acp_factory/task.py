@@ -39,6 +39,7 @@ ACTIONABLE_LABEL_TO_STAGE: dict[str, str] = {
     LABEL_SPEC: "spec",
     LABEL_BUILD: "build",
     LABEL_REVIEW: "review",
+    LABEL_PR_READY: "pr-ready",
     LABEL_DONE: "done",
 }
 

@@ -195,10 +195,6 @@ class FleetConfig(BaseModel):
         default=None,
         description="Directory where 'auto' repositories are cloned (owner__repo). Defaults to ~/.acp-factory/repos when unset.",
     )
-    org: str = Field(
-        default="",
-        description="Optional GitHub organization whose active repositories are auto-discovered.",
-    )
     repositories: dict[str, str] = Field(
         default_factory=dict,
         description="Map of 'owner/repo' to a local checkout path or 'auto' (clone on demand).",
