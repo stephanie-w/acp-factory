@@ -49,6 +49,7 @@ from .worktree import (
     ensure_fleet_repo_checkout,
     get_head_sha,
     is_worktree_clean,
+    resolve_fleet_repo_path,
 )
 
 
@@ -437,6 +438,7 @@ async def run_issue_stage(
     verbose: bool = False,
     base_ref: str | None = None,
     base_config: FactoryConfig | None = None,
+    repo_slug: str | None = None,
 ) -> FactoryRunOutcome:
     """Execute the active GitHub label stage for a specific issue and transition its label.
 
@@ -449,7 +451,9 @@ async def run_issue_stage(
     base_cfg = base_config or FactoryConfig.discover(resolved_workspace, config_file)
     effective_dry_run = base_cfg.dry_run if dry_run is None else dry_run
 
-    task: TaskContext = await fetch_issue(issue_number, cwd=resolved_workspace)
+    task: TaskContext = await fetch_issue(
+        issue_number, cwd=resolved_workspace, repo_slug=repo_slug
+    )
     stage = stage_override or task.current_stage
     if not stage:
         raise ValueError(
@@ -485,7 +489,9 @@ async def run_issue_stage(
             )
 
         await WorktreeManager.remove_issue_worktree(resolved_workspace, issue_number)
-        await transition_issue_label(task, LABEL_COMPLETED, cwd=resolved_workspace)
+        await transition_issue_label(
+            task, LABEL_COMPLETED, cwd=resolved_workspace, repo_slug=repo_slug
+        )
         duration = max(0.0, time.monotonic() - start_time)
         ui.show_final_summary(
             succeeded=True,
@@ -525,7 +531,9 @@ async def run_issue_stage(
                         total_duration_seconds=0.0,
                         failure_reason=failure_reason,
                     )
-                await transition_issue_label(task, LABEL_BUILD, cwd=resolved_workspace)
+                await transition_issue_label(
+                    task, LABEL_BUILD, cwd=resolved_workspace, repo_slug=repo_slug
+                )
                 return FactoryRunOutcome(
                     succeeded=False,
                     exit_code=1,
@@ -613,7 +621,7 @@ async def run_issue_stage(
             ui.show_dry_run_plan(plan)
         else:
             await transition_issue_label(
-                task, LABEL_NEEDS_HUMAN, cwd=resolved_workspace
+                task, LABEL_NEEDS_HUMAN, cwd=resolved_workspace, repo_slug=repo_slug
             )
         return outcome
 
@@ -668,6 +676,7 @@ async def run_issue_stage(
             task,
             verdict.updated_factory_block,
             cwd=resolved_workspace,
+            repo_slug=repo_slug,
         )
 
     if verdict.publish_pr:
@@ -676,9 +685,13 @@ async def run_issue_stage(
         )
         pr_cwd = wt_cwd if wt_cwd.exists() else resolved_workspace
         pr_body = build_issue_pr_body(task, verdict, reviewed_sha=pre_review_sha)
-        await push_and_create_or_update_pr(task, pr_body=pr_body, cwd=pr_cwd)
+        await push_and_create_or_update_pr(
+            task, pr_body=pr_body, cwd=pr_cwd, repo_slug=repo_slug
+        )
 
-    await transition_issue_label(task, verdict.target_label, cwd=resolved_workspace)
+    await transition_issue_label(
+        task, verdict.target_label, cwd=resolved_workspace, repo_slug=repo_slug
+    )
     return outcome
 
 
@@ -908,6 +921,7 @@ async def _advance_fleet_repo(
                 display=display,
                 verbose=verbose,
                 base_config=config,
+                repo_slug=repo_slug,
             )
             if outcome.exit_code == 0:
                 result.issues_processed += 1
@@ -935,6 +949,7 @@ async def _advance_fleet_repo(
                 display=display,
                 verbose=verbose,
                 base_config=config,
+                repo_slug=repo_slug,
             )
             if outcome.exit_code == 0:
                 result.issues_processed += 1
@@ -950,11 +965,9 @@ async def _advance_fleet_repo(
         if runnable_tasks:
             task = runnable_tasks[0]
             # Branch new build worktrees from a fresh `origin/<default>` baseline
-            # only when actually creating a worktree (not needed for done/triage/spec).
-            try:
-                base_ref = f"origin/{await detect_default_branch(checkout)}"
-            except Exception:
-                base_ref = None
+            # only when actually creating a worktree. A failure here propagates to
+            # `result.error` (never silently falls back to a stale local HEAD).
+            base_ref = f"origin/{await detect_default_branch(checkout)}"
             outcome = await run_issue_stage(
                 checkout,
                 task.issue_number,
@@ -964,6 +977,7 @@ async def _advance_fleet_repo(
                 verbose=verbose,
                 base_ref=base_ref,
                 base_config=config,
+                repo_slug=repo_slug,
             )
             if outcome.exit_code == 0:
                 result.issues_processed += 1
@@ -984,9 +998,7 @@ async def run_fleet_next(
     ui = display or FactoryDisplay()
     repos = _fleet_repos(config)
     if not repos:
-        raise ValueError(
-            "Fleet mode requires [fleet.repositories] to map 'owner/repo' to a local path or 'auto'."
-        )
+        return []
 
     results: list[FleetRepoResult] = []
     for repo_slug, repo_value in repos.items():
@@ -1006,19 +1018,24 @@ async def run_fleet_next(
 async def collect_fleet_status(
     config: FactoryConfig,
 ) -> list[tuple[str, list[TaskContext], str | None]]:
-    """Return `(repo_slug, tasks, error)` for each fleet repository for `status --fleet`."""
+    """Return `(repo_slug, tasks, error)` for each fleet repository for `status --fleet`.
+
+    Lists issues via `gh --repo` without cloning/fetching; only scans `.worktrees/` when
+    a local checkout already exists (read-only command).
+    """
     repos = _fleet_repos(config)
     out: list[tuple[str, list[TaskContext], str | None]] = []
     for repo_slug, repo_value in repos.items():
         tasks: list[TaskContext] = []
         error: str | None = None
         try:
-            checkout = await ensure_fleet_repo_checkout(
+            checkout = resolve_fleet_repo_path(
                 repo_slug,
                 repository_map_value=repo_value,
                 workspaces_dir=config.fleet.workspaces_dir if config.fleet else None,
             )
-            tasks = await list_all_factory_issues(checkout, repo_slug=repo_slug)
+            cwd = checkout if checkout.is_dir() else Path.cwd()
+            tasks = await list_all_factory_issues(cwd, repo_slug=repo_slug)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         out.append((repo_slug, tasks, error))

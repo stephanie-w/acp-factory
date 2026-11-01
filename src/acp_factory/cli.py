@@ -691,6 +691,11 @@ def next_cmd(
                 dry_run=dry_run,
                 verbose=verbose,
             )
+            if not results:
+                console.print(
+                    "[dim]No fleet repositories configured ([fleet.repositories] is empty).[/dim]"
+                )
+                return 0
             exit_code = 0
             for res in results:
                 if res.error:

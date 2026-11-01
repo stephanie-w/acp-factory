@@ -53,21 +53,50 @@ async def is_worktree_clean(cwd: Path) -> bool:
 
 
 async def detect_default_branch(repo: Path) -> str:
-    """Return the repository's default branch by following `refs/remotes/origin/HEAD`."""
-    rc, ref, err = await _run_git(
+    """Return the repository's default branch.
+
+    Prefers `refs/remotes/origin/HEAD`; falls back to `git ls-remote --symref origin HEAD`
+    (works for shallow/partial clones where the symbolic ref is absent).
+    """
+    rc, ref, _err = await _run_git(
         repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"
     )
-    if rc != 0 or not ref:
+    if rc == 0 and ref:
+        return ref.split("/", 1)[1] if "/" in ref else ref
+
+    rc2, out, err2 = await _run_git(repo, "ls-remote", "--symref", "origin", "HEAD")
+    if rc2 != 0 or not out:
         raise WorktreeError(
-            f"Cannot detect default branch in {repo}: {err or 'no origin/HEAD'}"
+            f"Cannot detect default branch in {repo}: {err2 or 'no origin/HEAD'}"
         )
-    # ref looks like `origin/main`; strip the `origin/` prefix.
-    return ref.split("/", 1)[1] if "/" in ref else ref
+    # `git ls-remote --symref origin HEAD` prints e.g.
+    #   ref: refs/heads/main\tHEAD
+    for line in out.splitlines():
+        if line.startswith("ref: refs/heads/"):
+            return line.split("refs/heads/", 1)[1].split("\t", 1)[0].strip()
+    raise WorktreeError(f"Cannot parse default branch from ls-remote in {repo}: {out}")
 
 
 def _expand_path(raw: str) -> Path:
     """Expand a user path (leading `~`) into an absolute `Path`."""
     return Path(raw).expanduser() if raw.startswith("~") else Path(raw)
+
+
+def resolve_fleet_repo_path(
+    repo_slug: str,
+    *,
+    repository_map_value: str,
+    workspaces_dir: str | None = None,
+) -> Path:
+    """Resolve a fleet repository to its local checkout path without cloning/fetching."""
+    if not _REPO_SLUG_RE.match(repo_slug):
+        raise WorktreeError(
+            f"Invalid fleet repository slug '{repo_slug}'. Expected 'owner/repo'."
+        )
+    if repository_map_value != "auto":
+        return _expand_path(repository_map_value).resolve()
+    ws_dir = _expand_path(workspaces_dir or DEFAULT_WORKSPACES_DIR)
+    return (ws_dir / repo_slug.replace("/", "__")).resolve()
 
 
 async def ensure_fleet_repo_checkout(
@@ -83,21 +112,16 @@ async def ensure_fleet_repo_checkout(
     - After resolving/creating the checkout, `git fetch --prune origin` guarantees a
       fresh baseline so new issue worktrees never branch from a stale local HEAD.
     """
-    if not _REPO_SLUG_RE.match(repo_slug):
-        raise WorktreeError(
-            f"Invalid fleet repository slug '{repo_slug}'. Expected 'owner/repo'."
-        )
+    checkout = resolve_fleet_repo_path(
+        repo_slug,
+        repository_map_value=repository_map_value,
+        workspaces_dir=workspaces_dir,
+    )
 
-    if repository_map_value != "auto":
-        checkout = _expand_path(repository_map_value)
-        if not checkout.exists():
-            raise WorktreeError(
-                f"Fleet repository '{repo_slug}' maps to missing path '{checkout}'"
-            )
-        checkout = checkout.resolve()
-    else:
-        ws_dir = _expand_path(workspaces_dir or DEFAULT_WORKSPACES_DIR)
-        checkout = (ws_dir / repo_slug.replace("/", "__")).resolve()
+    if repository_map_value != "auto" and not checkout.exists():
+        raise WorktreeError(
+            f"Fleet repository '{repo_slug}' maps to missing path '{checkout}'"
+        )
 
     if not (checkout / ".git").exists():
         if repository_map_value != "auto":

@@ -522,3 +522,57 @@ async def test_list_actionable_issues_retains_pr_ready_for_admission(
         pr_ready_task = next(t for t in fleet if t.issue_number == 1)
         assert pr_ready_task.current_stage is None
         assert LABEL_PR_READY in pr_ready_task.labels
+
+
+async def test_detect_default_branch_falls_back_to_ls_remote(tmp_path: Path) -> None:
+    """detect_default_branch falls back to ls-remote when origin/HEAD is absent (Finding 1)."""
+
+    async def fake_git(cwd: Path, *args: str) -> tuple[int, str, str]:
+        if args[:2] == ("symbolic-ref",):
+            return (1, "", "ref not found")
+        if args[0] == "ls-remote":
+            return (0, "ref: refs/heads/main\tHEAD\nabcdef\tHEAD", "")
+        return (0, "", "")
+
+    with patch(
+        "acp_factory.runner.worktree._run_git", new=AsyncMock(side_effect=fake_git)
+    ):
+        assert await detect_default_branch(tmp_path) == "main"
+
+
+async def test_run_fleet_next_empty_repositories_returns_empty() -> None:
+    """run_fleet_next returns [] instead of raising when [fleet.repositories] is empty (Finding 3)."""
+    from acp_factory.runner.loop import run_fleet_next
+
+    cfg = FactoryConfig.model_validate({"fleet": {"workspaces_dir": "/tmp/x"}})
+    result = await run_fleet_next(cfg)
+    assert result == []
+
+
+async def test_collect_fleet_status_does_not_clone(tmp_path: Path) -> None:
+    """status --fleet does not clone/fetch; it lists via gh --repo without a checkout (Finding 2)."""
+
+    from acp_factory.runner.loop import collect_fleet_status
+
+    cfg = FactoryConfig.model_validate(
+        {
+            "fleet": {
+                "repositories": {"acme/core": "auto"},
+                "workspaces_dir": str(tmp_path),
+            }
+        }
+    )
+    with (
+        patch(
+            "acp_factory.runner.loop.list_all_factory_issues",
+            new=AsyncMock(return_value=[]),
+        ) as mock_list,
+        patch(
+            "acp_factory.runner.worktree.ensure_fleet_repo_checkout",
+            new=AsyncMock(),
+        ) as mock_ensure,
+    ):
+        result = await collect_fleet_status(cfg)
+        assert result == [("acme/core", [], None)]
+        mock_list.assert_awaited_once()
+        mock_ensure.assert_not_awaited()

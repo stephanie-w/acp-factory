@@ -64,18 +64,20 @@ async def run_gh(
     return stdout
 
 
-async def fetch_issue(issue_number: int, cwd: Path) -> TaskContext:
+async def fetch_issue(
+    issue_number: int, cwd: Path, *, repo_slug: str | None = None
+) -> TaskContext:
     """Fetch a single GitHub Issue and parse its body, factory block, labels, and human comments."""
-    out = await run_gh(
-        [
-            "issue",
-            "view",
-            str(issue_number),
-            "--json",
-            "number,title,state,body,labels,comments,url",
-        ],
-        cwd=cwd,
-    )
+    cmd = [
+        "issue",
+        "view",
+        str(issue_number),
+        "--json",
+        "number,title,state,body,labels,comments,url",
+    ]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+    out = await run_gh(cmd, cwd=cwd)
     data = json.loads(out)
     return TaskContext.from_gh_json(data)
 
@@ -244,17 +246,18 @@ async def update_issue_factory_block(
     task: TaskContext,
     new_factory_block: str,
     cwd: Path,
+    *,
+    repo_slug: str | None = None,
 ) -> str:
     """Update the `<!-- factory:start --> ... <!-- factory:end -->` block in-place on the GitHub Issue.
 
     Never posts comments on the issue thread; updates the Issue Body via stdin (`--body-file -`).
     """
     full_body = render_issue_body(task.original_body, new_factory_block)
-    await run_gh(
-        ["issue", "edit", str(task.issue_number), "--body-file", "-"],
-        cwd=cwd,
-        input_text=full_body,
-    )
+    cmd = ["issue", "edit", str(task.issue_number), "--body-file", "-"]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+    await run_gh(cmd, cwd=cwd, input_text=full_body)
     task.factory_block = new_factory_block.strip()
     return full_body
 
@@ -283,22 +286,26 @@ def _extract_repo_slug(url: str) -> str | None:
     return None
 
 
-async def ensure_label_exists(label: str, cwd: Path) -> None:
+async def ensure_label_exists(
+    label: str, cwd: Path, *, repo_slug: str | None = None
+) -> None:
     """Ensure a `factory:*` label exists in the GitHub repository."""
     color = LABEL_COLOR_MAP.get(label, "EDEDED")
-    await run_gh(
-        ["label", "create", label, "--color", color, "--force"],
-        cwd=cwd,
-    )
+    cmd = ["label", "create", label, "--color", color, "--force"]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+    await run_gh(cmd, cwd=cwd)
 
 
 async def transition_issue_label(
     task: TaskContext,
     target_label: str,
     cwd: Path,
+    *,
+    repo_slug: str | None = None,
 ) -> list[str]:
     """Deterministically replace existing `factory:*` stage labels on the issue with `target_label`."""
-    await ensure_label_exists(target_label, cwd=cwd)
+    await ensure_label_exists(target_label, cwd=cwd, repo_slug=repo_slug)
 
     labels_to_remove = [
         lbl
@@ -307,14 +314,16 @@ async def transition_issue_label(
     ]
     if labels_to_remove:
         rm_cmd = ["issue", "edit", str(task.issue_number)]
+        if repo_slug:
+            rm_cmd.extend(["--repo", repo_slug])
         for rem in labels_to_remove:
             rm_cmd.extend(["--remove-label", rem])
         await run_gh(rm_cmd, cwd=cwd)
 
-    await run_gh(
-        ["issue", "edit", str(task.issue_number), "--add-label", target_label],
-        cwd=cwd,
-    )
+    add_cmd = ["issue", "edit", str(task.issue_number), "--add-label", target_label]
+    if repo_slug:
+        add_cmd.extend(["--repo", repo_slug])
+    await run_gh(add_cmd, cwd=cwd)
 
     updated_labels = [lbl for lbl in task.labels if lbl not in labels_to_remove]
     if target_label not in updated_labels:
@@ -328,6 +337,7 @@ async def push_and_create_or_update_pr(
     *,
     pr_body: str,
     cwd: Path,
+    repo_slug: str | None = None,
 ) -> str:
     """Push `task.branch` to origin and open or update a GitHub Pull Request (without ever merging)."""
     proc = await asyncio.create_subprocess_exec(
@@ -358,6 +368,7 @@ async def push_and_create_or_update_pr(
             "open",
             "--json",
             "number,url",
+            *(["--repo", repo_slug] if repo_slug else []),
         ],
         cwd=cwd,
     )
@@ -366,7 +377,16 @@ async def push_and_create_or_update_pr(
         pr_num = str(existing[0]["number"])
         pr_url = str(existing[0]["url"])
         await run_gh(
-            ["pr", "edit", pr_num, "--title", pr_title, "--body-file", "-"],
+            [
+                "pr",
+                "edit",
+                pr_num,
+                "--title",
+                pr_title,
+                "--body-file",
+                "-",
+                *(["--repo", repo_slug] if repo_slug else []),
+            ],
             cwd=cwd,
             input_text=full_pr_body,
         )
@@ -383,6 +403,7 @@ async def push_and_create_or_update_pr(
             pr_title,
             "--body-file",
             "-",
+            *(["--repo", repo_slug] if repo_slug else []),
         ],
         cwd=cwd,
         input_text=full_pr_body,
