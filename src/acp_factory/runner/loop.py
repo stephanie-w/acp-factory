@@ -961,10 +961,12 @@ async def _advance_fleet_repo(
         runnable_tasks = [] if admission.has_pr_ready else admission.build_review_issues
         if runnable_tasks:
             task = runnable_tasks[0]
-            # Branch new build worktrees from a fresh `origin/<default>` baseline
-            # only when actually creating a worktree. A failure here propagates to
-            # `result.error` (never silently falls back to a stale local HEAD).
-            base_ref = f"origin/{await detect_default_branch(checkout)}"
+            # Branch new build worktrees from a fresh `origin/<default>` baseline only
+            # when actually creating a worktree. Review reuses the existing worktree
+            # (base_ref ignored), so skip detection there to avoid a wasted/aborting call.
+            base_ref = None
+            if task.current_stage == "build":
+                base_ref = f"origin/{await detect_default_branch(checkout)}"
             outcome = await run_issue_stage(
                 checkout,
                 task.issue_number,

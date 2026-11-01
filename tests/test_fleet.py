@@ -66,7 +66,6 @@ def test_build_repo_admission_single_active_branch() -> None:
     admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=1)
     # Only one build/review issue is admitted (cap applied); no pr-ready
     assert admission.has_pr_ready is False
-    assert admission.active_branch_count == 1
     assert [t.issue_number for t in admission.build_review_issues] == [1]
     # Read-only spec issue is still actionable (not branch-contending)
     assert [t.issue_number for t in admission.actionable_issues] == [1, 2, 3]
@@ -89,7 +88,6 @@ def test_build_repo_admission_no_contending_issues() -> None:
     # review is branch-contending; spec is not
     admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=2)
     assert admission.has_pr_ready is False
-    assert admission.active_branch_count == 1
     assert [t.issue_number for t in admission.build_review_issues] == [2]
 
 
@@ -645,3 +643,75 @@ async def test_collect_fleet_status_missing_checkout_uses_valid_cwd(
     assert call.args[0].exists()
     assert call.kwargs["repo_slug"] == "acme/core"
     assert call.kwargs["scan_worktrees"] is False
+
+
+async def test_run_issue_stage_consumes_base_config_overlay(tmp_path: Path) -> None:
+    """run_issue_stage resolves fleet base_config via resolve_repo_stage (Finding 1)."""
+    from acp_factory.runner.loop import FactoryRunOutcome, run_issue_stage
+
+    repo = tmp_path / "core"
+    (repo / ".factory").mkdir(parents=True)
+    (repo / ".factory" / "config.toml").write_text(
+        'version = "1"\n'
+        "[stages.spec]\n"
+        'pre = ["uv sync"]\n'
+        'checks = ["lint"]\n'
+        "[checks.lint]\n"
+        'command = "uv run ruff check ."\n',
+        encoding="utf-8",
+    )
+
+    central = FactoryConfig.model_validate(
+        {
+            "fleet": {"repositories": {"acme/core": str(repo)}},
+            "stages": {
+                "spec": {
+                    "persona": "personas/architect.md",
+                    "checks": ["test"],
+                }
+            },
+            "named_checks": {"test": {"name": "test", "command": "pytest"}},
+        }
+    )
+
+    spec_task = TaskContext(
+        issue_number=1,
+        title="x",
+        labels=[LABEL_SPEC],
+        url="https://github.com/acme/core/issues/1",
+    )
+
+    with (
+        patch(
+            "acp_factory.runner.loop.fetch_issue",
+            new=AsyncMock(return_value=spec_task),
+        ),
+        patch(
+            "acp_factory.runner.loop.run_factory",
+            new=AsyncMock(
+                return_value=FactoryRunOutcome(
+                    succeeded=True,
+                    exit_code=0,
+                    attempts_used=1,
+                    total_duration_seconds=0.0,
+                    last_response_text="",
+                    run_dir=tmp_path / "runs",
+                )
+            ),
+        ) as mock_run_factory,
+    ):
+        outcome = await run_issue_stage(
+            repo,
+            1,
+            base_config=central,
+            repo_slug="acme/core",
+            dry_run=True,
+        )
+        assert outcome.succeeded
+
+    resolved = mock_run_factory.call_args.args[0]
+    # Central persona is inherited; repo pre + checks overlay the central stage.
+    assert resolved.agent.persona == "personas/architect.md"
+    assert resolved.setup == ["uv sync"]
+    assert [c.name for c in resolved.checks] == ["lint"]
+    assert resolved.checks[0].cmd == "uv run ruff check ."

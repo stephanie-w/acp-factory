@@ -407,7 +407,8 @@ class FactoryConfig(BaseModel):
         task: str | None = None,
     ) -> FactoryConfig:
         """Resolve a stage for a fleet target repository, overlaying that repo's own
-        `.factory/config.toml` (if present) onto the central stage configuration.
+        discovered config file (`.factory/config.toml`, `factory.yaml`, etc.) onto the
+        central stage configuration.
 
         Central governance (personas, prompts, skills, agent) is inherited from this
         fleet config; a target repository's `pre` setup commands and `[checks.*]`
@@ -431,14 +432,7 @@ class FactoryConfig(BaseModel):
             resolved.agent.read_only = stage_name in ("triage", "spec", "review")
             resolved.active_stage = stage_name
 
-        repo_cfg_path = repo_checkout / ".factory" / "config.toml"
-        if not repo_cfg_path.is_file():
-            repo_yaml = repo_checkout / ".factory" / "config.yaml"
-            repo_cfg_path = repo_yaml if repo_yaml.is_file() else repo_cfg_path
-        if not repo_cfg_path.exists():
-            return resolved
-
-        repo_cfg = FactoryConfig.from_file(repo_cfg_path)
+        repo_cfg = FactoryConfig.discover(repo_checkout)
         repo_stage = repo_cfg.stages.get(stage_name)
         if repo_stage is None:
             return resolved

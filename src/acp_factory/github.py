@@ -217,11 +217,6 @@ class RepoAdmission:
         """True when any issue is awaiting Human Gate 2 (blocks new build/review)."""
         return bool(self.pr_ready_issues)
 
-    @property
-    def active_branch_count(self) -> int:
-        """Count of all branch/PR-contending issues (pr-ready + build + review)."""
-        return len(self.pr_ready_issues) + len(self.build_review_issues)
-
 
 def build_repo_admission(
     repo_slug: str,
