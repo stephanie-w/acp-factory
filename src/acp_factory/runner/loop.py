@@ -17,7 +17,10 @@ from ..github import (
     build_dry_run_gh_plan,
     build_dry_run_standalone_pr_plan,
     build_issue_pr_body,
+    build_repo_admission,
     fetch_issue,
+    list_actionable_issues,
+    list_all_factory_issues,
     push_and_create_or_update_pr,
     push_and_create_or_update_standalone_pr,
     transition_issue_label,
@@ -40,7 +43,13 @@ from ..task import (
 )
 from ..ui.display import FactoryDisplay
 from .checks import CheckResult, run_checks_sequential, run_shell_command
-from .worktree import WorktreeManager, get_head_sha, is_worktree_clean
+from .worktree import (
+    WorktreeManager,
+    detect_default_branch,
+    ensure_fleet_repo_checkout,
+    get_head_sha,
+    is_worktree_clean,
+)
 
 
 @dataclass
@@ -226,6 +235,7 @@ async def run_factory(
     display: FactoryDisplay | None = None,
     verbose: bool = False,
     export_transcript: Path | None = None,
+    base_ref: str | None = None,
 ) -> FactoryRunOutcome:
     """Execute the full acp-factory workflow asynchronously."""
     ui = display or FactoryDisplay()
@@ -254,7 +264,7 @@ async def run_factory(
     turn_transcripts: list[str] = []
     preserved_wt: Path | None = None
 
-    active_cwd = await wt_manager.create()
+    active_cwd = await wt_manager.create(base_ref=base_ref)
     ui.show_run_header(config, active_cwd, worktree_branch=wt_manager.branch_name)
 
     try:
@@ -425,6 +435,7 @@ async def run_issue_stage(
     dry_run: bool | None = None,
     display: FactoryDisplay | None = None,
     verbose: bool = False,
+    base_ref: str | None = None,
 ) -> FactoryRunOutcome:
     """Execute the active GitHub label stage for a specific issue and transition its label."""
     ui = display or FactoryDisplay()
@@ -558,6 +569,7 @@ async def run_issue_stage(
         issue_number=issue_number if use_issue_worktree else None,
         display=ui,
         verbose=verbose,
+        base_ref=base_ref if use_issue_worktree else None,
     )
 
     if not outcome.succeeded:
@@ -588,6 +600,7 @@ async def run_issue_stage(
         outcome.last_response_text,
         current_factory_block=task.factory_block,
         reviewed_sha=pre_review_sha,
+        max_review_rounds=base_cfg.effective_max_review_rounds,
     )
     outcome.stage_verdict = verdict
 
@@ -814,3 +827,161 @@ async def run_branch_review(
         verdict.summary = f"{verdict.summary} (PR: {pr_url})"
 
     return outcome
+
+
+@dataclass
+class FleetRepoResult:
+    """Outcome of a single repository's fleet pass (isolation boundary)."""
+
+    repo_slug: str
+    checkout: Path | None = None
+    issues_processed: int = 0
+    error: str | None = None
+
+
+def _fleet_repos(config: FactoryConfig) -> dict[str, str]:
+    """Return the `owner/repo -> value` map from fleet config, or empty if unconfigured."""
+    if config.fleet is None:
+        return {}
+    return dict(config.fleet.repositories)
+
+
+async def _advance_fleet_repo(
+    config: FactoryConfig,
+    repo_slug: str,
+    repo_value: str,
+    *,
+    dry_run: bool | None,
+    verbose: bool,
+    display: FactoryDisplay,
+) -> FleetRepoResult:
+    """Advance one repository: `done` cleanup first, then read-only stage prep, then one build/review step."""
+    result = FleetRepoResult(repo_slug=repo_slug)
+    fleet = config.fleet
+    ws_dir = fleet.workspaces_dir if fleet else None
+    max_branches = fleet.max_active_branches_per_repo if fleet else 1
+
+    try:
+        checkout = await ensure_fleet_repo_checkout(
+            repo_slug,
+            repository_map_value=repo_value,
+            workspaces_dir=ws_dir,
+        )
+        result.checkout = checkout
+
+        # Branch new build worktrees from a fresh `origin/<default>` baseline.
+        base_ref = f"origin/{await detect_default_branch(checkout)}"
+
+        # `done` cleanup first (unblocks the branch slot immediately).
+        done_tasks = [
+            t
+            for t in await list_actionable_issues(checkout, repo_slug=repo_slug)
+            if t.current_stage == "done"
+        ]
+        for task in done_tasks:
+            outcome = await run_issue_stage(
+                checkout,
+                task.issue_number,
+                config_file=None,
+                dry_run=dry_run,
+                display=display,
+                verbose=verbose,
+            )
+            if outcome.exit_code == 0:
+                result.issues_processed += 1
+
+        # Re-fetch actionable state after cleanup.
+        tasks = await list_actionable_issues(checkout, repo_slug=repo_slug)
+        admission = build_repo_admission(
+            repo_slug, tasks, max_active_branches_per_repo=max_branches
+        )
+
+        # Read-only stages (triage/spec) can always advance up to Gate 1.
+        prep = [
+            t
+            for t in admission.actionable_issues
+            if t.current_stage in ("triage", "spec")
+        ]
+        for task in prep:
+            outcome = await run_issue_stage(
+                checkout,
+                task.issue_number,
+                config_file=None,
+                dry_run=dry_run,
+                display=display,
+                verbose=verbose,
+            )
+            if outcome.exit_code == 0:
+                result.issues_processed += 1
+
+        # Branch-contending stages: advance the single active issue, or the oldest queued build.
+        branch_tasks = sorted(
+            admission.active_branch_issues, key=lambda t: t.issue_number
+        )
+        if branch_tasks:
+            task = branch_tasks[0]
+            outcome = await run_issue_stage(
+                checkout,
+                task.issue_number,
+                config_file=None,
+                dry_run=dry_run,
+                display=display,
+                verbose=verbose,
+                base_ref=base_ref,
+            )
+            if outcome.exit_code == 0:
+                result.issues_processed += 1
+    except Exception as exc:
+        result.error = f"{type(exc).__name__}: {exc}"
+
+    return result
+
+
+async def run_fleet_next(
+    config: FactoryConfig,
+    *,
+    dry_run: bool | None = None,
+    verbose: bool = False,
+    display: FactoryDisplay | None = None,
+) -> list[FleetRepoResult]:
+    """Run one fleet pass across all configured repositories with per-repo error isolation."""
+    ui = display or FactoryDisplay()
+    repos = _fleet_repos(config)
+    if not repos:
+        raise ValueError(
+            "Fleet mode requires [fleet.repositories] to map 'owner/repo' to a local path or 'auto'."
+        )
+
+    results: list[FleetRepoResult] = []
+    for repo_slug, repo_value in repos.items():
+        ui.show_phase_banner(f"Fleet: {repo_slug}", style="blue")
+        result = await _advance_fleet_repo(
+            config,
+            repo_slug,
+            repo_value,
+            dry_run=dry_run,
+            verbose=verbose,
+            display=ui,
+        )
+        results.append(result)
+    return results
+
+
+async def collect_fleet_status(
+    config: FactoryConfig,
+) -> list[tuple[str, list[TaskContext]]]:
+    """Return `(repo_slug, tasks)` for each fleet repository for `status --fleet`."""
+    repos = _fleet_repos(config)
+    out: list[tuple[str, list[TaskContext]]] = []
+    for repo_slug, repo_value in repos.items():
+        try:
+            checkout = await ensure_fleet_repo_checkout(
+                repo_slug,
+                repository_map_value=repo_value,
+                workspaces_dir=config.fleet.workspaces_dir if config.fleet else None,
+            )
+            tasks = await list_all_factory_issues(checkout, repo_slug=repo_slug)
+        except Exception:
+            tasks = []
+        out.append((repo_slug, tasks))
+    return out

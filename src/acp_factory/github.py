@@ -10,6 +10,9 @@ from pathlib import Path
 
 from .task import (
     ALL_FACTORY_STAGE_LABELS,
+    LABEL_BUILD,
+    LABEL_PR_READY,
+    LABEL_REVIEW,
     StageVerdict,
     TaskContext,
     clean_spec_block,
@@ -82,6 +85,7 @@ async def list_actionable_issues(
     *,
     stage_label: str | None = None,
     limit: int = 50,
+    repo_slug: str | None = None,
 ) -> list[TaskContext]:
     """List GitHub Issues that have an actionable `factory:*` stage (including closed issues with leftover worktrees)."""
     cmd = [
@@ -94,6 +98,8 @@ async def list_actionable_issues(
         "--json",
         "number,title,state,body,labels,comments,url",
     ]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
     if stage_label:
         cmd.extend(["--label", stage_label])
 
@@ -129,21 +135,23 @@ async def list_actionable_issues(
     return tasks
 
 
-async def list_all_factory_issues(cwd: Path, *, limit: int = 50) -> list[TaskContext]:
+async def list_all_factory_issues(
+    cwd: Path, *, limit: int = 50, repo_slug: str | None = None
+) -> list[TaskContext]:
     """Return open GitHub Issues carrying any `factory:*` label plus any closed issues that still have a local worktree."""
-    out = await run_gh(
-        [
-            "issue",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            str(limit),
-            "--json",
-            "number,title,state,body,labels,comments,url",
-        ],
-        cwd=cwd,
-    )
+    cmd = [
+        "issue",
+        "list",
+        "--state",
+        "open",
+        "--limit",
+        str(limit),
+        "--json",
+        "number,title,state,body,labels,comments,url",
+    ]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+    out = await run_gh(cmd, cwd=cwd)
     items = json.loads(out) if out else []
     tasks: list[TaskContext] = []
     seen_numbers: set[int] = set()
@@ -170,6 +178,55 @@ async def list_all_factory_issues(cwd: Path, *, limit: int = 50) -> list[TaskCon
 
     tasks.sort(key=lambda t: t.issue_number)
     return tasks
+
+
+@dataclass
+class RepoAdmission:
+    """Stage-aware per-repo admission decision for the fleet runner."""
+
+    repo_slug: str
+    active_branch_issues: list[TaskContext] = field(default_factory=list)
+    actionable_issues: list[TaskContext] = field(default_factory=list)
+
+    @property
+    def active_branch_count(self) -> int:
+        """Count issues currently holding a branch-contending label (build/review/pr-ready)."""
+        return len(self.active_branch_issues)
+
+    @property
+    def has_active_branch(self) -> bool:
+        return self.active_branch_count > 0
+
+
+_BRANCH_CONTENDING_LABELS = (LABEL_BUILD, LABEL_REVIEW, LABEL_PR_READY)
+
+
+def build_repo_admission(
+    repo_slug: str,
+    tasks: list[TaskContext],
+    *,
+    max_active_branches_per_repo: int = 1,
+) -> RepoAdmission:
+    """Classify a repository's issues for stage-aware admission control.
+
+    Branch-contending stages (`build`, `review`, `pr-ready`) are mutually exclusive per
+    repo: while one is in flight, the fleet runner must not start a second build branch
+    (prevents merge-conflict cascades).
+    """
+    active: list[TaskContext] = []
+    actionable: list[TaskContext] = []
+    for task in tasks:
+        stage = task.current_stage
+        if stage in ("build", "review") or LABEL_PR_READY in task.labels:
+            if len(active) < max_active_branches_per_repo:
+                active.append(task)
+        if stage is not None:
+            actionable.append(task)
+    return RepoAdmission(
+        repo_slug=repo_slug,
+        active_branch_issues=active,
+        actionable_issues=actionable,
+    )
 
 
 async def update_issue_factory_block(
