@@ -1,8 +1,10 @@
 # Justfile
 # Unified task runner for puzzles-extractor
-
 # Configuration
+
 set shell := ["bash", "-uc"]
+
+uv_run := "uv run --frozen"
 
 # ========== DEFAULT ==========
 
@@ -36,46 +38,46 @@ check: format-check lint typecheck
 
 # [Fix] Automatically fix formatting and linting issues
 fix:
-    uv run ruff format
-    uv run ruff check --fix --unsafe-fixes
+    {{ uv_run }} ruff format
+    {{ uv_run }} ruff check --fix --unsafe-fixes
 
 # Format code with ruff
 format:
-    uv run ruff format
+    {{ uv_run }} ruff format
 
 # Check formatting without making changes
 format-check:
-    uv run ruff format --check
+    {{ uv_run }} ruff format --check
 
 # Run linting with ruff
 lint:
-    uv run ruff check
+    {{ uv_run }} ruff check
 
 # Run type checking with ty
 typecheck:
-    uv run ty check
+    {{ uv_run }} ty check
 
 # Run pre-commit on all files
 pre-commit:
-    uv run pre-commit run --all-files
+    {{ uv_run }} pre-commit run --all-files
 
 # Install pre-commit hooks
 pre-commit-install:
-    uv run pre-commit install --install-hooks
+    {{ uv_run }} pre-commit install --install-hooks
 
 # Update pre-commit hooks to latest versions
 pre-commit-update:
-    uv run pre-commit autoupdate
+    {{ uv_run }} pre-commit autoupdate
 
 # Run pre-commit on all files (including uncommitted)
 pre-commit-run-all:
-    uv run pre-commit run --all-files --show-diff-on-failure
+    {{ uv_run }} pre-commit run --all-files --show-diff-on-failure
 
 # ========== TESTING ==========
 
 # [Test] Run tests with pytest
 test:
-    uv run pytest -v
+    {{ uv_run }} pytest -v
 
 # Run all tests (including coverage)
 test-all: test-cov
@@ -83,17 +85,17 @@ test-all: test-cov
 
 # Run tests with coverage report
 test-cov:
-    uv run pytest -v --cov=src --cov-report=term-missing --cov-report=html
+    {{ uv_run }} pytest -v --cov=src --cov-report=term-missing --cov-report=html
 
 # Run fast tests only (skips slow markers)
 test-fast:
-    uv run pytest -v -m "not slow"
+    {{ uv_run }} pytest -v -m "not slow"
 
 # ========== SECURITY ==========
 
 # Run security checks with bandit
 security-check:
-    uv run bandit -r src -x tests
+    {{ uv_run }} bandit -r src -x tests
 
 # Audit dependencies for known vulnerabilities
 audit:
@@ -113,11 +115,11 @@ update-all:
 
 # Build documentation
 docs:
-    uv run mkdocs build
+    {{ uv_run }} mkdocs build
 
 # Serve documentation locally
 docs-serve:
-    uv run mkdocs serve
+    {{ uv_run }} mkdocs serve
 
 # ========== BUILD & CLEAN ==========
 
@@ -143,7 +145,7 @@ release-dry: ci build
 
 # Bump version and tag (patch, minor, or major)
 version-bump level="patch":
-    uv run bumpver update --{{level}} --commit --tag
+    {{ uv_run }} bumpver update --{{ level }} --commit --tag
 
 # Publish to the private artifactory
 publish:
