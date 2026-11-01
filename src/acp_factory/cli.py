@@ -634,6 +634,8 @@ def review_cmd(
         console.print(
             f"[bold {color}]Review Verdict:[/bold {color}] [cyan]{v.status}[/cyan] ({v.summary})"
         )
+    elif outcome.failure_reason:
+        console.print(f"[bold red]Review failed:[/bold red] {outcome.failure_reason}")
     raise typer.Exit(code=outcome.exit_code)
 
 
