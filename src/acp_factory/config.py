@@ -188,6 +188,33 @@ class RetryConfig(BaseModel):
     )
 
 
+class FleetConfig(BaseModel):
+    """Fleet orchestration configuration (multi-repo / org-wide runs)."""
+
+    workspaces_dir: str | None = Field(
+        default=None,
+        description="Directory where 'auto' repositories are cloned (owner__repo). Defaults to ~/.acp-factory/repos when unset.",
+    )
+    org: str = Field(
+        default="",
+        description="Optional GitHub organization whose active repositories are auto-discovered.",
+    )
+    repositories: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of 'owner/repo' to a local checkout path or 'auto' (clone on demand).",
+    )
+    max_active_branches_per_repo: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum concurrent build/review/pr-ready branches per repository.",
+    )
+    max_review_rounds: int = Field(
+        default=3,
+        ge=1,
+        description="Review round circuit-breaker cap (factory:needs-human).",
+    )
+
+
 class FactoryConfig(BaseModel):
     """Top-level configuration for an acp-factory run."""
 
@@ -200,6 +227,15 @@ class FactoryConfig(BaseModel):
     stages: dict[str, StageConfig] = Field(default_factory=dict)
     active_stage: str | None = Field(default=None)
     retry: RetryConfig = Field(default_factory=RetryConfig)
+    fleet: FleetConfig | None = Field(
+        default=None,
+        description="Optional [fleet] multi-repo/organization orchestration section.",
+    )
+    max_review_rounds: int = Field(
+        default=3,
+        ge=1,
+        description="Top-level review round circuit-breaker cap (used when [fleet] is absent).",
+    )
     worktree: bool = Field(default=False)
     dry_run: bool = Field(
         default=False,
@@ -211,6 +247,13 @@ class FactoryConfig(BaseModel):
     @property
     def config_dir(self) -> Path | None:
         return self._config_dir
+
+    @property
+    def effective_max_review_rounds(self) -> int:
+        """Return the review round cap, preferring `[fleet].max_review_rounds` when configured."""
+        if self.fleet is not None and self.fleet.max_review_rounds:
+            return self.fleet.max_review_rounds
+        return self.max_review_rounds
 
     @model_validator(mode="before")
     @classmethod
@@ -357,6 +400,59 @@ class FactoryConfig(BaseModel):
             resolved_checks.append(chk)
 
         resolved.checks = resolved_checks
+        return resolved
+
+    def resolve_repo_stage(
+        self,
+        stage_name: str,
+        repo_checkout: Path,
+        *,
+        workspace: Path | None = None,
+    ) -> FactoryConfig:
+        """Resolve a stage for a fleet target repository, overlaying that repo's own
+        `.factory/config.toml` (if present) onto the central stage configuration.
+
+        Central governance (personas, prompts, skills, agent) is inherited from this
+        fleet config; a target repository's `pre` setup commands and `[checks.*]`
+        override the fleet defaults. Target repos require zero `.factory/` scaffolding
+        to participate.
+        """
+        resolved = self.resolve_stage(stage_name, workspace=workspace)
+
+        repo_cfg_path = repo_checkout / ".factory" / "config.toml"
+        if not repo_cfg_path.is_file():
+            repo_yaml = repo_checkout / ".factory" / "config.yaml"
+            repo_cfg_path = repo_yaml if repo_yaml.is_file() else repo_cfg_path
+        if not repo_cfg_path.exists():
+            return resolved
+
+        repo_cfg = FactoryConfig.from_file(repo_cfg_path)
+        repo_stage = repo_cfg.stages.get(stage_name)
+        if repo_stage is None:
+            return resolved
+
+        # Overlay repo-local pre setup and checks; central stage is otherwise inherited.
+        if repo_stage.pre:
+            resolved.setup = list(repo_stage.pre)
+
+        if repo_stage.checks:
+            resolved_checks: list[CheckConfig] = []
+            for item in repo_stage.checks:
+                if isinstance(item, CheckConfig):
+                    chk = item.model_copy(deep=True)
+                elif item in repo_cfg.named_checks:
+                    chk = repo_cfg.named_checks[item].model_copy(deep=True)
+                else:
+                    chk = CheckConfig(name=item, cmd=item)
+                if chk.prompt:
+                    chk.prompt = _load_markdown_or_inline(
+                        chk.prompt,
+                        config_dir=repo_cfg.config_dir,
+                        workspace=repo_checkout,
+                    )
+                resolved_checks.append(chk)
+            resolved.checks = resolved_checks
+
         return resolved
 
     def with_overrides(
