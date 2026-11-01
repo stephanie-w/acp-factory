@@ -80,3 +80,9 @@
   - [ ] Configure local git author (`user.name = "acp-factory[bot]"`) inside `.worktrees/issue-<id>` so agent commits are visually distinct from personal commits.
   - [ ] Support optional `FACTORY_GH_TOKEN` / GitHub App token override for `gh` CLI calls so issue edits and PR creation can use a dedicated bot account without changing personal `gh auth` state.
   - [ ] Include an explicit `> 🤖 acp-factory | Stage: ... | Agent: ...` attribution banner at the top of the `<!-- factory:start -->` Issue Body block.
+- [ ] **Nice-to-have: GitHub org auto-discovery for fleet (`[fleet].org`)** *(deferred — only add with filtering)*:
+  - [ ] Add optional `org` field that runs `gh repo list <org> --json nameWithOwner` and treats matches as `"auto"` targets.
+  - [ ] Add inclusion/exclusion filtering (e.g. only repos with open `factory:*` issues) before enabling, to avoid cloning/scanning the entire org.
+- [ ] **User-level default config (`~/.acp-factory/config.toml`)**:
+  - [ ] Make `FactoryConfig.discover` fall back to a user-level config (e.g. `~/.acp-factory/config.toml`) so personal/fleet configs with `~/DEV/...` paths and usernames don't have to live in tracked repo files or require `-c` on every command.
+  - [ ] Resolve persona/prompt/skill paths relative to the config file's directory (already done) AND document that copying a config home requires copying `.factory/personas` + `.factory/prompts` alongside it.
