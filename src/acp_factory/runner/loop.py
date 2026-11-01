@@ -23,17 +23,23 @@ from ..github import (
     update_issue_factory_block,
 )
 from ..task import (
+    LABEL_BUILD,
     LABEL_COMPLETED,
     LABEL_NEEDS_HUMAN,
     StageVerdict,
     TaskContext,
     _clean_markdown_stage_body,
+    clean_spec_block,
+    extract_factory_findings,
     format_task_prompt_context,
+    parse_factory_meta,
     parse_stage_verdict,
+    set_factory_meta,
+    strip_factory_findings,
 )
 from ..ui.display import FactoryDisplay
 from .checks import CheckResult, run_checks_sequential, run_shell_command
-from .worktree import WorktreeManager
+from .worktree import WorktreeManager, get_head_sha, is_worktree_clean
 
 
 @dataclass
@@ -120,6 +126,27 @@ def build_retry_prompt(
         "Analyze the failure output above, fix the root cause in the workspace without "
         "breaking prior work or previously passing checks, and verify your changes."
     )
+    return "\n".join(lines)
+
+
+def build_delta_review_brief(
+    task: TaskContext,
+    *,
+    last_reviewed_sha: str,
+    review_round: int,
+) -> str:
+    """Construct a Round 2+ delta-focused review brief to prevent reviewer goalpost-moving."""
+    prior_findings = extract_factory_findings(task.factory_block)
+    lines = [
+        "# Delta Review Brief (Round 2+)",
+        f"- **Prior Review Round:** {review_round}",
+        f"- **Prior Reviewed SHA:** `{last_reviewed_sha}`",
+        "- **Delta Command:** audit `git diff {last_reviewed_sha}..HEAD` (plus the full diff against base for context).",
+        "- **Rules:** verify every prior finding below was resolved and audit all code touched in "
+        f"`{last_reviewed_sha}..HEAD` for regressions or security issues; do NOT invent new findings on untouched lines.",
+    ]
+    if prior_findings:
+        lines.extend(["", "## Prior Review Findings", prior_findings])
     return "\n".join(lines)
 
 
@@ -452,6 +479,52 @@ async def run_issue_stage(
 
     task_context_md = format_task_prompt_context(task)
 
+    # Review integrity prep: snapshot HEAD + clean tree, inject Round 2+ delta brief
+    pre_review_sha: str | None = None
+    review_wt_path: Path | None = None
+    if stage == "review":
+        review_wt_path = WorktreeManager.issue_worktree_path(
+            resolved_workspace, issue_number
+        )
+        if review_wt_path.exists():
+            pre_review_sha = await get_head_sha(review_wt_path)
+            if not await is_worktree_clean(review_wt_path):
+                failure_reason = (
+                    f"Review aborted: working tree at {review_wt_path} is dirty "
+                    "(uncommitted changes). Clean or commit before review."
+                )
+                if effective_dry_run:
+                    return FactoryRunOutcome(
+                        succeeded=False,
+                        exit_code=1,
+                        attempts_used=0,
+                        total_duration_seconds=0.0,
+                        failure_reason=failure_reason,
+                    )
+                await transition_issue_label(task, LABEL_BUILD, cwd=resolved_workspace)
+                return FactoryRunOutcome(
+                    succeeded=False,
+                    exit_code=1,
+                    attempts_used=0,
+                    total_duration_seconds=0.0,
+                    failure_reason=failure_reason,
+                )
+
+        meta = parse_factory_meta(task.factory_block)
+        review_round = int(meta.get("review_round", "0") or "0")
+        last_reviewed_sha = meta.get("last_reviewed_sha", "")
+        if review_round >= 1 and last_reviewed_sha:
+            task_context_md = (
+                f"{task_context_md}\n\n"
+                f"{
+                    build_delta_review_brief(
+                        task,
+                        last_reviewed_sha=last_reviewed_sha,
+                        review_round=review_round,
+                    )
+                }"
+            )
+
     # Use persistent issue worktree for `build` and `review` stages
     use_issue_worktree = stage in ("build", "review")
     if stage in base_cfg.stages:
@@ -507,8 +580,32 @@ async def run_issue_stage(
         stage,
         outcome.last_response_text,
         current_factory_block=task.factory_block,
+        reviewed_sha=pre_review_sha,
     )
     outcome.stage_verdict = verdict
+
+    # Pre-publish integrity guard: HEAD must be unchanged and the tree clean since review start
+    if stage == "review" and verdict.publish_pr and pre_review_sha and review_wt_path:
+        post_review_sha = await get_head_sha(review_wt_path)
+        post_clean = await is_worktree_clean(review_wt_path)
+        if post_review_sha != pre_review_sha or not post_clean:
+            esc_block = set_factory_meta(
+                f"{strip_factory_findings(task.factory_block)}\n\n"
+                f"## Publish Integrity Failure\n"
+                f"Publication aborted: the working tree changed during review "
+                f"(`{pre_review_sha}` -> `{post_review_sha}`, clean={post_clean}). "
+                f"A human must re-verify before pushing.",
+                stage="needs-human",
+                last_reviewed_sha=post_review_sha,
+            )
+            verdict = StageVerdict(
+                stage="review",
+                status="needs_human",
+                target_label=LABEL_NEEDS_HUMAN,
+                updated_factory_block=esc_block,
+                summary="Publish aborted: working tree changed during review",
+            )
+            outcome.stage_verdict = verdict
 
     if effective_dry_run:
         plan = build_dry_run_gh_plan(
@@ -535,10 +632,12 @@ async def run_issue_stage(
             resolved_workspace, issue_number
         )
         pr_cwd = wt_cwd if wt_cwd.exists() else resolved_workspace
-        pr_body = (
-            f"## Summary\n{verdict.summary}\n\n"
-            f"## Specification\n{task.factory_block or task.original_body}"
+        spec_text = (
+            clean_spec_block(verdict.updated_factory_block) or task.original_body
         )
+        pr_body = f"## Summary\n{verdict.summary}\n\n## Specification\n{spec_text}"
+        if pre_review_sha:
+            pr_body += f"\n\nReviewed-SHA: `{pre_review_sha}`"
         await push_and_create_or_update_pr(task, pr_body=pr_body, cwd=pr_cwd)
 
     await transition_issue_label(task, verdict.target_label, cwd=resolved_workspace)
@@ -605,6 +704,20 @@ async def run_branch_review(
         f"{desc_text}"
     )
 
+    # Pre-review integrity snapshot (standalone review runs in the working tree)
+    pre_review_sha = await get_head_sha(resolved_workspace)
+    if not await is_worktree_clean(resolved_workspace):
+        return FactoryRunOutcome(
+            succeeded=False,
+            exit_code=1,
+            attempts_used=0,
+            total_duration_seconds=0.0,
+            failure_reason=(
+                f"Review aborted: working tree at {resolved_workspace} is dirty "
+                "(uncommitted changes). Clean or commit before review."
+            ),
+        )
+
     if "review" in base_cfg.stages:
         cfg = base_cfg.with_overrides(
             stage="review",
@@ -659,6 +772,8 @@ async def run_branch_review(
     pr_body = (
         f"## Summary\n{summary_text}\n\n## Automated Review Report\n{review_report}"
     )
+    if pre_review_sha:
+        pr_body += f"\n\nReviewed-SHA: `{pre_review_sha}`"
 
     if effective_dry_run:
         plan = build_dry_run_standalone_pr_plan(
@@ -676,6 +791,16 @@ async def run_branch_review(
         return outcome
 
     if create_pr and verdict.publish_pr:
+        post_review_sha = await get_head_sha(resolved_workspace)
+        post_clean = await is_worktree_clean(resolved_workspace)
+        if post_review_sha != pre_review_sha or not post_clean:
+            outcome.succeeded = False
+            outcome.exit_code = 1
+            outcome.failure_reason = (
+                f"Publication aborted: working tree changed during review "
+                f"(`{pre_review_sha}` -> `{post_review_sha}`, clean={post_clean})."
+            )
+            return outcome
         pr_url = await push_and_create_or_update_standalone_pr(
             effective_branch,
             base=base,

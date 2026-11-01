@@ -30,6 +30,20 @@ async def _run_git(cwd: Path, *args: str) -> tuple[int, str, str]:
     )
 
 
+async def get_head_sha(cwd: Path) -> str:
+    """Return the current `HEAD` commit SHA in `cwd`, raising on failure."""
+    rc, sha, err = await _run_git(cwd, "rev-parse", "HEAD")
+    if rc != 0 or not sha:
+        raise WorktreeError(f"git rev-parse HEAD failed in {cwd}: {err or 'no SHA'}")
+    return sha
+
+
+async def is_worktree_clean(cwd: Path) -> bool:
+    """Return True when `git status --porcelain` is empty in `cwd`."""
+    rc, out, _err = await _run_git(cwd, "status", "--porcelain")
+    return rc == 0 and out == ""
+
+
 class WorktreeManager:
     """Manages an isolated git worktree (temporary or issue-persistent)."""
 

@@ -12,6 +12,7 @@ from .task import (
     ALL_FACTORY_STAGE_LABELS,
     StageVerdict,
     TaskContext,
+    clean_spec_block,
     render_issue_body,
 )
 
@@ -479,10 +480,15 @@ def build_dry_run_gh_plan(
     # 2. PR push & create command (if review accepted)
     if verdict.publish_pr:
         pr_title = f"{task.title} (#{task.issue_number})"
+        spec_text = (
+            clean_spec_block(verdict.updated_factory_block)
+            or clean_spec_block(task.factory_block)
+            or task.original_body
+        )
         full_pr_body = (
             f"Closes #{task.issue_number}\n\n"
             f"## Summary\n{verdict.summary}\n\n"
-            f"## Specification\n{task.factory_block or task.original_body}\n"
+            f"## Specification\n{spec_text}\n"
         )
         pr_body_file = out_dir / f"pr-{task.issue_number}-body.md"
         pr_body_file.write_text(full_pr_body, encoding="utf-8")

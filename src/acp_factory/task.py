@@ -11,6 +11,19 @@ from pydantic import BaseModel, Field
 FACTORY_BLOCK_START = "<!-- factory:start -->"
 FACTORY_BLOCK_END = "<!-- factory:end -->"
 
+FACTORY_META_RE = re.compile(
+    r"<!--\s*factory:meta\s+(.*?)-->",
+    re.DOTALL,
+)
+FACTORY_FINDINGS_START = "<!-- factory:findings:start -->"
+FACTORY_FINDINGS_END = "<!-- factory:findings:end -->"
+_FACTORY_FINDINGS_RE = re.compile(
+    rf"{re.escape(FACTORY_FINDINGS_START)}.*?{re.escape(FACTORY_FINDINGS_END)}",
+    re.DOTALL,
+)
+
+MAX_REVIEW_ROUNDS = 3
+
 LABEL_TRIAGE = "factory:triage"
 LABEL_SPEC = "factory:spec"
 LABEL_SPEC_READY = "factory:spec-ready"
@@ -45,6 +58,85 @@ _FACTORY_BLOCK_RE = re.compile(
     rf"{re.escape(FACTORY_BLOCK_START)}(.*?){re.escape(FACTORY_BLOCK_END)}",
     re.DOTALL,
 )
+
+
+def parse_factory_meta(factory_block: str) -> dict[str, str]:
+    """Parse `<!-- factory:meta k=v ... -->` key/value fields from a factory block."""
+    match = FACTORY_META_RE.search(factory_block)
+    if not match:
+        return {}
+    fields: dict[str, str] = {}
+    for token in match.group(1).split():
+        if "=" in token:
+            key, value = token.split("=", 1)
+            fields[key] = value
+    return fields
+
+
+def render_factory_meta(**fields: str) -> str:
+    """Render a `<!-- factory:meta ... -->` comment from key/value fields."""
+    inner = " ".join(f"{key}={value}" for key, value in fields.items() if value)
+    return f"<!-- factory:meta {inner} -->"
+
+
+def set_factory_meta(factory_block: str, **updates: str) -> str:
+    """Merge `updates` into the factory block's meta comment, replacing it in place."""
+    existing = parse_factory_meta(factory_block)
+    merged = {key: value for key, value in {**existing, **updates}.items() if value}
+    body = FACTORY_META_RE.sub("", factory_block).strip()
+    if not merged:
+        return body
+    meta = render_factory_meta(**merged)
+    return f"{meta}\n{body}" if body else meta
+
+
+def strip_factory_meta(factory_block: str) -> str:
+    """Remove the `<!-- factory:meta ... -->` comment from a factory block."""
+    return FACTORY_META_RE.sub("", factory_block).strip()
+
+
+def strip_factory_findings(factory_block: str) -> str:
+    """Remove the delimited findings section (including a dangling start marker) from a factory block."""
+    cleaned = _FACTORY_FINDINGS_RE.sub("", factory_block)
+    cleaned = cleaned.replace(FACTORY_FINDINGS_START, "")
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def replace_factory_findings(
+    factory_block: str,
+    findings_body: str,
+    *,
+    round_num: int,
+    max_rounds: int,
+) -> str:
+    """Replace the delimited findings section in-place with `## Latest Review Findings (Round N/3)`."""
+    base = strip_factory_findings(factory_block).strip()
+    section = (
+        f"{FACTORY_FINDINGS_START}\n"
+        f"## Latest Review Findings (Round {round_num}/{max_rounds})\n"
+        f"{findings_body.strip()}\n"
+        f"{FACTORY_FINDINGS_END}"
+    )
+    return f"{base}\n\n{section}" if base else section
+
+
+def extract_factory_findings(factory_block: str) -> str:
+    """Return the content between the findings delimiters, without the markers."""
+    match = _FACTORY_FINDINGS_RE.search(factory_block)
+    if not match:
+        return ""
+    return (
+        match.group(0)
+        .replace(FACTORY_FINDINGS_START, "")
+        .replace(FACTORY_FINDINGS_END, "")
+        .strip()
+    )
+
+
+def clean_spec_block(factory_block: str) -> str:
+    """Return the specification content with internal meta and findings comments removed."""
+    return strip_factory_meta(strip_factory_findings(factory_block)).strip()
 
 
 class IssueComment(BaseModel):
@@ -261,6 +353,9 @@ def parse_stage_verdict(
     stage: str,
     response_text: str,
     current_factory_block: str = "",
+    *,
+    reviewed_sha: str | None = None,
+    max_review_rounds: int = MAX_REVIEW_ROUNDS,
 ) -> StageVerdict:
     """Determine the next GitHub label and updated Issue Body factory block for a completed stage."""
     cleaned_body = _clean_markdown_stage_body(response_text)
@@ -323,17 +418,35 @@ def parse_stage_verdict(
         )
 
     if stage == "review":
+        meta = parse_factory_meta(current_factory_block)
+        review_round = int(meta.get("review_round", "0") or "0")
+
         if raw_token in ("ACCEPTED", "PASS"):
+            clean_block = strip_factory_findings(current_factory_block)
+            if reviewed_sha:
+                clean_block = set_factory_meta(
+                    clean_block,
+                    stage="pr-ready",
+                    review_round=str(review_round),
+                    last_reviewed_sha=reviewed_sha,
+                )
             return StageVerdict(
                 stage="review",
                 status="accepted",
                 target_label=LABEL_PR_READY,
-                updated_factory_block=current_factory_block.strip(),
+                updated_factory_block=clean_block,
                 summary=cleaned_body or "Review accepted -> PR ready for Human Gate 2",
                 publish_pr=True,
             )
+
         if raw_token in ("HUMAN_DECISION_NEEDED", "NEEDS_HUMAN", "STOP"):
-            merged_block = f"{current_factory_block.strip()}\n\n## Review Escalation\n{cleaned_body}".strip()
+            merged_block = f"{strip_factory_findings(current_factory_block)}\n\n## Review Escalation\n{cleaned_body}".strip()
+            merged_block = set_factory_meta(
+                merged_block,
+                stage="needs-human",
+                review_round=str(review_round),
+                last_reviewed_sha=reviewed_sha or meta.get("last_reviewed_sha", ""),
+            )
             return StageVerdict(
                 stage="review",
                 status="needs_human",
@@ -341,13 +454,50 @@ def parse_stage_verdict(
                 updated_factory_block=merged_block,
                 summary="Review requires human decision",
             )
-        # Default for FAIL / REVISION_NEEDED: send back to build with findings
-        merged_block = f"{current_factory_block.strip()}\n\n## Latest Review Findings\n{cleaned_body}".strip()
+
+        # Default for FAIL / REVISION_NEEDED: replace findings in-place, track round,
+        # and trip the circuit breaker once the round cap is reached.
+        new_round = review_round + 1
+        findings_block = replace_factory_findings(
+            current_factory_block,
+            cleaned_body,
+            round_num=new_round,
+            max_rounds=max_review_rounds,
+        )
+        if new_round >= max_review_rounds:
+            escalation = (
+                "\n\n## Review Loop Escalation\n"
+                f"The {max_review_rounds}-round review limit was reached with unresolved findings. "
+                "A human must decide whether to accept, fix manually, or close."
+            )
+            block = set_factory_meta(
+                findings_block + escalation,
+                stage="needs-human",
+                review_round=str(new_round),
+                last_reviewed_sha=reviewed_sha or "",
+            )
+            return StageVerdict(
+                stage="review",
+                status="needs_human",
+                target_label=LABEL_NEEDS_HUMAN,
+                updated_factory_block=block,
+                summary=(
+                    f"Review loop hit the {max_review_rounds}-round circuit breaker -> "
+                    "waiting for human decision"
+                ),
+            )
+
+        block = set_factory_meta(
+            findings_block,
+            stage="build",
+            review_round=str(new_round),
+            last_reviewed_sha=reviewed_sha or "",
+        )
         return StageVerdict(
             stage="review",
             status="revision_needed",
             target_label=LABEL_BUILD,
-            updated_factory_block=merged_block,
+            updated_factory_block=block,
             summary="Review requested revisions -> returning to factory:build",
         )
 

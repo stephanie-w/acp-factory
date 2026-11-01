@@ -6,21 +6,45 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from acp_factory.runner.checks import parse_review_verdict_status
-from acp_factory.runner.loop import FactoryRunOutcome, run_issue_stage
+from acp_factory.runner.loop import (
+    FactoryRunOutcome,
+    build_delta_review_brief,
+    run_issue_stage,
+)
 from acp_factory.task import (
     LABEL_BUILD,
     LABEL_COMPLETED,
     LABEL_DONE,
     LABEL_NEEDS_HUMAN,
     LABEL_PR_READY,
+    LABEL_REVIEW,
     LABEL_SPEC,
     LABEL_SPEC_READY,
     TaskContext,
+    clean_spec_block,
+    extract_factory_findings,
     format_task_prompt_context,
+    parse_factory_meta,
     parse_stage_verdict,
     render_issue_body,
+    replace_factory_findings,
+    set_factory_meta,
     split_issue_body,
+    strip_factory_findings,
+    strip_factory_meta,
 )
+
+
+def _fake_git(cwd: Path, *args: str) -> tuple[int, str, str]:
+    if args[:2] == ("rev-parse", "HEAD"):
+        return (0, "abc123def", "")
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+        return (0, "feat/my-branch", "")
+    if args[:2] == ("log", "-1"):
+        return (0, "Add pipeline retry logic", "")
+    if args[:2] == ("status", "--porcelain"):
+        return (0, "", "")
+    return (0, "", "")
 
 
 def test_split_and_render_issue_body_in_place() -> None:
@@ -309,7 +333,7 @@ async def test_run_branch_review_standalone_and_create_pr(tmp_path: Path) -> Non
     with (
         patch(
             "acp_factory.runner.worktree._run_git",
-            new=AsyncMock(return_value=(0, "feat/my-branch", "")),
+            new=AsyncMock(side_effect=_fake_git),
         ),
         patch(
             "acp_factory.runner.loop.run_factory",
@@ -351,3 +375,203 @@ async def test_run_branch_review_standalone_and_create_pr(tmp_path: Path) -> Non
         mock_pr.assert_awaited_once()
         assert live_res.stage_verdict is not None
         assert "pull/99" in live_res.stage_verdict.summary
+
+
+def test_factory_meta_and_findings_primitives() -> None:
+    block = set_factory_meta("## Specification\n- X", stage="review", review_round="1")
+    assert parse_factory_meta(block) == {"stage": "review", "review_round": "1"}
+    assert "## Specification" in block
+
+    with_findings = replace_factory_findings(
+        block, "## Findings\n- f1", round_num=1, max_rounds=3
+    )
+    assert "## Latest Review Findings (Round 1/3)" in with_findings
+    assert "## Findings\n- f1" in with_findings
+    assert "f1" in extract_factory_findings(with_findings)
+    assert "f1" not in strip_factory_findings(with_findings)
+    assert "<!-- factory:meta" not in strip_factory_meta(with_findings)
+    assert clean_spec_block(with_findings) == "## Specification\n- X"
+
+
+def test_review_circuit_breaker_and_findings_replacement() -> None:
+    spec = "## Specification\n- Add pagination."
+
+    # Round 1: REVISION_NEEDED -> back to build with findings replaced in place
+    v1 = parse_stage_verdict(
+        "review",
+        "src/api.py:10: missing bounds check.\nSTATUS: REVISION_NEEDED",
+        current_factory_block=spec,
+        reviewed_sha="sha-1",
+    )
+    assert v1.target_label == LABEL_BUILD
+    assert v1.status == "revision_needed"
+    assert "Round 1/3" in v1.updated_factory_block
+    assert v1.updated_factory_block.count("## Latest Review Findings") == 1
+    meta1 = parse_factory_meta(v1.updated_factory_block)
+    assert meta1["review_round"] == "1"
+    assert meta1["last_reviewed_sha"] == "sha-1"
+
+    # Round 2: prior findings replaced, never stacked
+    v2 = parse_stage_verdict(
+        "review",
+        "src/api.py:12: still missing.\nSTATUS: REVISION_NEEDED",
+        current_factory_block=v1.updated_factory_block,
+        reviewed_sha="sha-2",
+    )
+    assert v2.target_label == LABEL_BUILD
+    assert "Round 2/3" in v2.updated_factory_block
+    assert v2.updated_factory_block.count("## Latest Review Findings") == 1
+    assert "missing bounds check" not in v2.updated_factory_block
+    assert "still missing" in v2.updated_factory_block
+    meta2 = parse_factory_meta(v2.updated_factory_block)
+    assert meta2["review_round"] == "2"
+    assert meta2["last_reviewed_sha"] == "sha-2"
+
+    # Round 3: REVISION_NEEDED trips the circuit breaker -> needs-human
+    v3 = parse_stage_verdict(
+        "review",
+        "still unresolved.\nSTATUS: REVISION_NEEDED",
+        current_factory_block=v2.updated_factory_block,
+        reviewed_sha="sha-3",
+    )
+    assert v3.target_label == LABEL_NEEDS_HUMAN
+    assert v3.status == "needs_human"
+    assert "Round 3/3" in v3.updated_factory_block
+    assert "Review Loop Escalation" in v3.updated_factory_block
+    meta3 = parse_factory_meta(v3.updated_factory_block)
+    assert meta3["review_round"] == "3"
+
+
+def test_review_accepted_strips_findings_and_clean_spec() -> None:
+    spec = "## Specification\n- Add pagination."
+    v_rev = parse_stage_verdict(
+        "review",
+        "finding one.\nSTATUS: REVISION_NEEDED",
+        current_factory_block=spec,
+        reviewed_sha="sha-1",
+    )
+
+    v_ok = parse_stage_verdict(
+        "review",
+        "All findings resolved.\nSTATUS: ACCEPTED",
+        current_factory_block=v_rev.updated_factory_block,
+        reviewed_sha="sha-2",
+    )
+    assert v_ok.target_label == LABEL_PR_READY
+    assert v_ok.publish_pr is True
+    assert "## Latest Review Findings" not in v_ok.updated_factory_block
+    assert "finding one" not in v_ok.updated_factory_block
+    assert clean_spec_block(v_ok.updated_factory_block) == spec
+
+
+def test_delta_review_brief_includes_prior_findings() -> None:
+    task = TaskContext(
+        issue_number=5,
+        title="x",
+        factory_block=replace_factory_findings(
+            "## Specification\n- X", "## Findings\n- f1", round_num=1, max_rounds=3
+        ),
+    )
+    brief = build_delta_review_brief(task, last_reviewed_sha="abc", review_round=1)
+    assert "abc..HEAD" in brief
+    assert "## Findings\n- f1" in brief
+    assert "do NOT invent new findings" in brief
+
+
+async def test_run_issue_stage_review_publish_guard_aborts_on_sha_mismatch(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".worktrees" / "issue-9").mkdir(parents=True)
+    task = TaskContext(
+        issue_number=9,
+        title="Add filter",
+        original_body="orig",
+        factory_block="## Specification\n- Add filter.",
+        labels=[LABEL_REVIEW],
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.3,
+        last_response_text="Looks good.\nSTATUS: ACCEPTED",
+    )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.run_factory", new=AsyncMock(return_value=outcome)
+        ),
+        patch(
+            "acp_factory.runner.loop.get_head_sha",
+            new=AsyncMock(side_effect=["pre-sha", "post-sha"]),
+        ),
+        patch(
+            "acp_factory.runner.loop.is_worktree_clean",
+            new=AsyncMock(return_value=True),
+        ),
+        patch("acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()),
+        patch(
+            "acp_factory.runner.loop.transition_issue_label", new=AsyncMock()
+        ) as mock_transition,
+        patch(
+            "acp_factory.runner.loop.push_and_create_or_update_pr", new=AsyncMock()
+        ) as mock_pr,
+    ):
+        res = await run_issue_stage(tmp_path, 9)
+        assert res.stage_verdict is not None
+        assert res.stage_verdict.target_label == LABEL_NEEDS_HUMAN
+        mock_pr.assert_not_awaited()
+        mock_transition.assert_awaited_once_with(
+            task, LABEL_NEEDS_HUMAN, cwd=tmp_path.resolve()
+        )
+
+
+async def test_run_issue_stage_review_accepted_publishes_with_sha(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".worktrees" / "issue-10").mkdir(parents=True)
+    task = TaskContext(
+        issue_number=10,
+        title="Add filter",
+        original_body="orig",
+        factory_block="## Specification\n- Add filter.",
+        labels=[LABEL_REVIEW],
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.3,
+        last_response_text="Looks good.\nSTATUS: ACCEPTED",
+    )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.run_factory", new=AsyncMock(return_value=outcome)
+        ),
+        patch(
+            "acp_factory.runner.loop.get_head_sha",
+            new=AsyncMock(return_value="pre-sha"),
+        ),
+        patch(
+            "acp_factory.runner.loop.is_worktree_clean",
+            new=AsyncMock(return_value=True),
+        ),
+        patch("acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()),
+        patch(
+            "acp_factory.runner.loop.transition_issue_label", new=AsyncMock()
+        ) as mock_transition,
+        patch(
+            "acp_factory.runner.loop.push_and_create_or_update_pr", new=AsyncMock()
+        ) as mock_pr,
+    ):
+        res = await run_issue_stage(tmp_path, 10)
+        assert res.stage_verdict is not None
+        assert res.stage_verdict.target_label == LABEL_PR_READY
+        mock_pr.assert_awaited_once()
+        assert "Reviewed-SHA: `pre-sha`" in mock_pr.call_args.kwargs["pr_body"]
+        mock_transition.assert_awaited_once_with(
+            task, LABEL_PR_READY, cwd=tmp_path.resolve()
+        )
