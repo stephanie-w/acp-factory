@@ -554,13 +554,14 @@ async def run_issue_stage(
     if base_config is not None:
         # Fleet mode: resolve the stage from the central governance config, overlaying
         # the target repository's own `pre`/`[checks.*]` via `resolve_repo_stage`.
+        # The issue context is passed as `task` so a stage prompt wraps it (not overwrites it).
         cfg = base_config.resolve_repo_stage(
             stage,
             resolved_workspace,
             workspace=resolved_workspace,
+            task=task_context_md,
         )
         cfg = cfg.with_overrides(
-            task=task_context_md,
             worktree=use_issue_worktree,
             dry_run=effective_dry_run,
         )

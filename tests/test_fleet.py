@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from acp_factory.config import FactoryConfig
 from acp_factory.github import build_repo_admission
 from acp_factory.runner.loop import FactoryRunOutcome
@@ -374,3 +376,73 @@ async def test_advance_fleet_repo_pr_ready_blocks_new_build(tmp_path: Path) -> N
         run_numbers = [c.args[1] for c in mock_run.call_args_list]
         assert 1 not in run_numbers
         assert 2 not in run_numbers
+
+
+def test_pr_ready_is_not_actionable_stage() -> None:
+    """`factory:pr-ready` must not resolve to an actionable stage (Human Gate 2, not runnable)."""
+    t = TaskContext(issue_number=1, title="x", labels=[LABEL_PR_READY])
+    assert t.current_stage is None
+
+
+def test_resolve_repo_stage_wraps_prompt_with_task_context(tmp_path: Path) -> None:
+    """A stage prompt wraps the issue context instead of being overwritten (Finding 1)."""
+    central = FactoryConfig.model_validate(
+        {
+            "stages": {
+                "spec": {
+                    "persona": "personas/architect.md",
+                    "prompt": "prompts/SPEC.md",
+                }
+            }
+        }
+    )
+    # Write the referenced prompt file so _load_markdown_or_inline resolves it.
+    (tmp_path / "prompts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "prompts" / "SPEC.md").write_text(
+        "# Specification\nWrite a spec.", encoding="utf-8"
+    )
+
+    task_ctx = "## Original Issue Description\nAdd pagination."
+    resolved = central.resolve_repo_stage(
+        "spec", tmp_path, workspace=tmp_path, task=task_ctx
+    )
+    assert "# Specification" in resolved.task
+    assert "## Task Context" in resolved.task
+    assert "Add pagination." in resolved.task
+
+
+def test_resolve_repo_stage_minimal_fleet_config(tmp_path: Path) -> None:
+    """A minimal [fleet]-only config resolves via built-in defaults (Finding 3)."""
+    minimal = FactoryConfig.model_validate(
+        {"fleet": {"repositories": {"acme/core": "auto"}}}
+    )
+    task_ctx = "## Original Issue Description\nSomething."
+    resolved = minimal.resolve_repo_stage(
+        "build", tmp_path, workspace=tmp_path, task=task_ctx
+    )
+    # Fell back to built-in defaults without raising; read_only set for build=False context
+    assert resolved.active_stage == "build"
+    assert resolved.task == task_ctx  # no prompt to wrap, so task stays as-is
+
+
+def test_effective_max_review_rounds_precedence() -> None:
+    """Top-level max_review_rounds is respected when [fleet].max_review_rounds is unset (Finding 4)."""
+    cfg = FactoryConfig.model_validate(
+        {"max_review_rounds": 5, "fleet": {"repositories": {"a/b": "auto"}}}
+    )
+    assert cfg.effective_max_review_rounds == 5
+
+    overridden = FactoryConfig.model_validate(
+        {"max_review_rounds": 5, "fleet": {"max_review_rounds": 2}}
+    )
+    assert overridden.effective_max_review_rounds == 2
+
+
+async def test_ensure_fleet_repo_checkout_rejects_invalid_slug() -> None:
+    """A hostile/malformed repo slug is rejected before path/URL construction (Finding 5)."""
+    from acp_factory.runner.worktree import WorktreeError
+
+    with pytest.raises(WorktreeError):
+        await ensure_fleet_repo_checkout(
+            "../evil", repository_map_value="auto", workspaces_dir="/tmp/x"
+        )

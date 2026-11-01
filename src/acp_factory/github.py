@@ -223,10 +223,12 @@ def build_repo_admission(
 
 
 def _is_branch_contending(task: TaskContext) -> bool:
-    """Return True when a task holds a branch/PR-contending stage or label."""
-    return task.current_stage in ("build", "review", "pr-ready") or (
-        LABEL_PR_READY in task.labels
-    )
+    """Return True when a task holds a branch/PR-contending stage or label.
+
+    `pr-ready` is a Human Gate 2 label (not an actionable stage), so it is detected
+    by label rather than by `current_stage`.
+    """
+    return task.current_stage in ("build", "review") or LABEL_PR_READY in task.labels
 
 
 async def update_issue_factory_block(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import shutil
 import tempfile
 import uuid
@@ -15,6 +16,8 @@ class WorktreeError(RuntimeError):
 
 
 DEFAULT_WORKSPACES_DIR = "~/.acp-factory/repos"
+
+_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 
 async def _run_git(cwd: Path, *args: str) -> tuple[int, str, str]:
@@ -78,6 +81,11 @@ async def ensure_fleet_repo_checkout(
     - After resolving/creating the checkout, `git fetch --prune origin` guarantees a
       fresh baseline so new issue worktrees never branch from a stale local HEAD.
     """
+    if not _REPO_SLUG_RE.match(repo_slug):
+        raise WorktreeError(
+            f"Invalid fleet repository slug '{repo_slug}'. Expected 'owner/repo'."
+        )
+
     if repository_map_value != "auto":
         checkout = _expand_path(repository_map_value)
         if not checkout.exists():

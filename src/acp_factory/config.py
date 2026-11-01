@@ -204,10 +204,10 @@ class FleetConfig(BaseModel):
         ge=1,
         description="Maximum concurrent build/review/pr-ready branches per repository.",
     )
-    max_review_rounds: int = Field(
-        default=3,
+    max_review_rounds: int | None = Field(
+        default=None,
         ge=1,
-        description="Review round circuit-breaker cap (factory:needs-human).",
+        description="Review round circuit-breaker cap (factory:needs-human). When unset, inherits the top-level max_review_rounds.",
     )
 
 
@@ -246,8 +246,8 @@ class FactoryConfig(BaseModel):
 
     @property
     def effective_max_review_rounds(self) -> int:
-        """Return the review round cap, preferring `[fleet].max_review_rounds` when configured."""
-        if self.fleet is not None and self.fleet.max_review_rounds:
+        """Return the review round cap, preferring `[fleet].max_review_rounds` when set."""
+        if self.fleet is not None and self.fleet.max_review_rounds is not None:
             return self.fleet.max_review_rounds
         return self.max_review_rounds
 
@@ -404,6 +404,7 @@ class FactoryConfig(BaseModel):
         repo_checkout: Path,
         *,
         workspace: Path | None = None,
+        task: str | None = None,
     ) -> FactoryConfig:
         """Resolve a stage for a fleet target repository, overlaying that repo's own
         `.factory/config.toml` (if present) onto the central stage configuration.
@@ -412,8 +413,23 @@ class FactoryConfig(BaseModel):
         fleet config; a target repository's `pre` setup commands and `[checks.*]`
         override the fleet defaults. Target repos require zero `.factory/` scaffolding
         to participate.
+
+        `task` supplies the issue context; when a stage prompt is present it is wrapped
+        under it (mirroring `resolve_stage`), rather than overwriting the prompt.
         """
-        resolved = self.resolve_stage(stage_name, workspace=workspace)
+        base = self.model_copy(deep=True)
+        base._config_dir = self._config_dir
+        if task is not None:
+            base.task = task
+
+        if stage_name in self.stages:
+            resolved = base.resolve_stage(stage_name, workspace=workspace)
+        else:
+            # No central stage definition: fall back to built-in defaults (read-only for
+            # triage/spec/review), mirroring run_issue_stage's non-fleet fallback.
+            resolved = base
+            resolved.agent.read_only = stage_name in ("triage", "spec", "review")
+            resolved.active_stage = stage_name
 
         repo_cfg_path = repo_checkout / ".factory" / "config.toml"
         if not repo_cfg_path.is_file():
