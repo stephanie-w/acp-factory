@@ -25,7 +25,9 @@ from acp_factory.task import (
 
 
 def _task(number: int, *labels: str) -> TaskContext:
-    return TaskContext(issue_number=number, title=f"Issue {number}", labels=list(labels))
+    return TaskContext(
+        issue_number=number, title=f"Issue {number}", labels=list(labels)
+    )
 
 
 def test_fleet_config_parsing_and_defaults() -> None:
@@ -281,14 +283,15 @@ async def test_advance_fleet_repo_threads_central_config(tmp_path: Path) -> None
                 "repositories": {"acme/core": "auto"},
                 "max_review_rounds": 4,
             },
-            "stages": {
-                "spec": {"persona": "personas/architect.md", "checks": []}
-            },
+            "stages": {"spec": {"persona": "personas/architect.md", "checks": []}},
         }
     )
 
     spec_task = TaskContext(
-        issue_number=1, title="x", labels=[LABEL_SPEC], url="https://github.com/acme/core/issues/1"
+        issue_number=1,
+        title="x",
+        labels=[LABEL_SPEC],
+        url="https://github.com/acme/core/issues/1",
     )
 
     with (
@@ -308,7 +311,10 @@ async def test_advance_fleet_repo_threads_central_config(tmp_path: Path) -> None
             "acp_factory.runner.loop.run_issue_stage",
             new=AsyncMock(
                 return_value=FactoryRunOutcome(
-                    succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
+                    succeeded=True,
+                    exit_code=0,
+                    attempts_used=1,
+                    total_duration_seconds=0.0,
                 )
             ),
         ) as mock_run,
@@ -333,7 +339,9 @@ async def test_advance_fleet_repo_pr_ready_blocks_new_build(tmp_path: Path) -> N
     from acp_factory.task import LABEL_BUILD, LABEL_PR_READY
     from acp_factory.ui.display import FactoryDisplay
 
-    central = FactoryConfig.model_validate({"fleet": {"repositories": {"acme/core": "auto"}}})
+    central = FactoryConfig.model_validate(
+        {"fleet": {"repositories": {"acme/core": "auto"}}}
+    )
 
     pr_ready_task = TaskContext(
         issue_number=1, title="awaiting merge", labels=[LABEL_PR_READY]
@@ -357,7 +365,10 @@ async def test_advance_fleet_repo_pr_ready_blocks_new_build(tmp_path: Path) -> N
             "acp_factory.runner.loop.run_issue_stage",
             new=AsyncMock(
                 return_value=FactoryRunOutcome(
-                    succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
+                    succeeded=True,
+                    exit_code=0,
+                    attempts_used=1,
+                    total_duration_seconds=0.0,
                 )
             ),
         ) as mock_run,
@@ -439,10 +450,75 @@ def test_effective_max_review_rounds_precedence() -> None:
 
 
 async def test_ensure_fleet_repo_checkout_rejects_invalid_slug() -> None:
-    """A hostile/malformed repo slug is rejected before path/URL construction (Finding 5)."""
+    """A hostile/malformed repo slug is rejected before any clone is attempted (Finding 2)."""
     from acp_factory.runner.worktree import WorktreeError
 
-    with pytest.raises(WorktreeError):
-        await ensure_fleet_repo_checkout(
-            "../evil", repository_map_value="auto", workspaces_dir="/tmp/x"
+    for bad_slug in ("../evil", "./x", "a/.hidden", "a", "a/b/c"):
+        with patch(
+            "acp_factory.runner.worktree._run_git",
+            new=AsyncMock(return_value=(0, "", "")),
+        ) as mock_git:
+            with pytest.raises(WorktreeError):
+                await ensure_fleet_repo_checkout(
+                    bad_slug, repository_map_value="auto", workspaces_dir="/tmp/x"
+                )
+            # Validation must reject before running any git command (esp. clone)
+            mock_git.assert_not_awaited()
+
+    # Sanity: a valid slug still works (validation is not over-broad).
+    with patch(
+        "acp_factory.runner.worktree._run_git",
+        new=AsyncMock(return_value=(0, "", "")),
+    ):
+        result = await ensure_fleet_repo_checkout(
+            "acme/api", repository_map_value="auto", workspaces_dir="/tmp/x"
         )
+        assert result is not None
+
+
+async def test_list_actionable_issues_retains_pr_ready_for_admission(
+    tmp_path: Path,
+) -> None:
+    """The real list_actionable_issues (not a mock) retains pr-ready for fleet admission (Finding 1)."""
+    import json
+
+    from acp_factory.github import list_actionable_issues
+
+    gh_items = [
+        {
+            "number": 1,
+            "title": "awaiting merge",
+            "state": "OPEN",
+            "body": "",
+            "labels": [{"name": "factory:pr-ready"}],
+            "comments": [],
+            "url": "https://github.com/acme/core/issues/1",
+        },
+        {
+            "number": 2,
+            "title": "next build",
+            "state": "OPEN",
+            "body": "",
+            "labels": [{"name": "factory:build"}],
+            "comments": [],
+            "url": "https://github.com/acme/core/issues/2",
+        },
+    ]
+
+    with patch(
+        "acp_factory.github.run_gh",
+        new=AsyncMock(return_value=json.dumps(gh_items)),
+    ):
+        # Without include_branch_contending: pr-ready dropped (non-fleet next behavior)
+        plain = await list_actionable_issues(tmp_path, repo_slug="acme/core")
+        assert [t.issue_number for t in plain] == [2]
+
+        # With include_branch_contending: pr-ready retained for admission
+        fleet = await list_actionable_issues(
+            tmp_path, repo_slug="acme/core", include_branch_contending=True
+        )
+        assert [t.issue_number for t in fleet] == [1, 2]
+        # pr-ready task has no actionable stage but is branch-contending
+        pr_ready_task = next(t for t in fleet if t.issue_number == 1)
+        assert pr_ready_task.current_stage is None
+        assert LABEL_PR_READY in pr_ready_task.labels

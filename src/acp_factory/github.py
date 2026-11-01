@@ -86,8 +86,13 @@ async def list_actionable_issues(
     stage_label: str | None = None,
     limit: int = 50,
     repo_slug: str | None = None,
+    include_branch_contending: bool = False,
 ) -> list[TaskContext]:
-    """List GitHub Issues that have an actionable `factory:*` stage (including closed issues with leftover worktrees)."""
+    """List GitHub Issues that have an actionable `factory:*` stage (including closed issues with leftover worktrees).
+
+    `include_branch_contending` (fleet admission) additionally retains `pr-ready` issues
+    whose `current_stage` is None but that still occupy a branch/PR slot.
+    """
     cmd = [
         "issue",
         "list",
@@ -109,7 +114,11 @@ async def list_actionable_issues(
     seen_numbers: set[int] = set()
     for item in items:
         task = TaskContext.from_gh_json(item)
-        if stage_label or task.current_stage is not None:
+        if (
+            stage_label
+            or task.current_stage is not None
+            or (include_branch_contending and _is_branch_contending(task))
+        ):
             tasks.append(task)
             seen_numbers.add(task.issue_number)
 

@@ -198,9 +198,9 @@ class FactoryDisplay:
                 )
             )
 
-        # A review that did not accept the change has nothing to publish. Show a
-        # clear verdict panel instead of a misleading "run these commands" header.
-        if plan.stage == "review" and not plan.publish_pr:
+        # A standalone review that did not accept the change has nothing to publish.
+        # (Issue-based reviews still carry label-transition commands that must be shown.)
+        if plan.stage == "review" and plan.issue_number == 0 and not plan.publish_pr:
             status = plan.verdict_status or "unknown"
             self.console.print(
                 Panel(

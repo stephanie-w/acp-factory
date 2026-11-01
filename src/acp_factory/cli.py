@@ -681,9 +681,7 @@ def next_cmd(
 
     async def _run_next() -> int:
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-        use_fleet = (
-            fleet if fleet is not None else (base_cfg.fleet is not None)
-        )
+        use_fleet = fleet if fleet is not None else (base_cfg.fleet is not None)
 
         if use_fleet:
             from .runner.loop import run_fleet_next
@@ -789,9 +787,7 @@ def status_cmd(
 
     async def _show_status() -> None:
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-        use_fleet = (
-            fleet if fleet is not None else (base_cfg.fleet is not None)
-        )
+        use_fleet = fleet if fleet is not None else (base_cfg.fleet is not None)
 
         if use_fleet:
             from .runner.loop import collect_fleet_status
@@ -817,9 +813,7 @@ def status_cmd(
                     any_rows = True
                     continue
                 for t in tasks:
-                    fac_labels = [
-                        lbl for lbl in t.labels if lbl.startswith("factory:")
-                    ]
+                    fac_labels = [lbl for lbl in t.labels if lbl.startswith("factory:")]
                     state_desc = _state_description(t)
                     table.add_row(
                         repo_slug,

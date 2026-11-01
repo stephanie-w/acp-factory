@@ -891,13 +891,12 @@ async def _advance_fleet_repo(
         )
         result.checkout = checkout
 
-        # Branch new build worktrees from a fresh `origin/<default>` baseline.
-        base_ref = f"origin/{await detect_default_branch(checkout)}"
-
         # `done` cleanup first (unblocks the branch slot immediately).
         done_tasks = [
             t
-            for t in await list_actionable_issues(checkout, repo_slug=repo_slug)
+            for t in await list_actionable_issues(
+                checkout, repo_slug=repo_slug, include_branch_contending=True
+            )
             if t.current_stage == "done"
         ]
         for task in done_tasks:
@@ -914,7 +913,9 @@ async def _advance_fleet_repo(
                 result.issues_processed += 1
 
         # Re-fetch actionable state after cleanup.
-        tasks = await list_actionable_issues(checkout, repo_slug=repo_slug)
+        tasks = await list_actionable_issues(
+            checkout, repo_slug=repo_slug, include_branch_contending=True
+        )
         admission = build_repo_admission(
             repo_slug, tasks, max_active_branches_per_repo=max_branches
         )
@@ -948,6 +949,12 @@ async def _advance_fleet_repo(
         ]
         if runnable_tasks:
             task = runnable_tasks[0]
+            # Branch new build worktrees from a fresh `origin/<default>` baseline
+            # only when actually creating a worktree (not needed for done/triage/spec).
+            try:
+                base_ref = f"origin/{await detect_default_branch(checkout)}"
+            except Exception:
+                base_ref = None
             outcome = await run_issue_stage(
                 checkout,
                 task.issue_number,

@@ -17,7 +17,9 @@ class WorktreeError(RuntimeError):
 
 DEFAULT_WORKSPACES_DIR = "~/.acp-factory/repos"
 
-_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+_REPO_SLUG_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+)
 
 
 async def _run_git(cwd: Path, *args: str) -> tuple[int, str, str]:
