@@ -116,4 +116,5 @@ acp-factory run "Fix edge case in parser" --stage build --export transcript.md
 ## Documentation & Roadmap
 
 - **[Workflow & Core Concepts (`docs/workflow.md`)](docs/workflow.md)**: Detailed guide to the 5-stage GitHub label state machine, Task definition, in-place Issue Body spec contract, two-tier open questions handling, and worktree lifecycle.
-- **[Implementation Roadmap (`TODO.md`)](TODO.md)**: Current status and Phase 2 backlog.
+- **[Stateless Fleet Orchestration & Review Hardening (`docs/fleet-orchestration.md`)](docs/fleet-orchestration.md)**: Architecture and invariants for multi-repo admission control, delta-focused review rounds, 3-round circuit breakers, and `REVIEWED_AT == HEAD` publish guards.
+- **[Implementation Roadmap (`TODO.md`)](TODO.md)**: Current status and upcoming milestones.
