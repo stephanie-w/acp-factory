@@ -71,7 +71,8 @@ Not all stages contend on `main`. `acp-factory next --fleet` applies a **stage-a
 2. **Read-Only Stages (`triage`, `spec`) Never Conflict**:
    - Because `triage` and `spec` run in `read_only = true` (`mode = "plan"`) and create no branches or PRs, they can safely advance queued tickets up to **Human Gate 1 (`factory:spec-ready`)** so humans can batch-review specifications.
 3. **At Most One In-Flight Code Branch/PR per Repository (`build`, `review`, `pr-ready`)**:
-   - By default (`max_active_branches_per_repo = 1`), if a repository already has an issue in `factory:build`, `factory:review`, or `factory:pr-ready` (awaiting Human Gate 2 merge), `acp-factory` continues advancing *that* active issue (e.g., `build -> review -> pr-ready`) or skips starting a *second* `factory:build` branch in that repository until the open PR merges.
+   - The runner advances exactly one in-flight code branch/PR per repository. If a repository already has an issue in `factory:build`, `factory:review`, or `factory:pr-ready` (awaiting Human Gate 2 merge), `acp-factory` continues advancing *that* active issue (e.g., `build -> review -> pr-ready`) or skips starting a *second* `factory:build` branch in that repository until the open PR merges.
+   - `max_active_branches_per_repo` is **reserved for future concurrency**; setting it above `1` currently has no effect (the runner still advances one branch per pass).
    - As a result, every new `build` branches off a freshly fast-forwarded `origin/main` that already includes the prior ticket's merged changes—eliminating merge-conflict cascades by construction.
 4. **Per-Repo Error Isolation**:
    - Each repository pass runs inside an isolated exception boundary; failures are logged in the fleet summary table without aborting subsequent repositories.

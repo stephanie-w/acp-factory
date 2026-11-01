@@ -149,9 +149,17 @@ async def list_actionable_issues(
 
 
 async def list_all_factory_issues(
-    cwd: Path, *, limit: int = 50, repo_slug: str | None = None
+    cwd: Path,
+    *,
+    limit: int = 50,
+    repo_slug: str | None = None,
+    scan_worktrees: bool = True,
 ) -> list[TaskContext]:
-    """Return open GitHub Issues carrying any `factory:*` label plus any closed issues that still have a local worktree."""
+    """Return open GitHub Issues carrying any `factory:*` label plus any closed issues that still have a local worktree.
+
+    `scan_worktrees` is False when `cwd` is only a valid spawn directory (e.g. a missing
+    fleet checkout falls back to `Path.cwd()`), so unrelated `.worktrees/` dirs are ignored.
+    """
     cmd = [
         "issue",
         "list",
@@ -175,7 +183,7 @@ async def list_all_factory_issues(
             seen_numbers.add(task.issue_number)
 
     worktrees_root = cwd / ".worktrees"
-    if worktrees_root.is_dir():
+    if scan_worktrees and worktrees_root.is_dir():
         for entry in sorted(worktrees_root.iterdir()):
             if entry.is_dir() and entry.name.startswith("issue-"):
                 num_str = entry.name.removeprefix("issue-")

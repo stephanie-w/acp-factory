@@ -198,7 +198,11 @@ class FleetConfig(BaseModel):
     max_active_branches_per_repo: int = Field(
         default=1,
         ge=1,
-        description="Maximum concurrent build/review/pr-ready branches per repository.",
+        description=(
+            "Reserved for future per-repo concurrency. The fleet runner currently "
+            "advances at most one build/review/pr-ready branch per repository regardless "
+            "of this value."
+        ),
     )
     max_review_rounds: int | None = Field(
         default=None,

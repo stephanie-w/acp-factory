@@ -73,7 +73,7 @@
   - [x] Inject a delta-focused review brief (`git diff <last_reviewed_sha>..HEAD` + prior findings) on Round 2+ to prevent reviewer "moving goalposts", and enforce a deterministic 3-round circuit breaker (`factory:needs-human`).
   - [x] Enforce a pre-review and pre-publish `REVIEWED_AT == HEAD` + clean working tree (`git status --porcelain == ""`) guard before pushing or opening/updating a PR, stamping `Reviewed-SHA` in the PR body.
 - [x] **Stateless Multi-Repo / Organization-Wide Fleet Orchestration (`config.py`, `github.py`, `loop.py`, `cli.py`)**:
-  - [x] Support `[fleet]` configuration mapping `"owner/repo"` to existing local `~/DEV/...` checkouts or `"auto"` clones under `workspaces_dir` (plus optional `org` discovery), branching new issue worktrees from a freshly fetched `origin/<default-branch>`.
+  - [x] Support `[fleet]` configuration mapping `"owner/repo"` to existing local `~/DEV/...` checkouts only (no on-demand cloning; `org` discovery stays deferred), branching new issue worktrees from a freshly fetched `origin/<default-branch>`.
   - [x] Keep prompts, personas, and skills centralized while optionally overlaying target-repo `pre` setup and `[checks.*]` (zero `.factory/` scaffolding required in target repos).
   - [x] Enforce stage-aware per-repo admission control in `acp-factory next --fleet` (`done` cleanups first; read-only `triage`/`spec` always allowed up to Gate 1; at most 1 active `build`/`review`/`pr-ready` branch per repo to prevent merge-conflict cascades) with per-repo error isolation and `acp-factory status --fleet`.
 - [ ] **Continuous Orchestration (Daemon / Scheduling Loop)** *(deferred — discussion after fleet runner lands)*:

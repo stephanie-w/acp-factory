@@ -955,6 +955,9 @@ async def _advance_fleet_repo(
         # Branch-contending stages: any `pr-ready` issue blocks a new build/review
         # (Human Gate 2 awaiting merge), regardless of issue-number order. Otherwise
         # advance the oldest admitted build/review task.
+        # `max_active_branches_per_repo` is reserved for future concurrency; the runner
+        # intentionally advances exactly one branch here to preserve the
+        # at-most-one-in-flight-branch invariant.
         runnable_tasks = [] if admission.has_pr_ready else admission.build_review_issues
         if runnable_tasks:
             task = runnable_tasks[0]
@@ -1027,10 +1030,14 @@ async def collect_fleet_status(
                 repo_slug,
                 repository_map_value=repo_value,
             )
-            # Always pass the resolved checkout as cwd; `list_all_factory_issues` only
-            # scans `checkout/.worktrees` when that directory exists, so a missing
-            # checkout never falls back to scanning the invoking directory's worktrees.
-            tasks = await list_all_factory_issues(checkout, repo_slug=repo_slug)
+            # `gh --repo` only needs a valid cwd to spawn. A missing checkout falls
+            # back to the invoking cwd so remote issues still list; worktree scanning
+            # stays disabled because there is nothing local to scan.
+            scan_worktrees = checkout.exists()
+            cwd = checkout if scan_worktrees else Path.cwd()
+            tasks = await list_all_factory_issues(
+                cwd, repo_slug=repo_slug, scan_worktrees=scan_worktrees
+            )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         out.append((repo_slug, tasks, error))

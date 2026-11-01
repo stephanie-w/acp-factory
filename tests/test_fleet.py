@@ -574,3 +574,74 @@ async def test_collect_fleet_status_does_not_clone(tmp_path: Path) -> None:
         assert result == [("acme/core", [], None)]
         mock_list.assert_awaited_once()
         mock_ensure.assert_not_awaited()
+
+
+async def test_run_fleet_next_isolates_repo_errors(tmp_path: Path) -> None:
+    """A failing repo must never block the next repo from advancing (Finding 1)."""
+    from acp_factory.runner.loop import FactoryRunOutcome, run_fleet_next
+    from acp_factory.runner.worktree import WorktreeError
+
+    cfg = FactoryConfig.model_validate(
+        {"fleet": {"repositories": {"acme/a": "~/DEV/a", "acme/b": "~/DEV/b"}}}
+    )
+
+    async def fake_checkout(repo_slug: str, *, repository_map_value: str) -> Path:
+        if repo_slug == "acme/a":
+            raise WorktreeError("missing checkout")
+        return tmp_path
+
+    spec_task = TaskContext(issue_number=1, title="x", labels=[LABEL_SPEC])
+
+    with (
+        patch(
+            "acp_factory.runner.loop.ensure_fleet_repo_checkout",
+            new=AsyncMock(side_effect=fake_checkout),
+        ),
+        patch(
+            "acp_factory.runner.loop.list_actionable_issues",
+            new=AsyncMock(return_value=[spec_task]),
+        ),
+        patch(
+            "acp_factory.runner.loop.run_issue_stage",
+            new=AsyncMock(
+                return_value=FactoryRunOutcome(
+                    succeeded=True,
+                    exit_code=0,
+                    attempts_used=1,
+                    total_duration_seconds=0.0,
+                )
+            ),
+        ),
+    ):
+        results = await run_fleet_next(cfg)
+
+    assert [r.repo_slug for r in results] == ["acme/a", "acme/b"]
+    assert results[0].error is not None
+    assert "missing checkout" in results[0].error
+    assert results[1].error is None
+    assert results[1].issues_processed == 1
+
+
+async def test_collect_fleet_status_missing_checkout_uses_valid_cwd(
+    tmp_path: Path,
+) -> None:
+    """A not-yet-cloned fleet repo lists remote issues via a valid cwd (Finding 3)."""
+    from acp_factory.runner.loop import collect_fleet_status
+
+    missing = tmp_path / "not-cloned"
+    cfg = FactoryConfig.model_validate(
+        {"fleet": {"repositories": {"acme/core": str(missing)}}}
+    )
+    with patch(
+        "acp_factory.runner.loop.list_all_factory_issues",
+        new=AsyncMock(return_value=[]),
+    ) as mock_list:
+        result = await collect_fleet_status(cfg)
+
+    assert result == [("acme/core", [], None)]
+    call = mock_list.call_args
+    assert call is not None
+    # cwd is positional; must exist or create_subprocess_exec(..., cwd=...) raises.
+    assert call.args[0].exists()
+    assert call.kwargs["repo_slug"] == "acme/core"
+    assert call.kwargs["scan_worktrees"] is False
