@@ -893,14 +893,12 @@ async def _advance_fleet_repo(
     """Advance one repository: `done` cleanup first, then read-only stage prep, then one build/review step."""
     result = FleetRepoResult(repo_slug=repo_slug)
     fleet = config.fleet
-    ws_dir = fleet.workspaces_dir if fleet else None
     max_branches = fleet.max_active_branches_per_repo if fleet else 1
 
     try:
         checkout = await ensure_fleet_repo_checkout(
             repo_slug,
             repository_map_value=repo_value,
-            workspaces_dir=ws_dir,
         )
         result.checkout = checkout
 
@@ -954,14 +952,10 @@ async def _advance_fleet_repo(
             if outcome.exit_code == 0:
                 result.issues_processed += 1
 
-        # Branch-contending stages: a `pr-ready` issue blocks a new build (Human Gate 2
-        # awaiting merge) and is never run; otherwise advance the single active build/review.
-        branch_tasks = sorted(
-            admission.active_branch_issues, key=lambda t: t.issue_number
-        )
-        runnable_tasks = [
-            t for t in branch_tasks if t.current_stage in ("build", "review")
-        ]
+        # Branch-contending stages: any `pr-ready` issue blocks a new build/review
+        # (Human Gate 2 awaiting merge), regardless of issue-number order. Otherwise
+        # advance the oldest admitted build/review task.
+        runnable_tasks = [] if admission.has_pr_ready else admission.build_review_issues
         if runnable_tasks:
             task = runnable_tasks[0]
             # Branch new build worktrees from a fresh `origin/<default>` baseline
@@ -1032,10 +1026,11 @@ async def collect_fleet_status(
             checkout = resolve_fleet_repo_path(
                 repo_slug,
                 repository_map_value=repo_value,
-                workspaces_dir=config.fleet.workspaces_dir if config.fleet else None,
             )
-            cwd = checkout if checkout.is_dir() else Path.cwd()
-            tasks = await list_all_factory_issues(cwd, repo_slug=repo_slug)
+            # Always pass the resolved checkout as cwd; `list_all_factory_issues` only
+            # scans `checkout/.worktrees` when that directory exists, so a missing
+            # checkout never falls back to scanning the invoking directory's worktrees.
+            tasks = await list_all_factory_issues(checkout, repo_slug=repo_slug)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         out.append((repo_slug, tasks, error))

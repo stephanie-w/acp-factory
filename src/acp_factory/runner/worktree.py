@@ -15,8 +15,6 @@ class WorktreeError(RuntimeError):
     """Raised when git worktree creation or cleanup fails."""
 
 
-DEFAULT_WORKSPACES_DIR = "~/.acp-factory/repos"
-
 _REPO_SLUG_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 )
@@ -86,55 +84,38 @@ def resolve_fleet_repo_path(
     repo_slug: str,
     *,
     repository_map_value: str,
-    workspaces_dir: str | None = None,
 ) -> Path:
-    """Resolve a fleet repository to its local checkout path without cloning/fetching."""
+    """Resolve a fleet repository to its local checkout path (explicit path only)."""
     if not _REPO_SLUG_RE.match(repo_slug):
         raise WorktreeError(
             f"Invalid fleet repository slug '{repo_slug}'. Expected 'owner/repo'."
         )
-    if repository_map_value != "auto":
-        return _expand_path(repository_map_value).resolve()
-    ws_dir = _expand_path(workspaces_dir or DEFAULT_WORKSPACES_DIR)
-    return (ws_dir / repo_slug.replace("/", "__")).resolve()
+    return _expand_path(repository_map_value).resolve()
 
 
 async def ensure_fleet_repo_checkout(
     repo_slug: str,
     *,
     repository_map_value: str,
-    workspaces_dir: str | None = None,
 ) -> Path:
-    """Resolve a fleet target repository into a local checkout, cloning on demand.
+    """Resolve a fleet target repository to a local checkout and ensure a fresh baseline.
 
-    - An explicit local path (containing `/` or starting with `~`/`.`) is used as-is.
-    - The string `"auto"` clones `repo_slug` into `<workspaces_dir>/<owner>__<repo>`.
-    - After resolving/creating the checkout, `git fetch --prune origin` guarantees a
-      fresh baseline so new issue worktrees never branch from a stale local HEAD.
+    `repository_map_value` must be an explicit local checkout path (absolute or
+    `~`-relative); on-demand cloning is intentionally not supported. After resolving,
+    `git fetch --prune origin` guarantees new issue worktrees never branch from a stale
+    local HEAD.
     """
     checkout = resolve_fleet_repo_path(
         repo_slug,
         repository_map_value=repository_map_value,
-        workspaces_dir=workspaces_dir,
     )
 
-    if repository_map_value != "auto" and not checkout.exists():
+    if not checkout.exists():
         raise WorktreeError(
             f"Fleet repository '{repo_slug}' maps to missing path '{checkout}'"
         )
-
     if not (checkout / ".git").exists():
-        if repository_map_value != "auto":
-            raise WorktreeError(f"'{checkout}' is not a git repository")
-        checkout.parent.mkdir(parents=True, exist_ok=True)
-        rc, _out, err = await _run_git(
-            checkout.parent,
-            "clone",
-            f"https://github.com/{repo_slug}.git",
-            str(checkout.name),
-        )
-        if rc != 0:
-            raise WorktreeError(f"Failed to clone {repo_slug}: {err}")
+        raise WorktreeError(f"'{checkout}' is not a git repository")
 
     rc, _out, err = await _run_git(checkout, "fetch", "--prune", "origin")
     if rc != 0:

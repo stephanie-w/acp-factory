@@ -46,12 +46,11 @@ Instead of maintaining a local database that can drift out of sync with GitHub, 
 ```toml
 # Central .factory/config.toml
 [fleet]
-workspaces_dir = "~/.acp-factory/repos"
+max_active_branches_per_repo = 1
 
 [fleet.repositories]
 "owner/core-lib" = "~/DEV/core-lib"        # Existing local checkout
 "owner/service-api" = "~/DEV/service-api"  # Existing local checkout
-"owner/infra-iac" = "auto"                 # Cloned on demand into workspaces_dir/owner__infra-iac
 ```
 - **Zero Impact on Active Working Trees**: Because `triage` and `spec` are strictly read-only and `build`/`review` execute inside `.worktrees/issue-<id>`, pointing `[fleet.repositories]` to an existing `~/DEV/<repo>` checkout never switches branches or modifies uncommitted work in the developer's main working directory.
 - **Fresh Baseline Guarantee**: Before creating a new `.worktrees/issue-<id>` worktree, `WorktreeManager` runs `git fetch --prune origin` and branches `factory/issue-<id>` from `origin/<default-branch>` (rather than a potentially lagging local `HEAD`).
@@ -174,9 +173,9 @@ flowchart TD
 
 | Component | Target Module(s) | Key Additions |
 | :--- | :--- | :--- |
-| **1. Fleet Config & Optional Repo Check Override** | [`src/acp_factory/config.py`](../src/acp_factory/config.py) | `FleetConfig` (`workspaces_dir`, `repositories`, `max_active_branches_per_repo`, `max_review_rounds`); helper to overlay target repo's `pre` and `[checks.*]` onto central stage config. |
+| **1. Fleet Config & Optional Repo Check Override** | [`src/acp_factory/config.py`](../src/acp_factory/config.py) | `FleetConfig` (`repositories`, `max_active_branches_per_repo`, `max_review_rounds`); helper to overlay target repo's `pre` and `[checks.*]` onto central stage config. |
 | **2. Stateless `factory:meta` & Findings Replacement / 3-Round Cap** | [`src/acp_factory/task.py`](../src/acp_factory/task.py) | Parse/render `<!-- factory:meta ... -->` and `<!-- factory:findings:start/end -->`; replace instead of stacking `## Latest Review Findings (Round N/3)`; strip findings on `ACCEPTED`; enforce 3-round `factory:needs-human` circuit breaker. |
-| **3. Repo Checkout Sync & Cross-Repo Issue Queries** | [`src/acp_factory/github.py`](../src/acp_factory/github.py), [`src/acp_factory/runner/worktree.py`](../src/acp_factory/runner/worktree.py) | `ensure_fleet_repo_checkout` (local `~` path resolution or `gh repo clone` into `workspaces_dir` + `git fetch --prune origin`); branch new issue worktrees from `origin/<default-branch>`; Git SHA & clean-tree helpers (`get_head_sha`, `is_worktree_clean`). |
+| **3. Repo Checkout Sync & Cross-Repo Issue Queries** | [`src/acp_factory/github.py`](../src/acp_factory/github.py), [`src/acp_factory/runner/worktree.py`](../src/acp_factory/runner/worktree.py) | `ensure_fleet_repo_checkout` (explicit local `~` path resolution + `git fetch --prune origin`); branch new issue worktrees from `origin/<default-branch>`; Git SHA & clean-tree helpers (`get_head_sha`, `is_worktree_clean`). |
 | **4. `REVIEWED_AT == HEAD` Guard, Delta Review Brief & Fleet Runner** | [`src/acp_factory/runner/loop.py`](../src/acp_factory/runner/loop.py) | Pre-review clean-tree & SHA snapshot + pre-publish SHA guard in `run_issue_stage` and `run_branch_review`; Round 2+ delta review context builder; `run_fleet_next` and `collect_fleet_status` with stage-aware per-repo admission and error isolation. |
 | **5. CLI Surface (`status --fleet`, `next --fleet`)** | [`src/acp_factory/cli.py`](../src/acp_factory/cli.py) | `--fleet` flag (auto-enabled when `[fleet]` is configured in the active config) on `acp-factory status` (adds `Repository` column) and `acp-factory next`. |
 | **6. Automated Test Suite** | `tests/test_fleet.py`, [`tests/test_github_task.py`](../tests/test_github_task.py) | Unit tests covering `factory:meta` round tracking, findings replacement/stripping, 3-round circuit breaker, SHA mismatch publish abort, stage-aware per-repo busy guard, and cross-repo error isolation. |

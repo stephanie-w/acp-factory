@@ -75,17 +75,18 @@ Or automatically process the next actionable issue in the repository queue:
 acp-factory next
 ```
 
-### Fleet Orchestration (Multi-Repo / Org-Wide)
+### Fleet Orchestration (Multi-Repo)
 
-Add a `[fleet]` section to `.factory/config.toml` to run the same 5-stage workflow across many repositories, cloning `"auto"` targets on demand and isolating per-repo errors:
+Add a `[fleet]` section to `.factory/config.toml` to run the same 5-stage workflow across many repositories. Each `owner/repo` maps to an explicit local checkout path (no on-demand cloning):
 
 ```toml
 [fleet]
-workspaces_dir = "~/.acp-factory/repos"
+max_active_branches_per_repo = 1   # default
+max_review_rounds = 3              # optional; overrides top-level
 
 [fleet.repositories]
-"acme/core-lib" = "~/DEV/core-lib"   # existing local checkout
-"acme/service-api" = "auto"          # cloned into workspaces_dir/acme__service-api
+"acme/core-lib" = "~/DEV/core-lib"    # existing local checkout
+"acme/service-api" = "~/DEV/service-api"
 ```
 
 Advance one step per repo (with stage-aware admission control so each repo has at most one in-flight `build`/`review`/`pr-ready` branch) and inspect per-repo status:

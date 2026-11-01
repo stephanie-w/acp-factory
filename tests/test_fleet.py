@@ -34,16 +34,17 @@ def test_fleet_config_parsing_and_defaults() -> None:
     cfg = FactoryConfig.model_validate(
         {
             "fleet": {
-                "workspaces_dir": "~/.acp-factory/repos",
-                "repositories": {"acme/core": "~/DEV/core", "acme/api": "auto"},
+                "repositories": {"acme/core": "~/DEV/core", "acme/api": "~/DEV/api"},
                 "max_active_branches_per_repo": 2,
                 "max_review_rounds": 5,
             }
         }
     )
     assert cfg.fleet is not None
-    assert cfg.fleet.workspaces_dir == "~/.acp-factory/repos"
-    assert cfg.fleet.repositories == {"acme/core": "~/DEV/core", "acme/api": "auto"}
+    assert cfg.fleet.repositories == {
+        "acme/core": "~/DEV/core",
+        "acme/api": "~/DEV/api",
+    }
     assert cfg.fleet.max_active_branches_per_repo == 2
     assert cfg.fleet.max_review_rounds == 5
     # fleet max_review_rounds wins over top-level
@@ -63,9 +64,10 @@ def test_build_repo_admission_single_active_branch() -> None:
         _task(3, LABEL_SPEC),
     ]
     admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=1)
-    # Only one branch-contending issue is admitted as active
+    # Only one build/review issue is admitted (cap applied); no pr-ready
+    assert admission.has_pr_ready is False
     assert admission.active_branch_count == 1
-    assert [t.issue_number for t in admission.active_branch_issues] == [1]
+    assert [t.issue_number for t in admission.build_review_issues] == [1]
     # Read-only spec issue is still actionable (not branch-contending)
     assert [t.issue_number for t in admission.actionable_issues] == [1, 2, 3]
 
@@ -76,16 +78,30 @@ def test_build_repo_admission_pr_ready_counts_as_contending() -> None:
         _task(2, LABEL_BUILD),
     ]
     admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=1)
-    assert admission.active_branch_count == 1
-    assert admission.active_branch_issues[0].issue_number == 1
+    assert admission.has_pr_ready is True
+    assert [t.issue_number for t in admission.pr_ready_issues] == [1]
+    # The build is still tracked but pr-ready blocks it
+    assert [t.issue_number for t in admission.build_review_issues] == [2]
 
 
 def test_build_repo_admission_no_contending_issues() -> None:
     tasks = [_task(1, LABEL_SPEC), _task(2, LABEL_REVIEW)]
     # review is branch-contending; spec is not
     admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=2)
+    assert admission.has_pr_ready is False
     assert admission.active_branch_count == 1
-    assert admission.active_branch_issues[0].issue_number == 2
+    assert [t.issue_number for t in admission.build_review_issues] == [2]
+
+
+def test_build_repo_admission_pr_ready_higher_number_still_blocks() -> None:
+    """A pr-ready issue with a HIGHER number than a queued build still blocks it (Finding 1)."""
+    tasks = [
+        _task(10, LABEL_BUILD),
+        _task(11, LABEL_PR_READY),
+    ]
+    admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=1)
+    assert admission.has_pr_ready is True
+    assert [t.issue_number for t in admission.pr_ready_issues] == [11]
 
 
 def test_max_review_rounds_threaded_through_parse() -> None:
@@ -135,28 +151,13 @@ async def test_ensure_fleet_repo_checkout_local_path(tmp_path: Path) -> None:
         assert mock_git.await_args_list[-1].args[1:] == ("fetch", "--prune", "origin")
 
 
-async def test_ensure_fleet_repo_checkout_auto_clone(tmp_path: Path) -> None:
-    ws = tmp_path / "repos"
+async def test_ensure_fleet_repo_checkout_missing_path_raises(tmp_path: Path) -> None:
+    """An explicit local path that does not exist raises (no on-demand cloning)."""
+    from acp_factory.runner.worktree import WorktreeError
 
-    async def fake_git(cwd: Path, *args: str) -> tuple[int, str, str]:
-        if args[:2] == ("clone",):
-            # Simulate a successful clone by creating a .git dir in the target
-            target = cwd / args[2]
-            (target / ".git").mkdir(parents=True, exist_ok=True)
-            return (0, "", "")
-        return (0, "", "")
-
-    with patch(
-        "acp_factory.runner.worktree._run_git", new=AsyncMock(side_effect=fake_git)
-    ) as mock_git:
-        checkout = await ensure_fleet_repo_checkout(
-            "acme/api", repository_map_value="auto", workspaces_dir=str(ws)
-        )
-        assert checkout == (ws / "acme__api").resolve()
-        assert mock_git.await_args_list[0].args[1:3] == (
-            "clone",
-            "https://github.com/acme/api.git",
-        )
+    missing = tmp_path / "does-not-exist"
+    with pytest.raises(WorktreeError):
+        await ensure_fleet_repo_checkout("acme/core", repository_map_value=str(missing))
 
 
 async def test_detect_default_branch(tmp_path: Path) -> None:
@@ -280,7 +281,7 @@ async def test_advance_fleet_repo_threads_central_config(tmp_path: Path) -> None
     central = FactoryConfig.model_validate(
         {
             "fleet": {
-                "repositories": {"acme/core": "auto"},
+                "repositories": {"acme/core": "~/DEV/core"},
                 "max_review_rounds": 4,
             },
             "stages": {"spec": {"persona": "personas/architect.md", "checks": []}},
@@ -322,7 +323,7 @@ async def test_advance_fleet_repo_threads_central_config(tmp_path: Path) -> None
         result = await _advance_fleet_repo(
             central,
             "acme/core",
-            "auto",
+            str(tmp_path),
             dry_run=True,
             verbose=False,
             display=FactoryDisplay(),
@@ -340,7 +341,7 @@ async def test_advance_fleet_repo_pr_ready_blocks_new_build(tmp_path: Path) -> N
     from acp_factory.ui.display import FactoryDisplay
 
     central = FactoryConfig.model_validate(
-        {"fleet": {"repositories": {"acme/core": "auto"}}}
+        {"fleet": {"repositories": {"acme/core": "~/DEV/core"}}}
     )
 
     pr_ready_task = TaskContext(
@@ -376,14 +377,14 @@ async def test_advance_fleet_repo_pr_ready_blocks_new_build(tmp_path: Path) -> N
         result = await _advance_fleet_repo(
             central,
             "acme/core",
-            "auto",
+            str(tmp_path),
             dry_run=True,
             verbose=False,
             display=FactoryDisplay(),
         )
         assert result.error is None
         # The pr-ready issue (1) is never passed to run_issue_stage; build (2) is not run either
-        # because pr-ready occupies the single active-branch slot.
+        # because pr-ready blocks all build/review.
         run_numbers = [c.args[1] for c in mock_run.call_args_list]
         assert 1 not in run_numbers
         assert 2 not in run_numbers
@@ -425,7 +426,7 @@ def test_resolve_repo_stage_wraps_prompt_with_task_context(tmp_path: Path) -> No
 def test_resolve_repo_stage_minimal_fleet_config(tmp_path: Path) -> None:
     """A minimal [fleet]-only config resolves via built-in defaults (Finding 3)."""
     minimal = FactoryConfig.model_validate(
-        {"fleet": {"repositories": {"acme/core": "auto"}}}
+        {"fleet": {"repositories": {"acme/core": "~/DEV/core"}}}
     )
     task_ctx = "## Original Issue Description\nSomething."
     resolved = minimal.resolve_repo_stage(
@@ -439,7 +440,7 @@ def test_resolve_repo_stage_minimal_fleet_config(tmp_path: Path) -> None:
 def test_effective_max_review_rounds_precedence() -> None:
     """Top-level max_review_rounds is respected when [fleet].max_review_rounds is unset (Finding 4)."""
     cfg = FactoryConfig.model_validate(
-        {"max_review_rounds": 5, "fleet": {"repositories": {"a/b": "auto"}}}
+        {"max_review_rounds": 5, "fleet": {"repositories": {"a/b": "~/DEV/b"}}}
     )
     assert cfg.effective_max_review_rounds == 5
 
@@ -449,8 +450,8 @@ def test_effective_max_review_rounds_precedence() -> None:
     assert overridden.effective_max_review_rounds == 2
 
 
-async def test_ensure_fleet_repo_checkout_rejects_invalid_slug() -> None:
-    """A hostile/malformed repo slug is rejected before any clone is attempted (Finding 2)."""
+async def test_ensure_fleet_repo_checkout_rejects_invalid_slug(tmp_path: Path) -> None:
+    """A hostile/malformed repo slug is rejected before any git command runs."""
     from acp_factory.runner.worktree import WorktreeError
 
     for bad_slug in ("../evil", "./x", "a/.hidden", "a", "a/b/c"):
@@ -460,20 +461,22 @@ async def test_ensure_fleet_repo_checkout_rejects_invalid_slug() -> None:
         ) as mock_git:
             with pytest.raises(WorktreeError):
                 await ensure_fleet_repo_checkout(
-                    bad_slug, repository_map_value="auto", workspaces_dir="/tmp/x"
+                    bad_slug, repository_map_value=str(tmp_path)
                 )
-            # Validation must reject before running any git command (esp. clone)
+            # Validation must reject before running any git command
             mock_git.assert_not_awaited()
 
     # Sanity: a valid slug still works (validation is not over-broad).
+    repo = tmp_path / "api"
+    (repo / ".git").mkdir(parents=True)
     with patch(
         "acp_factory.runner.worktree._run_git",
         new=AsyncMock(return_value=(0, "", "")),
     ):
         result = await ensure_fleet_repo_checkout(
-            "acme/api", repository_map_value="auto", workspaces_dir="/tmp/x"
+            "acme/api", repository_map_value=str(repo)
         )
-        assert result is not None
+        assert result == repo.resolve()
 
 
 async def test_list_actionable_issues_retains_pr_ready_for_admission(
@@ -544,23 +547,18 @@ async def test_run_fleet_next_empty_repositories_returns_empty() -> None:
     """run_fleet_next returns [] instead of raising when [fleet.repositories] is empty (Finding 3)."""
     from acp_factory.runner.loop import run_fleet_next
 
-    cfg = FactoryConfig.model_validate({"fleet": {"workspaces_dir": "/tmp/x"}})
+    cfg = FactoryConfig.model_validate({"fleet": {}})
     result = await run_fleet_next(cfg)
     assert result == []
 
 
 async def test_collect_fleet_status_does_not_clone(tmp_path: Path) -> None:
-    """status --fleet does not clone/fetch; it lists via gh --repo without a checkout (Finding 2)."""
+    """status --fleet lists via gh --repo without cloning/fetching (read-only)."""
 
     from acp_factory.runner.loop import collect_fleet_status
 
     cfg = FactoryConfig.model_validate(
-        {
-            "fleet": {
-                "repositories": {"acme/core": "auto"},
-                "workspaces_dir": str(tmp_path),
-            }
-        }
+        {"fleet": {"repositories": {"acme/core": str(tmp_path / "core")}}}
     )
     with (
         patch(

@@ -134,7 +134,9 @@ async def list_actionable_issues(
                     issue_num = int(num_str)
                     if issue_num not in seen_numbers:
                         try:
-                            wt_task = await fetch_issue(issue_num, cwd=cwd)
+                            wt_task = await fetch_issue(
+                                issue_num, cwd=cwd, repo_slug=repo_slug
+                            )
                         except GitHubError:
                             continue
                         if wt_task.current_stage == "done":
@@ -181,7 +183,9 @@ async def list_all_factory_issues(
                     issue_num = int(num_str)
                     if issue_num not in seen_numbers:
                         try:
-                            wt_task = await fetch_issue(issue_num, cwd=cwd)
+                            wt_task = await fetch_issue(
+                                issue_num, cwd=cwd, repo_slug=repo_slug
+                            )
                         except GitHubError:
                             continue
                         tasks.append(wt_task)
@@ -196,13 +200,19 @@ class RepoAdmission:
     """Stage-aware per-repo admission decision for the fleet runner."""
 
     repo_slug: str
-    active_branch_issues: list[TaskContext] = field(default_factory=list)
+    pr_ready_issues: list[TaskContext] = field(default_factory=list)
+    build_review_issues: list[TaskContext] = field(default_factory=list)
     actionable_issues: list[TaskContext] = field(default_factory=list)
 
     @property
+    def has_pr_ready(self) -> bool:
+        """True when any issue is awaiting Human Gate 2 (blocks new build/review)."""
+        return bool(self.pr_ready_issues)
+
+    @property
     def active_branch_count(self) -> int:
-        """Count issues currently holding a branch-contending label (build/review/pr-ready)."""
-        return len(self.active_branch_issues)
+        """Count of all branch/PR-contending issues (pr-ready + build + review)."""
+        return len(self.pr_ready_issues) + len(self.build_review_issues)
 
 
 def build_repo_admission(
@@ -214,21 +224,28 @@ def build_repo_admission(
     """Classify a repository's issues for stage-aware admission control.
 
     Branch-contending stages (`build`, `review`, `pr-ready`) are mutually exclusive per
-    repo: while one is in flight, the fleet runner must not start a second build branch
-    (prevents merge-conflict cascades).
+    repo. A `pr-ready` issue (awaiting Human Gate 2 merge) blocks any new `build`/`review`
+    regardless of issue-number order.
     """
-    active: list[TaskContext] = []
+    pr_ready: list[TaskContext] = []
+    build_review: list[TaskContext] = []
     actionable: list[TaskContext] = []
     for task in tasks:
         stage = task.current_stage
-        if _is_branch_contending(task):
-            if len(active) < max_active_branches_per_repo:
-                active.append(task)
+        if LABEL_PR_READY in task.labels:
+            pr_ready.append(task)
+        elif stage in ("build", "review"):
+            build_review.append(task)
         if stage is not None:
             actionable.append(task)
+
+    pr_ready.sort(key=lambda t: t.issue_number)
+    build_review.sort(key=lambda t: t.issue_number)
+    build_review = build_review[:max_active_branches_per_repo]
     return RepoAdmission(
         repo_slug=repo_slug,
-        active_branch_issues=active,
+        pr_ready_issues=pr_ready,
+        build_review_issues=build_review,
         actionable_issues=actionable,
     )
 

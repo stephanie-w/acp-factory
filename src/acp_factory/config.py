@@ -189,15 +189,11 @@ class RetryConfig(BaseModel):
 
 
 class FleetConfig(BaseModel):
-    """Fleet orchestration configuration (multi-repo / org-wide runs)."""
+    """Fleet orchestration configuration (multi-repo runs)."""
 
-    workspaces_dir: str | None = Field(
-        default=None,
-        description="Directory where 'auto' repositories are cloned (owner__repo). Defaults to ~/.acp-factory/repos when unset.",
-    )
     repositories: dict[str, str] = Field(
         default_factory=dict,
-        description="Map of 'owner/repo' to a local checkout path or 'auto' (clone on demand).",
+        description="Map of 'owner/repo' to an explicit local checkout path (absolute or ~-relative).",
     )
     max_active_branches_per_repo: int = Field(
         default=1,
