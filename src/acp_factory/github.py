@@ -31,6 +31,8 @@ class DryRunPlan:
     issue_body_file: Path | None = None
     pr_body_file: Path | None = None
     commands: list[str] = field(default_factory=list)
+    verdict_status: str = ""
+    publish_pr: bool = False
 
 
 class GitHubError(RuntimeError):
@@ -492,6 +494,8 @@ def build_dry_run_standalone_pr_plan(
         updated_factory_block=verdict.updated_factory_block,
         pr_body_file=pr_body_file,
         commands=commands,
+        verdict_status=verdict.status,
+        publish_pr=verdict.publish_pr,
     )
 
 
@@ -612,6 +616,8 @@ def build_dry_run_gh_plan(
         issue_body_file=issue_body_file,
         pr_body_file=pr_body_file,
         commands=commands,
+        verdict_status=verdict.status,
+        publish_pr=verdict.publish_pr,
     )
 
 

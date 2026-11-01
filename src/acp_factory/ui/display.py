@@ -198,6 +198,23 @@ class FactoryDisplay:
                 )
             )
 
+        # A review that did not accept the change has nothing to publish. Show a
+        # clear verdict panel instead of a misleading "run these commands" header.
+        if plan.stage == "review" and not plan.publish_pr:
+            status = plan.verdict_status or "unknown"
+            self.console.print(
+                Panel(
+                    Text(
+                        f"Review verdict: {status}\n\n"
+                        "No publish commands were generated. Fix the findings above "
+                        "and re-run the review."
+                    ),
+                    title="[bold red]Dry-Run: Review Not Accepted[/bold red]",
+                    border_style="red",
+                )
+            )
+            return
+
         cmd_lines = [
             "# Run these commands manually when you are satisfied with the output:",
             *plan.commands,

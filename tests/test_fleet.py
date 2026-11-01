@@ -208,3 +208,62 @@ def test_resolve_repo_stage_overlays_checks(tmp_path: Path) -> None:
     assert overlaid.checks[0].cmd == "uv run ruff check ."
     # Central persona is inherited (not overridden by repo)
     assert overlaid.agent.persona == "personas/implementer.md"
+
+
+def test_dry_run_plan_non_accepted_review_has_no_publish_commands() -> None:
+    from io import StringIO
+
+    from rich.console import Console
+
+    from acp_factory.github import DryRunPlan
+    from acp_factory.ui.display import FactoryDisplay
+
+    plan = DryRunPlan(
+        issue_number=0,
+        stage="review",
+        target_label="factory:build",
+        updated_factory_block="### Findings\n- [blocking] x",
+        pr_body_file=Path("pr-body.md"),
+        commands=["# Review verdict: revision_needed (saved to pr-body.md)"],
+        verdict_status="revision_needed",
+        publish_pr=False,
+    )
+
+    buf = StringIO()
+    display = FactoryDisplay(custom_console=Console(file=buf, width=120))
+    display.show_dry_run_plan(plan)
+    out = buf.getvalue()
+
+    assert "Review Not Accepted" in out
+    assert "revision_needed" in out
+    assert "Fix the findings" in out
+    assert "Run these commands manually" not in out
+
+
+def test_dry_run_plan_accepted_review_shows_commands() -> None:
+    from io import StringIO
+
+    from rich.console import Console
+
+    from acp_factory.github import DryRunPlan
+    from acp_factory.ui.display import FactoryDisplay
+
+    plan = DryRunPlan(
+        issue_number=0,
+        stage="review",
+        target_label="factory:pr-ready",
+        updated_factory_block="### Findings\n- None",
+        pr_body_file=Path("pr-body.md"),
+        commands=["git push -u origin feat/x", "gh pr create ..."],
+        verdict_status="accepted",
+        publish_pr=True,
+    )
+
+    buf = StringIO()
+    display = FactoryDisplay(custom_console=Console(file=buf, width=120))
+    display.show_dry_run_plan(plan)
+    out = buf.getvalue()
+
+    assert "Run these commands manually" in out
+    assert "git push -u origin feat/x" in out
+    assert "Review Not Accepted" not in out
