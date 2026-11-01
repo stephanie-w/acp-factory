@@ -472,10 +472,28 @@ def test_delta_review_brief_includes_prior_findings() -> None:
             "## Specification\n- X", "## Findings\n- f1", round_num=1, max_rounds=3
         ),
     )
-    brief = build_delta_review_brief(task, last_reviewed_sha="abc", review_round=1)
-    assert "abc..HEAD" in brief
+    brief = build_delta_review_brief(task, last_reviewed_sha="abc1234", review_round=1)
+    assert "abc1234..HEAD" in brief
+    assert "{last_reviewed_sha}" not in brief
     assert "## Findings\n- f1" in brief
     assert "do NOT invent new findings" in brief
+
+
+def test_delta_review_brief_rejects_malformed_sha() -> None:
+    task = TaskContext(issue_number=6, title="x")
+    brief = build_delta_review_brief(
+        task, last_reviewed_sha="not-a-sha; rm -rf /", review_round=1
+    )
+    assert "not-a-sha; rm -rf /" not in brief
+    assert "<invalid-sha>" in brief
+
+
+def test_parse_review_round_tolerates_non_numeric() -> None:
+    from acp_factory.task import parse_review_round
+
+    assert parse_review_round({}) == 0
+    assert parse_review_round({"review_round": "2"}) == 2
+    assert parse_review_round({"review_round": "abc"}) == 0
 
 
 async def test_run_issue_stage_review_publish_guard_aborts_on_sha_mismatch(

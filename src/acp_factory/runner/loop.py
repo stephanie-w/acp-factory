@@ -16,6 +16,7 @@ from ..github import (
     DryRunPlan,
     build_dry_run_gh_plan,
     build_dry_run_standalone_pr_plan,
+    build_issue_pr_body,
     fetch_issue,
     push_and_create_or_update_pr,
     push_and_create_or_update_standalone_pr,
@@ -29,10 +30,10 @@ from ..task import (
     StageVerdict,
     TaskContext,
     _clean_markdown_stage_body,
-    clean_spec_block,
     extract_factory_findings,
     format_task_prompt_context,
     parse_factory_meta,
+    parse_review_round,
     parse_stage_verdict,
     set_factory_meta,
     strip_factory_findings,
@@ -129,6 +130,9 @@ def build_retry_prompt(
     return "\n".join(lines)
 
 
+_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+
+
 def build_delta_review_brief(
     task: TaskContext,
     *,
@@ -137,13 +141,16 @@ def build_delta_review_brief(
 ) -> str:
     """Construct a Round 2+ delta-focused review brief to prevent reviewer goalpost-moving."""
     prior_findings = extract_factory_findings(task.factory_block)
+    safe_sha = (
+        last_reviewed_sha if _SHA_RE.match(last_reviewed_sha) else "<invalid-sha>"
+    )
     lines = [
         "# Delta Review Brief (Round 2+)",
         f"- **Prior Review Round:** {review_round}",
-        f"- **Prior Reviewed SHA:** `{last_reviewed_sha}`",
-        "- **Delta Command:** audit `git diff {last_reviewed_sha}..HEAD` (plus the full diff against base for context).",
+        f"- **Prior Reviewed SHA:** `{safe_sha}`",
+        f"- **Delta Command:** audit `git diff {safe_sha}..HEAD` (plus the full diff against base for context).",
         "- **Rules:** verify every prior finding below was resolved and audit all code touched in "
-        f"`{last_reviewed_sha}..HEAD` for regressions or security issues; do NOT invent new findings on untouched lines.",
+        f"`{safe_sha}..HEAD` for regressions or security issues; do NOT invent new findings on untouched lines.",
     ]
     if prior_findings:
         lines.extend(["", "## Prior Review Findings", prior_findings])
@@ -511,7 +518,7 @@ async def run_issue_stage(
                 )
 
         meta = parse_factory_meta(task.factory_block)
-        review_round = int(meta.get("review_round", "0") or "0")
+        review_round = parse_review_round(meta)
         last_reviewed_sha = meta.get("last_reviewed_sha", "")
         if review_round >= 1 and last_reviewed_sha:
             task_context_md = (
@@ -613,6 +620,7 @@ async def run_issue_stage(
             verdict,
             workspace=resolved_workspace,
             run_dir=outcome.run_dir,
+            reviewed_sha=pre_review_sha,
         )
         outcome.dry_run_plan = plan
         ui.show_dry_run_plan(plan)
@@ -632,12 +640,7 @@ async def run_issue_stage(
             resolved_workspace, issue_number
         )
         pr_cwd = wt_cwd if wt_cwd.exists() else resolved_workspace
-        spec_text = (
-            clean_spec_block(verdict.updated_factory_block) or task.original_body
-        )
-        pr_body = f"## Summary\n{verdict.summary}\n\n## Specification\n{spec_text}"
-        if pre_review_sha:
-            pr_body += f"\n\nReviewed-SHA: `{pre_review_sha}`"
+        pr_body = build_issue_pr_body(task, verdict, reviewed_sha=pre_review_sha)
         await push_and_create_or_update_pr(task, pr_body=pr_body, cwd=pr_cwd)
 
     await transition_issue_label(task, verdict.target_label, cwd=resolved_workspace)

@@ -139,6 +139,15 @@ def clean_spec_block(factory_block: str) -> str:
     return strip_factory_meta(strip_factory_findings(factory_block)).strip()
 
 
+def parse_review_round(meta: dict[str, str]) -> int:
+    """Parse `review_round` from factory meta, defaulting to 0 on missing/non-numeric values."""
+    raw = meta.get("review_round", "0") or "0"
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
 class IssueComment(BaseModel):
     """A human comment on a GitHub Issue."""
 
@@ -419,7 +428,7 @@ def parse_stage_verdict(
 
     if stage == "review":
         meta = parse_factory_meta(current_factory_block)
-        review_round = int(meta.get("review_round", "0") or "0")
+        review_round = parse_review_round(meta)
 
         if raw_token in ("ACCEPTED", "PASS"):
             clean_block = strip_factory_findings(current_factory_block)

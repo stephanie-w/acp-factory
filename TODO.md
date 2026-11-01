@@ -65,8 +65,6 @@
 
 ## 3. Next Major Milestone — Stateless Fleet Orchestration & Review Loop Hardening
 
-> 📖 See **[docs/fleet-orchestration.md](docs/fleet-orchestration.md)** for the full architectural design, subtleties, and problem analysis.
-
 - [x] **Stateless Review Loop Integrity & 3-Round Circuit Breaker (`task.py` & `loop.py`)**:
   - [x] Track `review_round` and `last_reviewed_sha` statelessly via `<!-- factory:meta ... -->` inside the Issue Body's `<!-- factory:start -->` block.
   - [x] Replace (instead of stacking) `## Latest Review Findings (Round N/3)` in-place on `REVISION_NEEDED`, and strip temporary findings from the spec block when `ACCEPTED` so obsolete failure notes never leak into the PR's `## Specification`.
