@@ -12,6 +12,7 @@ from rich.table import Table
 from .config import FactoryConfig
 from .github import list_actionable_issues, list_all_factory_issues
 from .runner.loop import run_branch_review, run_factory, run_issue_stage
+from .task import TaskContext
 from .ui.display import console
 
 app = typer.Typer(
@@ -649,6 +650,13 @@ def next_cmd(
         Path | None,
         typer.Option("--config", "-c", help="Path to configuration file."),
     ] = None,
+    fleet: Annotated[
+        bool | None,
+        typer.Option(
+            "--fleet/--no-fleet",
+            help="Run one fleet pass across all 'fleet.repositories' entries (auto-enabled when a fleet section is configured).",
+        ),
+    ] = None,
     all_issues: Annotated[
         bool,
         typer.Option(
@@ -672,6 +680,36 @@ def next_cmd(
     resolved_workspace = workspace.resolve()
 
     async def _run_next() -> int:
+        base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
+        use_fleet = fleet if fleet is not None else (base_cfg.fleet is not None)
+
+        if use_fleet:
+            from .runner.loop import run_fleet_next
+
+            results = await run_fleet_next(
+                base_cfg,
+                dry_run=dry_run,
+                verbose=verbose,
+            )
+            if not results:
+                console.print(
+                    "[dim]No fleet repositories configured ([fleet.repositories] is empty).[/dim]"
+                )
+                return 0
+            exit_code = 0
+            for res in results:
+                if res.error:
+                    console.print(
+                        f"[bold red]✗ {res.repo_slug}[/bold red]: {res.error}"
+                    )
+                    exit_code = 1
+                else:
+                    console.print(
+                        f"[bold green]✓ {res.repo_slug}[/bold green]: "
+                        f"{res.issues_processed} issue(s) advanced"
+                    )
+            return exit_code
+
         tasks = await list_actionable_issues(resolved_workspace)
         if not tasks:
             console.print(
@@ -715,17 +753,84 @@ def next_cmd(
     raise typer.Exit(code=rc)
 
 
+def _state_description(t: TaskContext) -> str:
+    """Render a human-gate/stage description for a task's `factory:*` labels."""
+    fac_labels = [lbl for lbl in t.labels if lbl.startswith("factory:")]
+    if t.current_stage:
+        return f"[green]Actionable ({t.current_stage})[/green]"
+    if "factory:spec-ready" in fac_labels:
+        return "[bold magenta]🛑 Human Gate 1 (Spec Approval)[/bold magenta]"
+    if "factory:pr-ready" in fac_labels:
+        return "[bold magenta]🛑 Human Gate 2 (PR Review & Merge)[/bold magenta]"
+    if "factory:needs-human" in fac_labels:
+        return "[bold red]⚠️ Needs Human Input[/bold red]"
+    if "factory:completed" in fac_labels:
+        return "[dim]Completed[/dim]"
+    return "[dim]Idle[/dim]"
+
+
 @app.command("status")
 def status_cmd(
     workspace: Annotated[
         Path,
         typer.Option("--workspace", "-w", help="Target workspace directory."),
     ] = Path("."),
+    config_file: Annotated[
+        Path | None,
+        typer.Option("--config", "-c", help="Path to configuration file."),
+    ] = None,
+    fleet: Annotated[
+        bool | None,
+        typer.Option(
+            "--fleet/--no-fleet",
+            help="Show a per-repository fleet status table (auto-enabled when a fleet section is configured).",
+        ),
+    ] = None,
 ) -> None:
     """Display open `factory:*` GitHub Issues, their current stage/human gate, and local `.worktrees/`."""
     resolved_workspace = workspace.resolve()
 
     async def _show_status() -> None:
+        base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
+        use_fleet = fleet if fleet is not None else (base_cfg.fleet is not None)
+
+        if use_fleet:
+            from .runner.loop import collect_fleet_status
+
+            table = Table(title="acp-factory Fleet Status")
+            table.add_column("Repository", style="bold cyan")
+            table.add_column("Issue", justify="right", style="cyan")
+            table.add_column("Title")
+            table.add_column("Factory Label(s)", style="yellow")
+            table.add_column("State / Gate")
+
+            repo_cols = await collect_fleet_status(base_cfg)
+            any_rows = False
+            for repo_slug, tasks, error in repo_cols:
+                if error:
+                    table.add_row(
+                        repo_slug, "-", "-", "-", f"[bold red]Error: {error}[/bold red]"
+                    )
+                    any_rows = True
+                    continue
+                if not tasks:
+                    table.add_row(repo_slug, "-", "-", "-", "[dim]Idle[/dim]")
+                    any_rows = True
+                    continue
+                for t in tasks:
+                    fac_labels = [lbl for lbl in t.labels if lbl.startswith("factory:")]
+                    state_desc = _state_description(t)
+                    table.add_row(
+                        repo_slug,
+                        f"#{t.issue_number}",
+                        t.title,
+                        ", ".join(fac_labels),
+                        state_desc,
+                    )
+                    any_rows = True
+            console.print(table if any_rows else "[dim]No fleet issues found.[/dim]")
+            return
+
         tasks = await list_all_factory_issues(resolved_workspace)
         table = Table(title="acp-factory GitHub Issues & Worktrees")
         table.add_column("Issue", style="bold cyan", justify="right")
@@ -736,22 +841,7 @@ def status_cmd(
 
         for t in tasks:
             fac_labels = [lbl for lbl in t.labels if lbl.startswith("factory:")]
-            if t.current_stage:
-                state_desc = f"[green]Actionable ({t.current_stage})[/green]"
-            elif "factory:spec-ready" in fac_labels:
-                state_desc = (
-                    "[bold magenta]🛑 Human Gate 1 (Spec Approval)[/bold magenta]"
-                )
-            elif "factory:pr-ready" in fac_labels:
-                state_desc = (
-                    "[bold magenta]🛑 Human Gate 2 (PR Review & Merge)[/bold magenta]"
-                )
-            elif "factory:needs-human" in fac_labels:
-                state_desc = "[bold red]⚠️ Needs Human Input[/bold red]"
-            elif "factory:completed" in fac_labels:
-                state_desc = "[dim]Completed[/dim]"
-            else:
-                state_desc = "[dim]Idle[/dim]"
+            state_desc = _state_description(t)
 
             wt_path = resolved_workspace / ".worktrees" / f"issue-{t.issue_number}"
             wt_status = (

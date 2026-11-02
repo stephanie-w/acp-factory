@@ -90,6 +90,29 @@ Or automatically process the next actionable issue in the repository queue:
 acp-factory next
 ```
 
+### Fleet Orchestration (Multi-Repo)
+
+Add a `[fleet]` section to `.factory/config.toml` to run the same 5-stage workflow across many repositories. Each `owner/repo` maps to an explicit local checkout path (no on-demand cloning):
+
+```toml
+[fleet]
+max_active_branches_per_repo = 1   # default
+max_review_rounds = 3              # optional; overrides top-level
+
+[fleet.repositories]
+"acme/core-lib" = "~/DEV/core-lib"    # existing local checkout
+"acme/service-api" = "~/DEV/service-api"
+```
+
+Advance one step per repo (with stage-aware admission control so each repo has at most one in-flight `build`/`review`/`pr-ready` branch) and inspect per-repo status:
+
+```bash
+acp-factory next --fleet
+acp-factory status --fleet
+```
+
+`--fleet` is auto-enabled whenever a `[fleet]` section is present in the active config.
+
 ### 3. Review a Standalone Working Branch (With Optional PR Creation)
 
 Review any checked-out branch in a target repository (even without a GitHub Issue or `.factory/` setup) using the bundled `code-reviewer` and `security-auditor` skills:

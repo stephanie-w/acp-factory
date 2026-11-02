@@ -17,7 +17,10 @@ from ..github import (
     build_dry_run_gh_plan,
     build_dry_run_standalone_pr_plan,
     build_issue_pr_body,
+    build_repo_admission,
     fetch_issue,
+    list_actionable_issues,
+    list_all_factory_issues,
     push_and_create_or_update_pr,
     push_and_create_or_update_standalone_pr,
     transition_issue_label,
@@ -40,7 +43,14 @@ from ..task import (
 )
 from ..ui.display import FactoryDisplay
 from .checks import CheckResult, run_checks_sequential, run_shell_command
-from .worktree import WorktreeManager, get_head_sha, is_worktree_clean
+from .worktree import (
+    WorktreeManager,
+    detect_default_branch,
+    ensure_fleet_repo_checkout,
+    get_head_sha,
+    is_worktree_clean,
+    resolve_fleet_repo_path,
+)
 
 
 @dataclass
@@ -226,6 +236,7 @@ async def run_factory(
     display: FactoryDisplay | None = None,
     verbose: bool = False,
     export_transcript: Path | None = None,
+    base_ref: str | None = None,
 ) -> FactoryRunOutcome:
     """Execute the full acp-factory workflow asynchronously."""
     ui = display or FactoryDisplay()
@@ -254,7 +265,7 @@ async def run_factory(
     turn_transcripts: list[str] = []
     preserved_wt: Path | None = None
 
-    active_cwd = await wt_manager.create()
+    active_cwd = await wt_manager.create(base_ref=base_ref)
     ui.show_run_header(config, active_cwd, worktree_branch=wt_manager.branch_name)
 
     try:
@@ -425,14 +436,24 @@ async def run_issue_stage(
     dry_run: bool | None = None,
     display: FactoryDisplay | None = None,
     verbose: bool = False,
+    base_ref: str | None = None,
+    base_config: FactoryConfig | None = None,
+    repo_slug: str | None = None,
 ) -> FactoryRunOutcome:
-    """Execute the active GitHub label stage for a specific issue and transition its label."""
+    """Execute the active GitHub label stage for a specific issue and transition its label.
+
+    `base_config` (when provided) is the central/governance configuration to use
+    instead of re-discovering from `workspace`; fleet runs pass the fleet config here
+    so per-repo stages inherit central prompts/personas/skills via `resolve_repo_stage`.
+    """
     ui = display or FactoryDisplay()
     resolved_workspace = workspace.resolve()
-    base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
+    base_cfg = base_config or FactoryConfig.discover(resolved_workspace, config_file)
     effective_dry_run = base_cfg.dry_run if dry_run is None else dry_run
 
-    task: TaskContext = await fetch_issue(issue_number, cwd=resolved_workspace)
+    task: TaskContext = await fetch_issue(
+        issue_number, cwd=resolved_workspace, repo_slug=repo_slug
+    )
     stage = stage_override or task.current_stage
     if not stage:
         raise ValueError(
@@ -468,7 +489,9 @@ async def run_issue_stage(
             )
 
         await WorktreeManager.remove_issue_worktree(resolved_workspace, issue_number)
-        await transition_issue_label(task, LABEL_COMPLETED, cwd=resolved_workspace)
+        await transition_issue_label(
+            task, LABEL_COMPLETED, cwd=resolved_workspace, repo_slug=repo_slug
+        )
         duration = max(0.0, time.monotonic() - start_time)
         ui.show_final_summary(
             succeeded=True,
@@ -508,7 +531,9 @@ async def run_issue_stage(
                         total_duration_seconds=0.0,
                         failure_reason=failure_reason,
                     )
-                await transition_issue_label(task, LABEL_BUILD, cwd=resolved_workspace)
+                await transition_issue_label(
+                    task, LABEL_BUILD, cwd=resolved_workspace, repo_slug=repo_slug
+                )
                 return FactoryRunOutcome(
                     succeeded=False,
                     exit_code=1,
@@ -534,7 +559,23 @@ async def run_issue_stage(
 
     # Use persistent issue worktree for `build` and `review` stages
     use_issue_worktree = stage in ("build", "review")
-    if stage in base_cfg.stages:
+    if base_config is not None:
+        # Fleet mode: resolve the stage from the central governance config, overlaying
+        # the target repository's own `pre`/`[checks.*]` via `resolve_repo_stage`.
+        # The issue context is passed as `task` so a stage prompt wraps it (not overwrites it).
+        cfg = base_config.resolve_repo_stage(
+            stage,
+            resolved_workspace,
+            workspace=resolved_workspace,
+            task=task_context_md,
+        )
+        cfg = cfg.with_overrides(
+            worktree=use_issue_worktree,
+            dry_run=effective_dry_run,
+        )
+        if stage not in cfg.stages:
+            cfg.active_stage = stage
+    elif stage in base_cfg.stages:
         cfg = base_cfg.with_overrides(
             stage=stage,
             workspace=resolved_workspace,
@@ -558,6 +599,7 @@ async def run_issue_stage(
         issue_number=issue_number if use_issue_worktree else None,
         display=ui,
         verbose=verbose,
+        base_ref=base_ref if use_issue_worktree else None,
     )
 
     if not outcome.succeeded:
@@ -579,7 +621,7 @@ async def run_issue_stage(
             ui.show_dry_run_plan(plan)
         else:
             await transition_issue_label(
-                task, LABEL_NEEDS_HUMAN, cwd=resolved_workspace
+                task, LABEL_NEEDS_HUMAN, cwd=resolved_workspace, repo_slug=repo_slug
             )
         return outcome
 
@@ -588,6 +630,7 @@ async def run_issue_stage(
         outcome.last_response_text,
         current_factory_block=task.factory_block,
         reviewed_sha=pre_review_sha,
+        max_review_rounds=base_cfg.effective_max_review_rounds,
     )
     outcome.stage_verdict = verdict
 
@@ -633,6 +676,7 @@ async def run_issue_stage(
             task,
             verdict.updated_factory_block,
             cwd=resolved_workspace,
+            repo_slug=repo_slug,
         )
 
     if verdict.publish_pr:
@@ -641,9 +685,13 @@ async def run_issue_stage(
         )
         pr_cwd = wt_cwd if wt_cwd.exists() else resolved_workspace
         pr_body = build_issue_pr_body(task, verdict, reviewed_sha=pre_review_sha)
-        await push_and_create_or_update_pr(task, pr_body=pr_body, cwd=pr_cwd)
+        await push_and_create_or_update_pr(
+            task, pr_body=pr_body, cwd=pr_cwd, repo_slug=repo_slug
+        )
 
-    await transition_issue_label(task, verdict.target_label, cwd=resolved_workspace)
+    await transition_issue_label(
+        task, verdict.target_label, cwd=resolved_workspace, repo_slug=repo_slug
+    )
     return outcome
 
 
@@ -814,3 +862,185 @@ async def run_branch_review(
         verdict.summary = f"{verdict.summary} (PR: {pr_url})"
 
     return outcome
+
+
+@dataclass
+class FleetRepoResult:
+    """Outcome of a single repository's fleet pass (isolation boundary)."""
+
+    repo_slug: str
+    checkout: Path | None = None
+    issues_processed: int = 0
+    error: str | None = None
+
+
+def _fleet_repos(config: FactoryConfig) -> dict[str, str]:
+    """Return the `owner/repo -> value` map from fleet config, or empty if unconfigured."""
+    if config.fleet is None:
+        return {}
+    return dict(config.fleet.repositories)
+
+
+async def _advance_fleet_repo(
+    config: FactoryConfig,
+    repo_slug: str,
+    repo_value: str,
+    *,
+    dry_run: bool | None,
+    verbose: bool,
+    display: FactoryDisplay,
+) -> FleetRepoResult:
+    """Advance one repository: `done` cleanup first, then read-only stage prep, then one build/review step."""
+    result = FleetRepoResult(repo_slug=repo_slug)
+    fleet = config.fleet
+    max_branches = fleet.max_active_branches_per_repo if fleet else 1
+
+    try:
+        checkout = await ensure_fleet_repo_checkout(
+            repo_slug,
+            repository_map_value=repo_value,
+        )
+        result.checkout = checkout
+
+        # `done` cleanup first (unblocks the branch slot immediately).
+        done_tasks = [
+            t
+            for t in await list_actionable_issues(
+                checkout, repo_slug=repo_slug, include_branch_contending=True
+            )
+            if t.current_stage == "done"
+        ]
+        for task in done_tasks:
+            outcome = await run_issue_stage(
+                checkout,
+                task.issue_number,
+                config_file=None,
+                dry_run=dry_run,
+                display=display,
+                verbose=verbose,
+                base_config=config,
+                repo_slug=repo_slug,
+            )
+            if outcome.exit_code == 0:
+                result.issues_processed += 1
+
+        # Re-fetch actionable state after cleanup.
+        tasks = await list_actionable_issues(
+            checkout, repo_slug=repo_slug, include_branch_contending=True
+        )
+        admission = build_repo_admission(
+            repo_slug, tasks, max_active_branches_per_repo=max_branches
+        )
+
+        # Read-only stages (triage/spec) can always advance up to Gate 1.
+        prep = [
+            t
+            for t in admission.actionable_issues
+            if t.current_stage in ("triage", "spec")
+        ]
+        for task in prep:
+            outcome = await run_issue_stage(
+                checkout,
+                task.issue_number,
+                config_file=None,
+                dry_run=dry_run,
+                display=display,
+                verbose=verbose,
+                base_config=config,
+                repo_slug=repo_slug,
+            )
+            if outcome.exit_code == 0:
+                result.issues_processed += 1
+
+        # Branch-contending stages: any `pr-ready` issue blocks a new build/review
+        # (Human Gate 2 awaiting merge), regardless of issue-number order. Otherwise
+        # advance the oldest admitted build/review task.
+        # `max_active_branches_per_repo` is reserved for future concurrency; the runner
+        # intentionally advances exactly one branch here to preserve the
+        # at-most-one-in-flight-branch invariant.
+        runnable_tasks = [] if admission.has_pr_ready else admission.build_review_issues
+        if runnable_tasks:
+            task = runnable_tasks[0]
+            # Branch new build worktrees from a fresh `origin/<default>` baseline only
+            # when actually creating a worktree. Review reuses the existing worktree
+            # (base_ref ignored), so skip detection there to avoid a wasted/aborting call.
+            base_ref = None
+            if task.current_stage == "build":
+                base_ref = f"origin/{await detect_default_branch(checkout)}"
+            outcome = await run_issue_stage(
+                checkout,
+                task.issue_number,
+                config_file=None,
+                dry_run=dry_run,
+                display=display,
+                verbose=verbose,
+                base_ref=base_ref,
+                base_config=config,
+                repo_slug=repo_slug,
+            )
+            if outcome.exit_code == 0:
+                result.issues_processed += 1
+    except Exception as exc:
+        result.error = f"{type(exc).__name__}: {exc}"
+
+    return result
+
+
+async def run_fleet_next(
+    config: FactoryConfig,
+    *,
+    dry_run: bool | None = None,
+    verbose: bool = False,
+    display: FactoryDisplay | None = None,
+) -> list[FleetRepoResult]:
+    """Run one fleet pass across all configured repositories with per-repo error isolation."""
+    ui = display or FactoryDisplay()
+    repos = _fleet_repos(config)
+    if not repos:
+        return []
+
+    results: list[FleetRepoResult] = []
+    for repo_slug, repo_value in repos.items():
+        ui.show_phase_banner(f"Fleet: {repo_slug}", style="blue")
+        result = await _advance_fleet_repo(
+            config,
+            repo_slug,
+            repo_value,
+            dry_run=dry_run,
+            verbose=verbose,
+            display=ui,
+        )
+        results.append(result)
+    return results
+
+
+async def collect_fleet_status(
+    config: FactoryConfig,
+) -> list[tuple[str, list[TaskContext], str | None]]:
+    """Return `(repo_slug, tasks, error)` for each fleet repository for `status --fleet`.
+
+    Lists issues via `gh --repo` without cloning/fetching; only scans `.worktrees/` when
+    a local checkout already exists (read-only command).
+    """
+    repos = _fleet_repos(config)
+    out: list[tuple[str, list[TaskContext], str | None]] = []
+    for repo_slug, repo_value in repos.items():
+        tasks: list[TaskContext] = []
+        error: str | None = None
+        try:
+            checkout = resolve_fleet_repo_path(
+                repo_slug,
+                repository_map_value=repo_value,
+            )
+            # `gh --repo` only needs a valid cwd to spawn. A missing checkout falls
+            # back to the invoking cwd so remote issues still list; worktree scanning
+            # stays disabled because there is nothing local to scan.
+            scan_worktrees = checkout.exists()
+            cwd = checkout if scan_worktrees else Path.cwd()
+            tasks = await list_all_factory_issues(
+                cwd, repo_slug=repo_slug, scan_worktrees=scan_worktrees
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        out.append((repo_slug, tasks, error))
+    return out
