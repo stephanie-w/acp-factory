@@ -2,7 +2,8 @@ Inspect the git diff and commits in the workspace against the specification and 
 1. Classify the change risk (`### Risk Classification: LOW | MEDIUM | HIGH`, elevating CI/build/deploy configs, IaC/IAM/auth/secrets, and schema/data deletion paths to `HIGH`).
 2. Verify every `AC-n` row in `### Acceptance Criteria Verification` (`| ID | Status | Evidence |`) and check that new tests actually test behavior and would fail if the fix were reverted.
 3. Audit bad-input handling and security (injection, access control, secrets/host-path leaks, unsafe defaults, unapproved dependencies).
-4. List findings under `### Findings` graded strictly as `[blocking]`, `[major]`, or `[minor]` and marked `[unambiguous]` or `[needs_human]` with `file:line`, `Problem`, `Impact`, and `Fix`.
+4. Verify user testability: If the change introduces or modifies user-facing CLI commands, flags, or configuration sections, verify that a working `## How to Test` section with a minimal working configuration example exists in the specification. If missing, flag as `[major]`.
+5. List findings under `### Findings` graded strictly as `[blocking]`, `[major]`, or `[minor]` and marked `[unambiguous]` or `[needs_human]` with `file:line`, `Problem`, `Impact`, and `Fix`.
 
 Formatting & Privacy Rules:
 - Output ONLY the structured Markdown review (no conversational intro or outro).

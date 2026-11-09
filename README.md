@@ -4,8 +4,23 @@ An automated multi-stage software engineering runner built on the **Agent Client
 
 Inspired by `owainlewis/factory` and `owainlewis/software-factory`, `acp-factory` runs ACP-compliant coding agents (`opencode`, `kiro`, `copilot`, `agy`, etc.) across a **5-stage GitHub label workflow** with per-stage personas, `apm` skills, deterministic verification checks, and two mandatory human gates:
 
-```text
-[triage] -> [spec] -> (🛑 Human Gate 1) -> [build + checks] -> [review] -> (🛑 Human Gate 2: Manual Merge) -> [done]
+```mermaid
+flowchart TD
+    Issue(["GitHub Issue"]) --> Triage["1 · triage"]
+    Triage -->|"sized for 1 PR"| Spec["2 · spec"]
+    Triage -->|"duplicate / too big / unclear"| NeedsHuman["needs-human"]
+    Spec -->|"spec written"| Gate1{"🛑 Human Gate 1<br/>spec approval"}
+    Spec -->|"blocking questions"| NeedsHuman
+    NeedsHuman -->|"human answers"| Spec
+    Gate1 -->|"approve"| Build["3 · build + checks"]
+    Gate1 -->|"changes requested"| Spec
+    Build -->|"checks pass"| Review["4 · review"]
+    Build -->|"retries exhausted"| NeedsHuman
+    Review -->|"changes needed"| Build
+    Review -->|"accepted"| Gate2{"🛑 Human Gate 2<br/>PR review & merge"}
+    Gate2 -->|"merge"| Done["5 · done"]
+    Gate2 -->|"changes requested"| Build
+    Done --> Completed(["completed"])
 ```
 
 📖 **See [docs/workflow.md](docs/workflow.md) for the complete architecture, GitHub label state machine, and core concepts.**

@@ -327,13 +327,29 @@ _OPEN_QUESTIONS_RE = re.compile(
     r"^##+\s+Open\s+Questions\b",
     re.IGNORECASE | re.MULTILINE,
 )
+_HEURISTIC_QUESTIONS_RE = re.compile(
+    r"(?i)(?:"
+    r"^##+\s+Open\s+Questions\b|"
+    r"\b(?:have|got)\s+(?:[\w\s]+)?(?:open\s+)?questions?\b|"
+    r"\b\(Answer:\s*\d+=[a-z]|\*\*\[\d+\]\*\*|"
+    r"^\s*\[\d+\]\s+(?:Where|What|How|Which)"
+    r")",
+    re.MULTILINE,
+)
 
 
 _HEADING_START_RE = re.compile(r"^#{1,3}\s+\S", re.MULTILINE)
+_CONVERSATIONAL_PREAMBLE_RE = re.compile(
+    r"^(?:"
+    r"I'll\b|I will\b|Let me\b|Sure\b|Here is\b|I am\b|I'm\b|"
+    r"The read tools are\b|I'll explore\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _clean_markdown_stage_body(text: str) -> str:
-    """Strip conversational preamble before the first heading and any postscript after STATUS/VERDICT."""
+    """Strip conversational preamble before headings and any postscript after STATUS/VERDICT."""
     trimmed = text
     status_match = _STATUS_LINE_RE.search(trimmed)
     verdict_match = _VERDICT_LINE_RE.search(trimmed)
@@ -352,6 +368,25 @@ def _clean_markdown_stage_body(text: str) -> str:
     heading_match = _HEADING_START_RE.search(trimmed)
     if heading_match:
         trimmed = trimmed[heading_match.start() :]
+    else:
+        # If no markdown heading exists, drop leading conversational preamble paragraphs
+        # and leading horizontal rules before the substantive text or questions.
+        paragraphs = trimmed.split("\n\n")
+        filtered_paragraphs: list[str] = []
+        started = False
+        for p in paragraphs:
+            stripped_p = p.strip()
+            if not started:
+                if stripped_p in ("---", "***", "___"):
+                    continue
+                first_line = stripped_p.split("\n", 1)[0].strip()
+                if _CONVERSATIONAL_PREAMBLE_RE.search(first_line):
+                    continue
+                started = True
+            if started:
+                filtered_paragraphs.append(p)
+        if filtered_paragraphs:
+            trimmed = "\n\n".join(filtered_paragraphs)
 
     # Remove trailing horizontal rules left behind before STATUS
     trimmed = re.sub(r"(?:\n\s*---+\s*)+\Z", "", trimmed.strip())
@@ -395,15 +430,21 @@ def parse_stage_verdict(
         )
 
     if stage == "spec":
-        has_open_questions = bool(_OPEN_QUESTIONS_RE.search(cleaned_body))
+        has_open_questions = bool(
+            _OPEN_QUESTIONS_RE.search(cleaned_body)
+            or _HEURISTIC_QUESTIONS_RE.search(cleaned_body)
+        )
         if raw_token in ("NEEDS_HUMAN", "NEEDS_INPUT", "OPEN_QUESTIONS") or (
             has_open_questions and raw_token != "SPEC_READY"
         ):
+            body = cleaned_body or current_factory_block
+            if body and not _OPEN_QUESTIONS_RE.search(body):
+                body = f"## Open Questions\n\n{body}"
             return StageVerdict(
                 stage="spec",
                 status="needs_human",
                 target_label=LABEL_NEEDS_HUMAN,
-                updated_factory_block=cleaned_body or current_factory_block,
+                updated_factory_block=body,
                 summary="Spec has open questions -> waiting for human answers in comments",
             )
         return StageVerdict(

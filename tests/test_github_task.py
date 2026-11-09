@@ -154,6 +154,36 @@ def test_parse_stage_verdicts_across_pipeline() -> None:
     assert "Latest Review Findings" in v_rev_retry.updated_factory_block
 
 
+def test_spec_strips_monologue_and_catches_unformatted_open_questions() -> None:
+    raw_agent_output = (
+        "I'll analyze the codebase to write a precise specification for this issue."
+        "I'll explore the codebase directly. The read tools are restricted in this planning context.\n\n"
+        "Let me ask one focused question before finalizing, since there are two genuinely ambiguous choices.\n\n"
+        "---\n\n"
+        "Before I finalize the spec, I have two questions that the codebase alone can't resolve:\n\n"
+        "**[1]** Where should `FACTORY_GH_TOKEN` be read from — what is the injection mechanism?\n\n"
+        "a. Environment variable only\nb. .env file\n\n(Answer: 1=a or 1=b)\n\n"
+        "---\n\n"
+        "**[2]** What should happen when `FACTORY_GH_TOKEN` is not set?\n\n"
+        "a. Hard fail\nb. Soft fallback\n\n(Answer: 2=a or 2=b)"
+    )
+    verdict = parse_stage_verdict("spec", raw_agent_output)
+
+    assert verdict.target_label == LABEL_NEEDS_HUMAN
+    assert verdict.status == "needs_human"
+    # Conversational monologue paragraphs must be stripped
+    assert "I'll analyze the codebase" not in verdict.updated_factory_block
+    assert "Let me ask one focused question" not in verdict.updated_factory_block
+    assert "The read tools are restricted" not in verdict.updated_factory_block
+    # Open Questions heading must be prepended
+    assert verdict.updated_factory_block.startswith("## Open Questions")
+    assert (
+        "**[1]** Where should `FACTORY_GH_TOKEN` be read from"
+        in verdict.updated_factory_block
+    )
+    assert "**[2]** What should happen" in verdict.updated_factory_block
+
+
 def test_structured_json_review_check_verdict() -> None:
     status, feedback = parse_review_verdict_status(
         'Review complete.\n{"status": "retry", "feedback": "src/api.py:10: missing check"}'
