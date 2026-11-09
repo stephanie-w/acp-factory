@@ -24,6 +24,7 @@ from acp_factory.task import (
     LABEL_SPEC_READY,
     IssueComment,
     TaskContext,
+    _clean_markdown_stage_body,
     clean_spec_block,
     extract_factory_findings,
     format_task_prompt_context,
@@ -706,3 +707,33 @@ async def test_run_issue_stage_spec_injects_revision_brief(tmp_path: Path) -> No
         passed_cfg = mock_run_factory.call_args[0][0]
         assert "Spec Revision Brief" in passed_cfg.task
         assert "SPEC_REVISION" in passed_cfg.task
+
+
+def test_clean_markdown_and_verdict_preserve_status_inside_code_blocks() -> None:
+    raw_spec = (
+        "# Specification\n\n"
+        "## Problem\n"
+        "Need budget caps.\n\n"
+        "## How to Test\n"
+        "Example terminal failure output:\n"
+        "```text\n"
+        "Factory Run Failed\n"
+        "Status: FAILED\n"
+        "Attempts: 1 / 3\n"
+        "Reason: Budget cap breached\n"
+        "```\n\n"
+        "## Out of Scope\n"
+        "- Unrelated features.\n\n"
+        "STATUS: SPEC_READY\n"
+    )
+
+    cleaned = _clean_markdown_stage_body(raw_spec)
+    assert "Status: FAILED" in cleaned
+    assert "## Out of Scope" in cleaned
+    assert "STATUS: SPEC_READY" not in cleaned
+
+    verdict = parse_stage_verdict("spec", raw_spec)
+    assert verdict.status == "spec_ready"
+    assert verdict.target_label == LABEL_SPEC_READY
+    assert "Status: FAILED" in verdict.updated_factory_block
+    assert "## Out of Scope" in verdict.updated_factory_block

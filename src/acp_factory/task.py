@@ -348,22 +348,42 @@ _CONVERSATIONAL_PREAMBLE_RE = re.compile(
 )
 
 
+_CODE_BLOCK_RE = re.compile(
+    r"(?P<fence>`{3,}|~{3,})[\s\S]*?(?P=fence)",
+)
+
+
+def _mask_code_blocks(text: str) -> str:
+    """Replace content inside markdown code fences with spaces of the same length to preserve character offsets."""
+    return _CODE_BLOCK_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+
+def _find_terminal_status_or_verdict(text: str) -> tuple[re.Match[str] | None, str]:
+    """Find the trailing non-fenced STATUS: or VERDICT: match.
+
+    Returns (match, raw_token_upper). Matches inside markdown code blocks are ignored.
+    If multiple matches exist outside code fences, the last one wins.
+    """
+    masked = _mask_code_blocks(text)
+    all_matches: list[tuple[re.Match[str], str]] = []
+    for m in _STATUS_LINE_RE.finditer(masked):
+        all_matches.append((m, m.group(1).upper()))
+    for m in _VERDICT_LINE_RE.finditer(masked):
+        all_matches.append((m, m.group(1).upper()))
+
+    if not all_matches:
+        return None, ""
+
+    all_matches.sort(key=lambda item: item[0].start())
+    return all_matches[-1]
+
+
 def _clean_markdown_stage_body(text: str) -> str:
     """Strip conversational preamble before headings and any postscript after STATUS/VERDICT."""
     trimmed = text
-    status_match = _STATUS_LINE_RE.search(trimmed)
-    verdict_match = _VERDICT_LINE_RE.search(trimmed)
-    cut_pos: int | None = None
-    if status_match:
-        cut_pos = status_match.start()
-    elif verdict_match:
-        cut_pos = verdict_match.start()
-
-    if cut_pos is not None:
-        trimmed = trimmed[:cut_pos]
-
-    trimmed = _STATUS_LINE_RE.sub("", trimmed)
-    trimmed = _VERDICT_LINE_RE.sub("", trimmed)
+    terminal_match, _ = _find_terminal_status_or_verdict(trimmed)
+    if terminal_match:
+        trimmed = trimmed[: terminal_match.start()]
 
     heading_match = _HEADING_START_RE.search(trimmed)
     if heading_match:
@@ -403,14 +423,7 @@ def parse_stage_verdict(
 ) -> StageVerdict:
     """Determine the next GitHub label and updated Issue Body factory block for a completed stage."""
     cleaned_body = _clean_markdown_stage_body(response_text)
-    status_match = _STATUS_LINE_RE.search(response_text)
-    verdict_match = _VERDICT_LINE_RE.search(response_text)
-
-    raw_token = ""
-    if status_match:
-        raw_token = status_match.group(1).upper()
-    elif verdict_match:
-        raw_token = verdict_match.group(1).upper()
+    _, raw_token = _find_terminal_status_or_verdict(response_text)
 
     if stage == "triage":
         if raw_token in ("DUPLICATE", "TOO_BIG", "NEEDS_HUMAN", "NEEDS_INPUT", "STOP"):
