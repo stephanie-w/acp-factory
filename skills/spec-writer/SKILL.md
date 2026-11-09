@@ -83,3 +83,12 @@ Rules for `AC-n` rows:
 STATUS: <SPEC_READY | NEEDS_HUMAN>
 ```
 *(If `STATUS: NEEDS_HUMAN`, include `## Open Questions` right before `STATUS: NEEDS_HUMAN`.)*
+
+## 5. Specification Revision Workflow (Incremental Mode)
+
+When an existing specification is present in the context or when a `# Spec Revision Brief` is supplied:
+1. **Incremental over Scratch**: Do not restart broad codebase exploration. Focus your attention exclusively on the requests and questions raised in `## Human Comments`.
+2. **Stable Criteria**: Never delete or renumber existing `AC-n` rows that have already been vetted. Append newly requested criteria as `AC-(n+1)`.
+3. **Resolve Open Questions**: Move answered questions from `## Open Questions` into `## Decisions` with the human's rationale.
+4. **Targeted Diffs**: Only update `## Behavior`, `## Files to Touch`, or `## Out of Scope` where the human comment explicitly modifies scope or settles a question.
+5. **Output Full Document**: Always emit the entire updated Markdown specification so the living spec remains self-contained.
