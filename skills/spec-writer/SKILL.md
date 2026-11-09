@@ -43,6 +43,7 @@ Every specification MUST include an `## Acceptance Criteria` table using stable 
 Rules for `AC-n` rows:
 - **No vague words** ("appropriately", "correctly", "properly", "fast"). State exact inputs, outputs, status codes, or error messages.
 - **Must be falsifiable**: Every `How to check` must be a concrete test or command that runs locally inside an isolated worktree without requiring live production credentials or external cloud mutations, and would fail if the requirement is not met.
+- **Mandatory documentation check**: If the change introduces or modifies user-facing CLI commands, flags, configuration options/precedence, public interfaces, or workflows, include an explicit `AC-n` row verifying that relevant documentation (e.g. `README.md`, `docs/`, or CLI help) is updated. A specification touching user-facing interfaces without an `AC-n` for documentation is NOT ready (`STATUS: SPEC_READY`).
 
 ## 4. Specification Template
 
@@ -71,6 +72,10 @@ Rules for `AC-n` rows:
 | ID | Done when | How to check |
 | :--- | :--- | :--- |
 | AC-1 | <Observable outcome> | <Test or local verification command> |
+| AC-2 | Relevant documentation (README.md, docs/) updated with <feature/behavior> | <Inspection or command e.g. git diff --exit-code README.md> |
+
+## How to Test
+<MANDATORY for user-facing CLI/config changes: minimal configuration snippet, exact terminal command to run, and expected output.>
 
 ## Out of Scope
 - <What this ticket explicitly does not change.>
