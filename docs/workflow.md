@@ -34,6 +34,8 @@ To keep issues clean and readable, `acp-factory` enforces a strict separation be
 
 ## 2. The 5-Stage GitHub Label State Machine
 
+> 💡 See **[docs/github-project-setup.md](github-project-setup.md)** for tracking options, including direct **[GitHub Global Search Filters](github-project-setup.md#1-zero-setup-github-global-search-filters-recommended)** for your browser bookmarks and optional GitHub Projects (v2) boards.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Triage : Issue labeled `factory:triage`
