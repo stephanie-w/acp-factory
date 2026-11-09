@@ -28,13 +28,14 @@ This document defines the **mandatory operational behaviors and protocols** for 
 ### 🔄 Development Workflow
 1.  **Pattern Recognition**: Analyze `src/` to mimic existing architectural patterns (naming, typing, structure).
 2.  **Test-Driven Mindset**: If you write logic, you must write a test for it.
-3.  **Verification Loop**: You are responsible for the quality of your output. Always check your LSP diagnostics and if no LSP available for you always run:
+3.  **Verification Loop**: You are responsible for the quality of your output. When you make changes to executable code or tests, always check your LSP diagnostics and if no LSP available for you always run:
     ```bash
 	just fix
 	just typecheck
 	just test-fast
     ```
-	 You can also `uv run pytest` to run specific test(s) 
+	 You can also `uv run pytest` to run specific test(s).
+    *Do NOT run tests or linters for documentation-only, markdown, or text changes.*
     *Fix all errors reported by these linting and typechecking tools before asking the user to review.*
 4.  **UI Testing Protocol**: For UI implementations that require user interaction (modals, keyboard navigation, visual layout), explicitly ask the user to test before marking tasks complete. Create test scripts in `demos/` directory when debugging complex UI issues.
 5.  **Task Completion Verification**: Never mark a task as completed without explicit user verification when the task involves user-facing functionality. Always ask "Could you test this?" before updating TODO.md.
@@ -106,6 +107,7 @@ Before signaling completion, verify:
 ## 6. Important Things to Keep in Mind
 
 - Always assume the user's time is valuable; provide high-signal updates.
+- **Verification Scoping**: Only run test and typecheck commands (`just fix`, `just typecheck`, `just test-fast`) when code logic or tests were modified. Never run tests for documentation-only, markdown, or planning updates.
 - Prioritize stability and protocol correctness over visual flair.
 - There is a `demos` repository dedicated to implement simplified UI to test UI features or modifications. USE IT...
 - **Textual Modal Patterns**: When using `ModalScreen` with `push_screen_wait()`, always use `run_worker()` to avoid `NoActiveWorker` errors. Modal screens require proper worker context for async operations.
