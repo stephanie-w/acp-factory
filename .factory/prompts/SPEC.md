@@ -6,10 +6,12 @@ Analyze the codebase, the issue description, any prior triage notes in the facto
 - `## Decisions` (ONLY for recording settled answers from humans in Issue Comments or linked parent issues; write `- None yet.` if none)
 - `## Assumptions` (ONLY for minor, reversible, code-local choices within the requested files)
 - `## Acceptance Criteria` (a Markdown table `| ID | Done when | How to check |` with `AC-1`, `AC-2`, ... where every row states an observable result and a concrete local test or verification command that could fail; never renumber existing `AC-n` IDs)
+- `## How to Test` (MANDATORY for any change touching user-facing CLI commands, flags, or configuration options: provide a concrete minimal configuration snippet, the exact terminal command to run, and the expected output for a human operator)
 - `## Out of Scope`
 
 Strict Rules:
 1. **No Conversational Wrapper**: Start directly with `# Specification` or `## Problem` / `## Behavior` and end with the `STATUS:` line on the very last line. Do not add any intro or postscript after `STATUS:`.
 2. **Privacy**: Never include absolute host paths (`/home/...`, `/Users/...`), usernames, or local environment details.
 3. **When to Ask Human (`## Open Questions`)**: Ask ONLY about choices that nothing settles AND that would be costly to undo—including adding/modifying project dependencies (`pyproject.toml`, `uv.lock`, `package.json`, container images, Terraform providers) not explicitly requested in the issue, choosing missing project-wide test/validation tooling, breaking public contracts, or cloud/compute/IAM footprint choices. Provide 2–3 numbered options with your recommendation and end with `STATUS: NEEDS_HUMAN`.
-4. Otherwise, if everything is unambiguous and requires no unapproved dependency/tooling/infrastructure changes, end with `STATUS: SPEC_READY`.
+4. **Human Testability**: If the ticket introduces or modifies user-facing CLI commands, flags, or configuration sections, the specification is NOT ready (`STATUS: SPEC_READY`) without a concrete `## How to Test` section with minimal working configuration examples and exact commands.
+5. Otherwise, if everything is unambiguous and requires no unapproved dependency/tooling/infrastructure changes, end with `STATUS: SPEC_READY`.
