@@ -715,3 +715,101 @@ async def test_run_issue_stage_consumes_base_config_overlay(tmp_path: Path) -> N
     assert resolved.setup == ["uv sync"]
     assert [c.name for c in resolved.checks] == ["lint"]
     assert resolved.checks[0].cmd == "uv run ruff check ."
+    assert mock_run_factory.call_args.kwargs["repo_slug"] == "acme/core"
+    assert mock_run_factory.call_args.kwargs["issue_number"] == 1
+
+
+def test_display_run_header_and_attempt_banner_context() -> None:
+    from io import StringIO
+
+    from rich.console import Console
+
+    from acp_factory.config import FactoryConfig
+    from acp_factory.ui.display import FactoryDisplay
+
+    cfg = FactoryConfig.model_validate(
+        {
+            "task": "Test task",
+            "stages": {
+                "spec": {
+                    "agent": "opencode",
+                    "mode": "plan",
+                    "read_only": True,
+                }
+            },
+        }
+    )
+    cfg.active_stage = "spec"
+
+    buf = StringIO()
+    display = FactoryDisplay(custom_console=Console(file=buf, width=120))
+    display.show_run_header(
+        cfg,
+        Path("/tmp/repo"),
+        repo_slug="acme/widget",
+        issue_number=42,
+        issue_title="fix widget alignment",
+    )
+    display.show_attempt_banner(1, 3, context="#42 · spec")
+
+    output = buf.getvalue()
+    assert "acme/widget" in output
+    assert "#42" in output
+    assert "fix widget alignment" in output
+    assert "spec" in output
+    assert "Worker Attempt 1 / 3 (#42 · spec)" in output
+
+
+async def test_run_fleet_next_respects_limit(tmp_path: Path) -> None:
+    """run_fleet_next halts once `limit` total issues across repos are processed."""
+    from acp_factory.runner.loop import FactoryRunOutcome, run_fleet_next
+
+    cfg = FactoryConfig.model_validate(
+        {"fleet": {"repositories": {"acme/a": "~/DEV/a", "acme/b": "~/DEV/b"}}}
+    )
+
+    t1 = TaskContext(issue_number=1, title="issue 1", labels=[LABEL_SPEC])
+    t2 = TaskContext(issue_number=2, title="issue 2", labels=[LABEL_SPEC])
+
+    mock_run_stage = AsyncMock(
+        return_value=FactoryRunOutcome(
+            succeeded=True,
+            exit_code=0,
+            attempts_used=1,
+            total_duration_seconds=0.0,
+        )
+    )
+
+    with (
+        patch(
+            "acp_factory.runner.loop.ensure_fleet_repo_checkout",
+            new=AsyncMock(return_value=tmp_path),
+        ),
+        patch(
+            "acp_factory.runner.loop.list_actionable_issues",
+            new=AsyncMock(return_value=[t1, t2]),
+        ),
+        patch("acp_factory.runner.loop.run_issue_stage", new=mock_run_stage),
+    ):
+        results = await run_fleet_next(cfg, limit=1)
+
+    assert mock_run_stage.call_count == 1
+    assert len(results) == 1
+    assert results[0].repo_slug == "acme/a"
+    assert results[0].issues_processed == 1
+
+
+def test_cli_next_and_status_limit_help() -> None:
+    """Verify that --limit / -n is exposed in CLI help for both next and status."""
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+
+    runner = CliRunner()
+    res_next = runner.invoke(app, ["next", "--help"])
+    assert res_next.exit_code == 0
+    assert "--limit" in res_next.output or "-n" in res_next.output
+
+    res_status = runner.invoke(app, ["status", "--help"])
+    assert res_status.exit_code == 0
+    assert "--limit" in res_status.output or "-n" in res_status.output

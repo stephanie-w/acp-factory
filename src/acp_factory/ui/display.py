@@ -31,11 +31,42 @@ class FactoryDisplay:
         config: FactoryConfig,
         workspace: Path,
         worktree_branch: str | None = None,
+        *,
+        repo_slug: str | None = None,
+        issue_number: int | None = None,
+        issue_title: str | None = None,
     ) -> None:
         """Display the initial run configuration summary panel."""
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style="bold cyan", justify="right")
         grid.add_column()
+
+        if repo_slug:
+            grid.add_row("Repository:", f"[bold magenta]{repo_slug}[/bold magenta]")
+        if issue_number is not None:
+            title_suffix = f" — {issue_title}" if issue_title else ""
+            grid.add_row(
+                "Issue:",
+                f"[bold yellow]#{issue_number}[/bold yellow][bold]{title_suffix}[/bold]",
+            )
+        if config.active_stage:
+            stage_style = (
+                "bold blue" if config.active_stage == "review" else "bold green"
+            )
+            ro_tag = " [yellow][read-only][/yellow]" if config.agent.read_only else ""
+            grid.add_row(
+                "Stage:",
+                f"[{stage_style}]{config.active_stage}[/{stage_style}]{ro_tag}",
+            )
+        if config.dry_run:
+            grid.add_row(
+                "Dry Run:",
+                "[bold yellow]YES (no automatic GitHub writes; commands printed for human)[/bold yellow]",
+            )
+        if worktree_branch:
+            grid.add_row("Worktree Branch:", f"[magenta]{worktree_branch}[/magenta]")
+
+        grid.add_row("Workspace:", str(workspace))
 
         agent_desc = (
             " ".join(config.agent.command)
@@ -46,19 +77,9 @@ class FactoryDisplay:
             agent_desc += f" [dim](model: {config.agent.model})[/dim]"
         if config.agent.mode:
             agent_desc += f" [dim](mode: {config.agent.mode})[/dim]"
-        if config.agent.read_only:
+        if config.agent.read_only and not config.active_stage:
             agent_desc += " [yellow][read-only][/yellow]"
 
-        grid.add_row("Workspace:", str(workspace))
-        if config.active_stage:
-            grid.add_row("Stage:", f"[bold green]{config.active_stage}[/bold green]")
-        if config.dry_run:
-            grid.add_row(
-                "Dry Run:",
-                "[bold yellow]YES (no automatic GitHub writes; commands printed for human)[/bold yellow]",
-            )
-        if worktree_branch:
-            grid.add_row("Worktree Branch:", f"[magenta]{worktree_branch}[/magenta]")
         grid.add_row("Agent:", agent_desc)
         if config.agent.persona:
             grid.add_row("Persona:", config.agent.persona)
@@ -83,12 +104,18 @@ class FactoryDisplay:
         self.console.print()
         self.console.print(Rule(f"[bold {style}]{title}[/bold {style}]", style=style))
 
-    def show_attempt_banner(self, attempt: int, max_attempts: int) -> None:
+    def show_attempt_banner(
+        self,
+        attempt: int,
+        max_attempts: int,
+        context: str | None = None,
+    ) -> None:
         """Print a banner for the current agent attempt."""
         self.console.print()
+        tag = f" ({context})" if context else ""
         self.console.print(
             Rule(
-                f"[bold yellow]Worker Attempt {attempt} / {max_attempts}[/bold yellow]",
+                f"[bold yellow]Worker Attempt {attempt} / {max_attempts}{tag}[/bold yellow]",
                 style="yellow",
             )
         )

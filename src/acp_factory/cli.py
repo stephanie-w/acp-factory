@@ -657,6 +657,15 @@ def next_cmd(
             help="Run one fleet pass across all 'fleet.repositories' entries (auto-enabled when a fleet section is configured).",
         ),
     ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            "-n",
+            min=1,
+            help="Maximum number of actionable issues to process across the run (defaults to 1 without --all, or all with --all).",
+        ),
+    ] = None,
     all_issues: Annotated[
         bool,
         typer.Option(
@@ -688,6 +697,7 @@ def next_cmd(
 
             results = await run_fleet_next(
                 base_cfg,
+                limit=limit,
                 dry_run=dry_run,
                 verbose=verbose,
             )
@@ -718,7 +728,13 @@ def next_cmd(
             )
             return 0
 
-        targets = tasks if all_issues else tasks[:1]
+        if limit is not None:
+            targets = tasks[:limit]
+        elif all_issues:
+            targets = tasks
+        else:
+            targets = tasks[:1]
+
         exit_code = 0
         for t in targets:
             console.print(
@@ -740,7 +756,7 @@ def next_cmd(
                 )
             if outcome.exit_code != 0:
                 exit_code = outcome.exit_code
-                if not all_issues:
+                if not all_issues and limit is None:
                     break
         return exit_code
 
@@ -786,6 +802,15 @@ def status_cmd(
             help="Show a per-repository fleet status table (auto-enabled when a fleet section is configured).",
         ),
     ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            "-n",
+            min=1,
+            help="Maximum number of issues to display per repository (defaults to 50).",
+        ),
+    ] = None,
 ) -> None:
     """Display open `factory:*` GitHub Issues, their current stage/human gate, and local `.worktrees/`."""
     resolved_workspace = workspace.resolve()
@@ -804,7 +829,7 @@ def status_cmd(
             table.add_column("Factory Label(s)", style="yellow")
             table.add_column("State / Gate")
 
-            repo_cols = await collect_fleet_status(base_cfg)
+            repo_cols = await collect_fleet_status(base_cfg, limit=limit or 50)
             any_rows = False
             for repo_slug, tasks, error in repo_cols:
                 if error:
@@ -831,7 +856,7 @@ def status_cmd(
             console.print(table if any_rows else "[dim]No fleet issues found.[/dim]")
             return
 
-        tasks = await list_all_factory_issues(resolved_workspace)
+        tasks = await list_all_factory_issues(resolved_workspace, limit=limit or 50)
         table = Table(title="acp-factory GitHub Issues & Worktrees")
         table.add_column("Issue", style="bold cyan", justify="right")
         table.add_column("Title")

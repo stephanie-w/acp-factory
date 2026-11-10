@@ -268,6 +268,8 @@ async def run_factory(
     workspace: Path,
     *,
     issue_number: int | None = None,
+    issue_title: str | None = None,
+    repo_slug: str | None = None,
     display: FactoryDisplay | None = None,
     verbose: bool = False,
     export_transcript: Path | None = None,
@@ -301,7 +303,14 @@ async def run_factory(
     preserved_wt: Path | None = None
 
     active_cwd = await wt_manager.create(base_ref=base_ref)
-    ui.show_run_header(config, active_cwd, worktree_branch=wt_manager.branch_name)
+    ui.show_run_header(
+        config,
+        active_cwd,
+        worktree_branch=wt_manager.branch_name,
+        repo_slug=repo_slug,
+        issue_number=issue_number,
+        issue_title=issue_title,
+    )
 
     try:
         # 1. Setup Phase
@@ -359,9 +368,19 @@ async def run_factory(
         ) as acp_client:
             prompt = build_initial_prompt(config.task, config.checks)
 
+            context_tag = ""
+            if issue_number is not None and config.active_stage:
+                context_tag = f"#{issue_number} · {config.active_stage}"
+            elif config.active_stage:
+                context_tag = config.active_stage
+            elif issue_number is not None:
+                context_tag = f"#{issue_number}"
+
             for attempt in range(1, config.retry.max_attempts + 1):
                 attempts_used = attempt
-                ui.show_attempt_banner(attempt, config.retry.max_attempts)
+                ui.show_attempt_banner(
+                    attempt, config.retry.max_attempts, context=context_tag
+                )
 
                 turn_res = await acp_client.send_prompt(
                     prompt, timeout=config.agent.timeout
@@ -489,6 +508,14 @@ async def run_issue_stage(
     task: TaskContext = await fetch_issue(
         issue_number, cwd=resolved_workspace, repo_slug=repo_slug
     )
+    effective_repo_slug = repo_slug
+    if not effective_repo_slug and task.url and "github.com/" in task.url:
+        parts = task.url.split("github.com/", 1)[1].split("/")
+        if len(parts) >= 2:
+            effective_repo_slug = f"{parts[0]}/{parts[1]}"
+    if not effective_repo_slug:
+        effective_repo_slug = resolved_workspace.name
+
     stage = stage_override or task.current_stage
     if not stage:
         raise ValueError(
@@ -501,7 +528,8 @@ async def run_issue_stage(
     if stage == "done":
         start_time = time.monotonic()
         ui.show_phase_banner(
-            f"Issue #{issue_number} — Done Stage (Cleanup)", style="green"
+            f"[{effective_repo_slug}] Issue #{issue_number}: {task.title} (Stage: done)",
+            style="green",
         )
         verdict = StageVerdict(
             stage="done",
@@ -635,7 +663,9 @@ async def run_issue_stage(
     outcome = await run_factory(
         cfg,
         resolved_workspace,
-        issue_number=issue_number if use_issue_worktree else None,
+        issue_number=issue_number,
+        issue_title=task.title,
+        repo_slug=effective_repo_slug,
         display=ui,
         verbose=verbose,
         base_ref=base_ref if use_issue_worktree else None,
@@ -836,6 +866,8 @@ async def run_branch_review(
     outcome = await run_factory(
         cfg,
         resolved_workspace,
+        repo_slug=resolved_workspace.name,
+        issue_title=f"Branch review: {effective_branch}",
         display=ui,
         verbose=verbose,
     )
@@ -928,6 +960,7 @@ async def _advance_fleet_repo(
     dry_run: bool | None,
     verbose: bool,
     display: FactoryDisplay,
+    limit: int | None = None,
 ) -> FleetRepoResult:
     """Advance one repository: `done` cleanup first, then read-only stage prep, then one build/review step."""
     result = FleetRepoResult(repo_slug=repo_slug)
@@ -950,6 +983,12 @@ async def _advance_fleet_repo(
             if t.current_stage == "done"
         ]
         for task in done_tasks:
+            if limit is not None and result.issues_processed >= limit:
+                return result
+            display.show_phase_banner(
+                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: done)",
+                style="green",
+            )
             outcome = await run_issue_stage(
                 checkout,
                 task.issue_number,
@@ -978,6 +1017,12 @@ async def _advance_fleet_repo(
             if t.current_stage in ("triage", "spec")
         ]
         for task in prep:
+            if limit is not None and result.issues_processed >= limit:
+                return result
+            display.show_phase_banner(
+                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: {task.current_stage})",
+                style="cyan",
+            )
             outcome = await run_issue_stage(
                 checkout,
                 task.issue_number,
@@ -991,6 +1036,9 @@ async def _advance_fleet_repo(
             if outcome.exit_code == 0:
                 result.issues_processed += 1
 
+        if limit is not None and result.issues_processed >= limit:
+            return result
+
         # Branch-contending stages: any `pr-ready` issue blocks a new build/review
         # (Human Gate 2 awaiting merge), regardless of issue-number order. Otherwise
         # advance the oldest admitted build/review task.
@@ -1000,6 +1048,10 @@ async def _advance_fleet_repo(
         runnable_tasks = [] if admission.has_pr_ready else admission.build_review_issues
         if runnable_tasks:
             task = runnable_tasks[0]
+            display.show_phase_banner(
+                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: {task.current_stage})",
+                style="cyan",
+            )
             # Branch new build worktrees from a fresh `origin/<default>` baseline only
             # when actually creating a worktree. Review reuses the existing worktree
             # (base_ref ignored), so skip detection there to avoid a wasted/aborting call.
@@ -1028,6 +1080,7 @@ async def _advance_fleet_repo(
 async def run_fleet_next(
     config: FactoryConfig,
     *,
+    limit: int | None = None,
     dry_run: bool | None = None,
     verbose: bool = False,
     display: FactoryDisplay | None = None,
@@ -1039,8 +1092,12 @@ async def run_fleet_next(
         return []
 
     results: list[FleetRepoResult] = []
+    total_processed = 0
     for repo_slug, repo_value in repos.items():
+        if limit is not None and total_processed >= limit:
+            break
         ui.show_phase_banner(f"Fleet: {repo_slug}", style="blue")
+        repo_limit = None if limit is None else (limit - total_processed)
         result = await _advance_fleet_repo(
             config,
             repo_slug,
@@ -1048,13 +1105,19 @@ async def run_fleet_next(
             dry_run=dry_run,
             verbose=verbose,
             display=ui,
+            limit=repo_limit,
         )
         results.append(result)
+        total_processed += result.issues_processed
+        if limit is not None and total_processed >= limit:
+            break
     return results
 
 
 async def collect_fleet_status(
     config: FactoryConfig,
+    *,
+    limit: int = 50,
 ) -> list[tuple[str, list[TaskContext], str | None]]:
     """Return `(repo_slug, tasks, error)` for each fleet repository for `status --fleet`.
 
@@ -1077,7 +1140,10 @@ async def collect_fleet_status(
             scan_worktrees = checkout.exists()
             cwd = checkout if scan_worktrees else Path.cwd()
             tasks = await list_all_factory_issues(
-                cwd, repo_slug=repo_slug, scan_worktrees=scan_worktrees
+                cwd,
+                repo_slug=repo_slug,
+                scan_worktrees=scan_worktrees,
+                limit=limit,
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
