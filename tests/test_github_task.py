@@ -9,6 +9,8 @@ from acp_factory.runner.checks import parse_review_verdict_status
 from acp_factory.runner.loop import (
     FactoryRunOutcome,
     build_delta_review_brief,
+    build_spec_revision_brief,
+    has_existing_spec,
     run_issue_stage,
 )
 from acp_factory.task import (
@@ -20,7 +22,9 @@ from acp_factory.task import (
     LABEL_REVIEW,
     LABEL_SPEC,
     LABEL_SPEC_READY,
+    IssueComment,
     TaskContext,
+    _clean_markdown_stage_body,
     clean_spec_block,
     extract_factory_findings,
     format_task_prompt_context,
@@ -623,3 +627,113 @@ async def test_run_issue_stage_review_accepted_publishes_with_sha(
         mock_transition.assert_awaited_once_with(
             task, LABEL_PR_READY, cwd=tmp_path.resolve(), repo_slug=None
         )
+
+
+def test_has_existing_spec_detection() -> None:
+    empty_task = TaskContext(issue_number=1, title="Test", original_body="body")
+    assert not has_existing_spec(empty_task)
+
+    triage_task = TaskContext(
+        issue_number=2,
+        title="Test",
+        original_body="body",
+        factory_block="## Triage Report (`OK`)\n\n### Codebase Inspection\nEverything looks good.",
+    )
+    assert not has_existing_spec(triage_task)
+
+    spec_task_1 = TaskContext(
+        issue_number=3,
+        title="Test",
+        original_body="body",
+        factory_block="# Specification\n\n## Problem\nBug occurs.",
+    )
+    assert has_existing_spec(spec_task_1)
+
+    spec_task_2 = TaskContext(
+        issue_number=4,
+        title="Test",
+        original_body="body",
+        factory_block="## Acceptance Criteria\n| ID | Done when | How to check |\n| AC-1 | Passes | pytest |",
+    )
+    assert has_existing_spec(spec_task_2)
+
+
+def test_build_spec_revision_brief() -> None:
+    task = TaskContext(
+        issue_number=5,
+        title="Test",
+        original_body="body",
+        factory_block="## Problem\nFoo\n\n## Acceptance Criteria\n| ID | Done when | How to check |\n| AC-1 | A | B |",
+    )
+    brief_no_comments = build_spec_revision_brief(task)
+    assert "Spec Revision Brief" in brief_no_comments
+    assert "SPEC_REVISION" in brief_no_comments
+    assert "Do NOT re-explore the codebase from scratch" in brief_no_comments
+    assert "Preserve existing problem statement" in brief_no_comments
+
+    task.comments.append(IssueComment(author="stephanie", body="Add AC-2"))
+    brief_with_comments = build_spec_revision_brief(task)
+    assert "to incorporate the latest human comments." in brief_with_comments
+
+
+async def test_run_issue_stage_spec_injects_revision_brief(tmp_path: Path) -> None:
+    task = TaskContext(
+        issue_number=11,
+        title="Add filter",
+        original_body="orig",
+        factory_block="## Problem\nOriginal problem.\n\n## Acceptance Criteria\n| ID | Done when | How to check |\n| AC-1 | works | test |",
+        labels=[LABEL_SPEC],
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.2,
+        last_response_text="# Specification\n\n## Problem\nUpdated.\nSTATUS: SPEC_READY",
+    )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.run_factory", new=AsyncMock(return_value=outcome)
+        ) as mock_run_factory,
+        patch("acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()),
+        patch("acp_factory.runner.loop.transition_issue_label", new=AsyncMock()),
+    ):
+        res = await run_issue_stage(tmp_path, 11)
+        assert res.stage_verdict is not None
+        assert res.stage_verdict.status == "spec_ready"
+        mock_run_factory.assert_awaited_once()
+        passed_cfg = mock_run_factory.call_args[0][0]
+        assert "Spec Revision Brief" in passed_cfg.task
+        assert "SPEC_REVISION" in passed_cfg.task
+
+
+def test_clean_markdown_and_verdict_preserve_status_inside_code_blocks() -> None:
+    raw_spec = (
+        "# Specification\n\n"
+        "## Problem\n"
+        "Need budget caps.\n\n"
+        "## How to Test\n"
+        "Example terminal failure output:\n"
+        "```text\n"
+        "Factory Run Failed\n"
+        "Status: FAILED\n"
+        "Attempts: 1 / 3\n"
+        "Reason: Budget cap breached\n"
+        "```\n\n"
+        "## Out of Scope\n"
+        "- Unrelated features.\n\n"
+        "STATUS: SPEC_READY\n"
+    )
+
+    cleaned = _clean_markdown_stage_body(raw_spec)
+    assert "Status: FAILED" in cleaned
+    assert "## Out of Scope" in cleaned
+    assert "STATUS: SPEC_READY" not in cleaned
+
+    verdict = parse_stage_verdict("spec", raw_spec)
+    assert verdict.status == "spec_ready"
+    assert verdict.target_label == LABEL_SPEC_READY
+    assert "Status: FAILED" in verdict.updated_factory_block
+    assert "## Out of Scope" in verdict.updated_factory_block

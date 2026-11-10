@@ -43,6 +43,7 @@ Every specification MUST include an `## Acceptance Criteria` table using stable 
 Rules for `AC-n` rows:
 - **No vague words** ("appropriately", "correctly", "properly", "fast"). State exact inputs, outputs, status codes, or error messages.
 - **Must be falsifiable**: Every `How to check` must be a concrete test or command that runs locally inside an isolated worktree without requiring live production credentials or external cloud mutations, and would fail if the requirement is not met.
+- **Mandatory documentation check**: If the change introduces or modifies user-facing CLI commands, flags, configuration options/precedence, public interfaces, or workflows, include an explicit `AC-n` row verifying that relevant documentation (e.g. `README.md`, `docs/`, or CLI help) is updated. A specification touching user-facing interfaces without an `AC-n` for documentation is NOT ready (`STATUS: SPEC_READY`).
 
 ## 4. Specification Template
 
@@ -71,6 +72,10 @@ Rules for `AC-n` rows:
 | ID | Done when | How to check |
 | :--- | :--- | :--- |
 | AC-1 | <Observable outcome> | <Test or local verification command> |
+| AC-2 | Relevant documentation (README.md, docs/) updated with <feature/behavior> | <Inspection or command e.g. git diff --exit-code README.md> |
+
+## How to Test
+<MANDATORY for user-facing CLI/config changes: minimal configuration snippet, exact terminal command to run, and expected output.>
 
 ## Out of Scope
 - <What this ticket explicitly does not change.>
@@ -78,3 +83,12 @@ Rules for `AC-n` rows:
 STATUS: <SPEC_READY | NEEDS_HUMAN>
 ```
 *(If `STATUS: NEEDS_HUMAN`, include `## Open Questions` right before `STATUS: NEEDS_HUMAN`.)*
+
+## 5. Specification Revision Workflow (Incremental Mode)
+
+When an existing specification is present in the context or when a `# Spec Revision Brief` is supplied:
+1. **Incremental over Scratch**: Do not restart broad codebase exploration. Focus your attention exclusively on the requests and questions raised in `## Human Comments`.
+2. **Stable Criteria**: Never delete or renumber existing `AC-n` rows that have already been vetted. Append newly requested criteria as `AC-(n+1)`.
+3. **Resolve Open Questions**: Move answered questions from `## Open Questions` into `## Decisions` with the human's rationale.
+4. **Targeted Diffs**: Only update `## Behavior`, `## Files to Touch`, or `## Out of Scope` where the human comment explicitly modifies scope or settles a question.
+5. **Output Full Document**: Always emit the entire updated Markdown specification so the living spec remains self-contained.

@@ -167,6 +167,41 @@ def build_delta_review_brief(
     return "\n".join(lines)
 
 
+_SPEC_MARKERS = (
+    "## Problem",
+    "# Specification",
+    "## Acceptance Criteria",
+    "## Behavior",
+)
+
+
+def has_existing_spec(task: TaskContext) -> bool:
+    """Check if the task's factory block contains an existing specification."""
+    block = task.factory_block
+    if not block:
+        return False
+    return any(marker in block for marker in _SPEC_MARKERS)
+
+
+def build_spec_revision_brief(task: TaskContext) -> str:
+    """Construct a delta-focused spec revision brief when an existing specification is present."""
+    has_comments = bool(task.comments)
+    lines = [
+        "# Spec Revision Brief (Incremental Update)",
+        "- **Mode:** SPEC_REVISION (an existing specification is already drafted in the factory block above).",
+        "- **Goal:** Surgically update the existing specification"
+        + (" to incorporate the latest human comments." if has_comments else "."),
+        "- **Rules:**",
+        "  1. Do NOT re-explore the codebase from scratch or restart the design from zero.",
+        "  2. Preserve existing problem statement, architecture, behaviors, and valid `AC-n` rows.",
+        "  3. Fold human answers and decisions from comments into `## Decisions`.",
+        "  4. Add any newly requested criteria as new `AC-n` rows using the next available numbers (never renumber existing `AC-n` IDs).",
+        "  5. Update `## Scope`, `## Files to Touch`, or `## Out of Scope` only as requested.",
+        "  6. Output the complete revised Markdown specification starting with `# Specification` and ending with the `STATUS:` line.",
+    ]
+    return "\n".join(lines)
+
+
 def _slugify(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip().lower()).strip("-") or "check"
 
@@ -508,6 +543,10 @@ async def run_issue_stage(
         )
 
     task_context_md = format_task_prompt_context(task)
+
+    # Spec revision prep: inject incremental revision brief when revising an existing spec
+    if stage == "spec" and has_existing_spec(task):
+        task_context_md = f"{task_context_md}\n\n{build_spec_revision_brief(task)}"
 
     # Review integrity prep: snapshot HEAD + clean tree, inject Round 2+ delta brief
     pre_review_sha: str | None = None
