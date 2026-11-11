@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import tomllib
 from pathlib import Path
@@ -220,6 +221,13 @@ class FactoryConfig(BaseModel):
     """Top-level configuration for an acp-factory run."""
 
     version: str = Field(default="1")
+    resources_dir: str | None = Field(
+        default=None,
+        description=(
+            "Optional path to external AI resources catalog (agents/, prompts/, skills/). "
+            "Can also be provided via the FACTORY_RESOURCES_DIR environment variable."
+        ),
+    )
     agent: AgentConfig = Field(default_factory=AgentConfig)
     setup: list[str] = Field(default_factory=list)
     task: str = Field(default="")
@@ -248,6 +256,11 @@ class FactoryConfig(BaseModel):
     @property
     def config_dir(self) -> Path | None:
         return self._config_dir
+
+    @property
+    def resolved_resources_dir(self) -> Path | None:
+        """Return the resolved external resources catalog directory, if configured or discovered."""
+        return resolve_resources_dir(self.resources_dir, config_dir=self._config_dir)
 
     @property
     def effective_max_review_rounds(self) -> int:
@@ -385,11 +398,13 @@ class FactoryConfig(BaseModel):
             resolved.setup = list(stage.pre)
 
         # 3. Resolve stage prompt file (if specified) + combine with task
+        res_dir = self.resolved_resources_dir
         if stage.prompt:
             prompt_text = _load_markdown_or_inline(
                 stage.prompt,
                 config_dir=self._config_dir,
                 workspace=workspace,
+                resources_dir=res_dir,
             )
             if resolved.task.strip():
                 resolved.task = (
@@ -414,6 +429,7 @@ class FactoryConfig(BaseModel):
                     chk.prompt,
                     config_dir=self._config_dir,
                     workspace=workspace,
+                    resources_dir=res_dir,
                 )
             resolved_checks.append(chk)
 
@@ -477,6 +493,8 @@ class FactoryConfig(BaseModel):
                         chk.prompt,
                         config_dir=repo_cfg.config_dir,
                         workspace=repo_checkout,
+                        resources_dir=repo_cfg.resolved_resources_dir
+                        or self.resolved_resources_dir,
                     )
                 resolved_checks.append(chk)
             resolved.checks = resolved_checks
@@ -538,6 +556,7 @@ class FactoryConfig(BaseModel):
         if setup_cmds:
             updated.setup = list(setup_cmds)
         if checks or review_prompts:
+            res_dir = updated.resolved_resources_dir
             merged_checks: list[CheckConfig] = []
             for idx, chk_item in enumerate(checks or [], start=1):
                 # Support comma-separated check names (e.g. --check test,review)
@@ -550,6 +569,7 @@ class FactoryConfig(BaseModel):
                                 chk.prompt,
                                 config_dir=updated._config_dir,
                                 workspace=workspace,
+                                resources_dir=res_dir,
                             )
                         merged_checks.append(chk)
                 elif chk_item in updated.named_checks:
@@ -559,6 +579,7 @@ class FactoryConfig(BaseModel):
                             chk.prompt,
                             config_dir=updated._config_dir,
                             workspace=workspace,
+                            resources_dir=res_dir,
                         )
                     merged_checks.append(chk)
                 else:
@@ -581,11 +602,42 @@ class FactoryConfig(BaseModel):
         return updated
 
 
+def resolve_resources_dir(
+    resources_dir: str | Path | None = None,
+    *,
+    config_dir: Path | None = None,
+) -> Path | None:
+    """Resolve the external AI resources catalog directory (`coding-ai-resources`).
+
+    Precedence:
+    1. Explicit `resources_dir` argument (or `FactoryConfig.resources_dir`), expanded for `~`
+       and resolved relative to `config_dir` (or cwd).
+    2. `FACTORY_RESOURCES_DIR` environment variable.
+    3. Sibling `coding-ai-resources` checkout adjacent to the `acp-factory` repository.
+    """
+    raw: str | Path | None = resources_dir or os.environ.get("FACTORY_RESOURCES_DIR")
+    if raw:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute() and config_dir is not None:
+            candidate = (config_dir / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        if candidate.is_dir():
+            return candidate
+
+    repo_root = Path(__file__).resolve().parents[2]
+    sibling = (repo_root.parent / "coding-ai-resources").resolve()
+    if sibling.is_dir():
+        return sibling
+    return None
+
+
 def _load_markdown_or_inline(
     value: str,
     *,
     config_dir: Path | None = None,
     workspace: Path | None = None,
+    resources_dir: Path | None = None,
 ) -> str:
     """If `value` points to a Markdown/text file on disk, read it; otherwise return inline text."""
     stripped = value.strip()
@@ -595,11 +647,16 @@ def _load_markdown_or_inline(
     search_roots: list[Path] = []
     if config_dir is not None:
         search_roots.append(config_dir)
-    if workspace is not None:
+    if workspace is not None and workspace not in search_roots:
         search_roots.append(workspace)
-    search_roots.append(Path.cwd())
+    resolved_res = resources_dir or resolve_resources_dir(config_dir=config_dir)
+    if resolved_res is not None and resolved_res not in search_roots:
+        search_roots.append(resolved_res)
+    cwd = Path.cwd()
+    if cwd not in search_roots:
+        search_roots.append(cwd)
 
-    candidate_path = Path(stripped)
+    candidate_path = Path(stripped).expanduser()
     if candidate_path.is_absolute():
         if candidate_path.is_file():
             return candidate_path.read_text(encoding="utf-8")
@@ -611,6 +668,11 @@ def _load_markdown_or_inline(
         resolved = (root / candidate_path).resolve()
         if resolved.is_file():
             return resolved.read_text(encoding="utf-8")
+        # Also allow short names under agents/ or prompts/ in resources_dir
+        for subdir in ("agents", "prompts", "personas"):
+            sub_resolved = (root / subdir / candidate_path).resolve()
+            if sub_resolved.is_file():
+                return sub_resolved.read_text(encoding="utf-8")
 
     if stripped.endswith(".md"):
         raise FileNotFoundError(

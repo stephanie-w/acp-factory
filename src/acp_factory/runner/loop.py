@@ -372,10 +372,12 @@ async def run_factory(
                     )
 
         # 2. Agent Worker & Check Feedback Loop
+        resolved_res_dir = config.resolved_resources_dir
         async with FactoryACPClient(
             workspace=active_cwd,
             agent_config=config.agent,
             config_dir=config.config_dir,
+            resources_dir=resolved_res_dir,
             verbose=verbose,
         ) as acp_client:
             prompt = build_initial_prompt(
@@ -419,12 +421,23 @@ async def run_factory(
                     }
                     if config.active_stage:
                         check_env["FACTORY_STAGE"] = config.active_stage
+                    if resolved_res_dir is not None:
+                        skills_dir = (
+                            resolved_res_dir / "skills"
+                            if (resolved_res_dir / "skills").is_dir()
+                            else resolved_res_dir
+                        )
+                        check_env["FACTORY_SKILLS_DIR"] = str(skills_dir.resolve())
+                        check_env["FACTORY_BUNDLED_SKILLS_DIR"] = str(
+                            skills_dir.resolve()
+                        )
 
                     all_passed, results = await run_checks_sequential(
                         config.checks,
                         active_cwd,
                         acp_client=acp_client,
                         config_dir=config.config_dir,
+                        resources_dir=resolved_res_dir,
                         max_output_lines=config.retry.max_output_lines,
                         on_check_complete=ui.show_check_result,
                         extra_env=check_env,

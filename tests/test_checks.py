@@ -260,8 +260,11 @@ async def test_spec_validation_check_self_heals_via_factory_response_file(
 def test_all_skill_validators_and_templates_exist_and_work(tmp_path: Path) -> None:
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[1]
-    skills_dir = repo_root / "skills"
+    from acp_factory.config import resolve_resources_dir
+
+    resources_root = resolve_resources_dir()
+    assert resources_root is not None
+    skills_dir = resources_root / "skills"
 
     # 1. Triage validator
     triage_file = tmp_path / "triage.md"

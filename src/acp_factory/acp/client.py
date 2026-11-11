@@ -15,7 +15,7 @@ import acpterm.acp_agent as acpterm_agent_mod
 from acpterm.acp_agent import ACPAgent
 from acpterm.config import Config as AcptermConfig
 
-from ..config import AgentConfig, _load_markdown_or_inline
+from ..config import AgentConfig, _load_markdown_or_inline, resolve_resources_dir
 from .events import TurnEventTracker, TurnSummary
 
 
@@ -47,6 +47,7 @@ def resolve_persona_text(
     *,
     workspace: Path,
     config_dir: Path | None = None,
+    resources_dir: Path | None = None,
 ) -> str | None:
     """Load a stage/agent persona from a Markdown file or return inline persona text."""
     if not persona or not persona.strip():
@@ -55,6 +56,7 @@ def resolve_persona_text(
         persona,
         config_dir=config_dir,
         workspace=workspace,
+        resources_dir=resources_dir,
     ).strip()
 
 
@@ -63,12 +65,13 @@ def resolve_skill_paths(
     *,
     workspace: Path,
     config_dir: Path | None = None,
+    resources_dir: Path | None = None,
 ) -> list[Path]:
     """Resolve configured skill paths or APM skill identifiers to concrete SKILL.md Paths.
 
     Search order for each skill entry:
-    1. Absolute path (file or directory containing SKILL.md)
-    2. Relative to config_dir or workspace (file or directory containing SKILL.md)
+    1. Absolute or `~`-expanded path (file or directory containing SKILL.md)
+    2. Relative to config_dir, workspace, or resources_dir (file or directory containing SKILL.md)
     3. `.factory/skills/<skill>/SKILL.md`, `skills/<skill>/SKILL.md`, `.agents/skills/<skill>/SKILL.md`,
        `.apm/skills/<skill>/SKILL.md`, `apm_modules/<skill>/SKILL.md`, or nested under `apm_modules/`
     """
@@ -76,7 +79,12 @@ def resolve_skill_paths(
     search_roots: list[Path] = []
     if config_dir is not None:
         search_roots.append(config_dir.resolve())
-    search_roots.append(workspace.resolve())
+    ws_resolved = workspace.resolve()
+    if ws_resolved not in search_roots:
+        search_roots.append(ws_resolved)
+    resolved_res = resources_dir or resolve_resources_dir(config_dir=config_dir)
+    if resolved_res is not None and resolved_res not in search_roots:
+        search_roots.append(resolved_res)
     bundled_repo_root = Path(__file__).resolve().parents[3]
     if (
         bundled_repo_root not in search_roots
@@ -89,7 +97,7 @@ def resolve_skill_paths(
         if not raw:
             continue
 
-        candidate = Path(raw)
+        candidate = Path(raw).expanduser()
         found: Path | None = None
 
         if candidate.is_absolute():
@@ -134,7 +142,7 @@ def resolve_skill_paths(
         if found is None:
             raise FileNotFoundError(
                 f"Skill '{raw}' not found. Expected a SKILL.md file path or skill package "
-                f"in .factory/skills/, skills/, .agents/skills/, or apm_modules/ under {workspace}."
+                f"in .factory/skills/, skills/, .agents/skills/, apm_modules/, or resources_dir under {workspace}."
             )
         if found not in resolved_paths:
             resolved_paths.append(found)
@@ -155,6 +163,7 @@ class FactoryACPClient:
         agent_config: AgentConfig,
         *,
         config_dir: Path | None = None,
+        resources_dir: Path | None = None,
         session_name: str | None = None,
         verbose: bool = False,
         silent: bool = False,
@@ -162,6 +171,9 @@ class FactoryACPClient:
     ) -> None:
         self.workspace = workspace.resolve()
         self.config_dir = config_dir.resolve() if config_dir else self.workspace
+        self.resources_dir = resources_dir or resolve_resources_dir(
+            config_dir=self.config_dir
+        )
         self.agent_config = agent_config
         self.session_name = session_name or f"factory-{uuid.uuid4().hex[:8]}"
         self.verbose = verbose
@@ -172,11 +184,13 @@ class FactoryACPClient:
             agent_config.persona,
             workspace=self.workspace,
             config_dir=self.config_dir,
+            resources_dir=self.resources_dir,
         )
         self.skill_paths: list[Path] = resolve_skill_paths(
             agent_config.skills,
             workspace=self.workspace,
             config_dir=self.config_dir,
+            resources_dir=self.resources_dir,
         )
         self._persona_injected: bool = False
 
@@ -210,7 +224,11 @@ class FactoryACPClient:
             from ..runner.checks import build_workspace_env
 
             kwargs["cwd"] = str(self.workspace)
-            kwargs["env"] = build_workspace_env(self.workspace, restrict_gh_writes=True)
+            kwargs["env"] = build_workspace_env(
+                self.workspace,
+                restrict_gh_writes=True,
+                resources_dir=self.resources_dir,
+            )
             return orig_spawn(command, *args, **kwargs)
 
         try:

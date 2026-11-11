@@ -440,3 +440,51 @@ def test_malformed_user_config_raises(
 
     with pytest.raises(tomllib.TOMLDecodeError):
         FactoryConfig.discover(workspace)
+
+
+def test_external_resources_dir_resolves_agents_prompts_and_skills(
+    tmp_path: Path,
+) -> None:
+    ext_res = tmp_path / "external-resources"
+    (ext_res / "agents").mkdir(parents=True)
+    (ext_res / "prompts").mkdir(parents=True)
+    (ext_res / "skills" / "html2md").mkdir(parents=True)
+
+    (ext_res / "agents" / "triage.agent.md").write_text(
+        "External triage agent persona.", encoding="utf-8"
+    )
+    (ext_res / "prompts" / "triage.md").write_text(
+        "External triage stage prompt.", encoding="utf-8"
+    )
+    html2md_skill = ext_res / "skills" / "html2md" / "SKILL.md"
+    html2md_skill.write_text("# html2md skill", encoding="utf-8")
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    cfg_file = ws / "factory.toml"
+    cfg_file.write_text(
+        f"""\
+version = "1"
+resources_dir = "{ext_res}"
+
+[stages.triage]
+persona = "agents/triage.agent.md"
+skills = ["html2md"]
+prompt = "prompts/triage.md"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = FactoryConfig.from_file(cfg_file)
+    assert cfg.resolved_resources_dir == ext_res.resolve()
+    stage_cfg = cfg.resolve_stage("triage", workspace=ws)
+    assert "External triage stage prompt." in stage_cfg.task
+
+    client = FactoryACPClient(
+        workspace=ws,
+        agent_config=stage_cfg.agent,
+        config_dir=stage_cfg.config_dir,
+        resources_dir=stage_cfg.resolved_resources_dir,
+    )
+    assert client.persona_text == "External triage agent persona."
+    assert client.skill_paths == [html2md_skill.resolve()]

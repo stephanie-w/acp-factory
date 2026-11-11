@@ -101,16 +101,27 @@ def build_workspace_env(
     *,
     restrict_gh_writes: bool = False,
     extra_env: dict[str, str] | None = None,
+    resources_dir: Path | None = None,
 ) -> dict[str, str]:
     """Prepare the environment for subprocesses executing in the target workspace/worktree.
 
     Language-agnostic: optionally prepends a read-only `gh` shim so agents cannot
     directly mutate GitHub issues, PRs, or labels.
     """
+    from ..config import resolve_resources_dir
+
     _ = cwd
     env = dict(os.environ)
     bundled_repo_root = Path(__file__).resolve().parents[3]
-    env.setdefault("FACTORY_BUNDLED_SKILLS_DIR", str(bundled_repo_root / "skills"))
+    resolved_res = resources_dir or resolve_resources_dir()
+    if resolved_res is not None and (resolved_res / "skills").is_dir():
+        skills_dir = str((resolved_res / "skills").resolve())
+    elif resolved_res is not None and resolved_res.is_dir():
+        skills_dir = str(resolved_res.resolve())
+    else:
+        skills_dir = str(bundled_repo_root / "skills")
+    env.setdefault("FACTORY_SKILLS_DIR", skills_dir)
+    env.setdefault("FACTORY_BUNDLED_SKILLS_DIR", skills_dir)
 
     if restrict_gh_writes:
         shim_dir = str(_ensure_readonly_gh_shim_dir())
@@ -245,6 +256,7 @@ async def run_single_check(
     *,
     acp_client: FactoryACPClient | None = None,
     config_dir: Path | None = None,
+    resources_dir: Path | None = None,
     max_output_lines: int = 150,
     extra_env: dict[str, str] | None = None,
 ) -> CheckResult:
@@ -283,13 +295,19 @@ async def run_single_check(
         persona_header = ""
         if check.persona:
             resolved_persona = resolve_persona_text(
-                check.persona, workspace=cwd, config_dir=config_dir
+                check.persona,
+                workspace=cwd,
+                config_dir=config_dir,
+                resources_dir=resources_dir,
             )
             if resolved_persona:
                 persona_header = f"# Reviewer Persona\n{resolved_persona}\n\n"
 
         skill_resources = resolve_skill_paths(
-            check.skills, workspace=cwd, config_dir=config_dir
+            check.skills,
+            workspace=cwd,
+            config_dir=config_dir,
+            resources_dir=resources_dir,
         )
 
         review_instruction = (
@@ -325,6 +343,7 @@ async def run_single_check(
                 workspace=cwd,
                 agent_config=review_agent_cfg,
                 config_dir=config_dir,
+                resources_dir=resources_dir,
                 read_only=True,
             ) as reviewer_client:
                 turn_res = await reviewer_client.send_prompt(
@@ -371,6 +390,7 @@ async def run_checks_sequential(
     *,
     acp_client: FactoryACPClient | None = None,
     config_dir: Path | None = None,
+    resources_dir: Path | None = None,
     max_output_lines: int = 150,
     on_check_complete: Callable[[CheckResult], None] | None = None,
     extra_env: dict[str, str] | None = None,
@@ -383,6 +403,7 @@ async def run_checks_sequential(
             cwd,
             acp_client=acp_client,
             config_dir=config_dir,
+            resources_dir=resources_dir,
             max_output_lines=max_output_lines,
             extra_env=extra_env,
         )

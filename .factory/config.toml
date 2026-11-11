@@ -1,5 +1,6 @@
 # .factory/config.toml — Multi-stage acp-factory configuration
 version = "1"
+resources_dir = "~/DEV/coding-ai-resources"
 
 [agent]
 name = "opencode"
@@ -13,18 +14,18 @@ keep_worktree_on_failure = true
 agent = "opencode"
 mode = "plan"
 read_only = true
-persona = "personas/triage.md"
-skills = ["issue-triage"]
-prompt = "prompts/TRIAGE.md"
+persona = "agents/triage.agent.md"
+skills = ["issue-triage", "html2md"]
+prompt = "prompts/triage.md"
 checks = ["validate-triage"]
 
 [stages.spec]
 agent = "opencode"
 mode = "plan"
 read_only = true
-persona = "personas/architect.md"
-skills = ["spec-writer"]
-prompt = "prompts/SPEC.md"
+persona = "agents/architect.agent.md"
+skills = ["spec-writer", "html2md"]
+prompt = "prompts/spec.md"
 checks = ["validate-spec"]
 
 [stages.build]
@@ -33,28 +34,28 @@ read_only = false
 pre = ["uv sync --frozen"]
 persona = "personas/implementer.md"
 skills = ["tdd-builder"]
-prompt = "prompts/BUILD.md"
+prompt = "prompts/build.md"
 checks = ["lint", "test"]
 
 [stages.review]
 agent = "opencode"
 read_only = true
-persona = "personas/reviewer.md"
+persona = "agents/reviewer.agent.md"
 skills = ["code-reviewer", "security-auditor"]
-prompt = "prompts/REVIEW.md"
+prompt = "prompts/review.md"
 checks = ["validate-review"]
 
 [checks.validate-triage]
-command = "uv run \"$FACTORY_BUNDLED_SKILLS_DIR/issue-triage/scripts/validate_triage.py\" \"$FACTORY_RESPONSE_FILE\""
+command = "uv run \"$FACTORY_SKILLS_DIR/issue-triage/scripts/validate_triage.py\" \"$FACTORY_RESPONSE_FILE\""
 
 [checks.validate-spec]
-command = "uv run \"$FACTORY_BUNDLED_SKILLS_DIR/spec-writer/scripts/validate_spec.py\" \"$FACTORY_RESPONSE_FILE\""
+command = "uv run \"$FACTORY_SKILLS_DIR/spec-writer/scripts/validate_spec.py\" \"$FACTORY_RESPONSE_FILE\""
 
 [checks.validate-review]
-command = "uv run \"$FACTORY_BUNDLED_SKILLS_DIR/code-reviewer/scripts/validate_review.py\" \"$FACTORY_RESPONSE_FILE\""
+command = "uv run \"$FACTORY_SKILLS_DIR/code-reviewer/scripts/validate_review.py\" \"$FACTORY_RESPONSE_FILE\""
 
 [checks.validate-security]
-command = "uv run \"$FACTORY_BUNDLED_SKILLS_DIR/security-auditor/scripts/validate_security.py\" \"$FACTORY_RESPONSE_FILE\""
+command = "uv run \"$FACTORY_SKILLS_DIR/security-auditor/scripts/validate_security.py\" \"$FACTORY_RESPONSE_FILE\""
 
 [checks.lint]
 command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run --frozen ruff check"
@@ -63,12 +64,18 @@ command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv 
 command = "uv run --frozen pytest"
 
 [checks.review]
-persona = "personas/reviewer.md"
+persona = "agents/reviewer.agent.md"
 skills = ["code-reviewer"]
-prompt = "prompts/REVIEW.md"
+prompt = "prompts/review.md"
 
 [checks.security]
-persona = "personas/security.md"
+persona = "agents/security.agent.md"
 skills = ["security-auditor"]
-prompt = "prompts/SECURITY.md"
+prompt = "prompts/security.md"
 
+[fleet]
+max_active_branches_per_repo = 1
+
+[fleet.repositories]
+"stephanie-w/acp-factory" = "/home/stephanie/DEV/factory"
+"stephanie-w/acpterm" = "/home/stephanie/DEV/acpterm"

@@ -163,8 +163,13 @@ def test_spec_validator_catches_unformatted_questions_and_normalizes_valid_spec(
 ) -> None:
     import subprocess
 
-    repo_root = Path(__file__).resolve().parents[1]
-    validator = repo_root / "skills" / "spec-writer" / "scripts" / "validate_spec.py"
+    from acp_factory.config import resolve_resources_dir
+
+    resources_root = resolve_resources_dir()
+    assert resources_root is not None
+    validator = (
+        resources_root / "skills" / "spec-writer" / "scripts" / "validate_spec.py"
+    )
 
     # 1. Unformatted monologue + questions without headings/STATUS fails validation
     unformatted_output = (

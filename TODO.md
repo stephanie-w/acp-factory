@@ -50,11 +50,11 @@
 
 ## 2. Next Up — Phase 3: Reusable `apm` Skill Packages & Extended Personas
 
-- [x] **Reusable Stage & Domain-Agnostic Skill Packages (`skills/`)**:
-  - [x] Packaged 5 reusable `SKILL.md` skills (`issue-triage`, `spec-writer`, `tdd-builder`, `code-reviewer`, `security-auditor`) adapted from `owainlewis/software-factory` for both general software and MLOps/Cloud IaC workflows.
-  - [x] Enhanced `resolve_skill_paths` to support `.agents/skills/`, nested `apm_modules/`, and bundled fallback skills.
-- [x] **Persona & Prompt Hardening (`.factory/personas/` & `.factory/prompts/`)**:
-  - [x] Added single-PR sizing heuristics (`<400` lines + build-order `SPLIT`), falsifiable `AC-n` acceptance tables (`| ID | Done when | How to check |`), cost-to-undo human question filtering, 7-point builder quality standards, `blocking`/`major`/`minor` severity rubrics, `LOW`/`MEDIUM`/`HIGH` risk path classification, and `security.md` / `SECURITY.md`.
+- [x] **Reusable Stage & Domain-Agnostic Skill Packages (`~/DEV/coding-ai-resources/skills/`)**:
+  - [x] Packaged 5 reusable `SKILL.md` skills (`issue-triage`, `spec-writer`, `tdd-builder`, `code-reviewer`, `security-auditor`) adapted from `owainlewis/software-factory` for both general software and MLOps/Cloud IaC workflows, plus `html2md` for web documentation extraction.
+  - [x] Migrated all stage personas (`agents/*.agent.md`), prompts (`prompts/*.md`), and skills (`skills/*`) into `~/DEV/coding-ai-resources` (`packages/software-factory/package.json`) so `acp-factory` acts purely as an orchestrator resolving resources via `resources_dir` / `FACTORY_RESOURCES_DIR`.
+- [x] **Persona & Prompt Hardening (`~/DEV/coding-ai-resources/agents/` & `prompts/`)**:
+  - [x] Added single-PR sizing heuristics (`<400` lines + build-order `SPLIT`), falsifiable `AC-n` acceptance tables (`| ID | Done when | How to check |`), cost-to-undo human question filtering, 7-point builder quality standards, `blocking`/`major`/`minor` severity rubrics, `LOW`/`MEDIUM`/`HIGH` risk path classification, and `security.agent.md` / `security.md`.
 - [x] **Standalone Branch Review & Pull Request Command (`acp-factory review`)**:
   - [x] Added `acp-factory review [DESCRIPTION] --workspace ... [--branch ...] [--base main] [--create-pr] [--dry-run]` to review working branches outside the GitHub Issue pipeline and optionally push/open standalone PRs when `STATUS: ACCEPTED`.
 - [ ] **Domain-Specific Skill Packs & Catalog Picker (`~/DEV/coding-ai-resources`)**:

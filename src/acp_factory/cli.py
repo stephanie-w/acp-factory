@@ -98,16 +98,16 @@ prompt = "prompts/REVIEW.md"
 checks = ["validate-review"]
 
 [checks.validate-triage]
-command = "uv run \\"$FACTORY_BUNDLED_SKILLS_DIR/issue-triage/scripts/validate_triage.py\\" \\"$FACTORY_RESPONSE_FILE\\""
+command = "uv run \\"$FACTORY_SKILLS_DIR/issue-triage/scripts/validate_triage.py\\" \\"$FACTORY_RESPONSE_FILE\\""
 
 [checks.validate-spec]
-command = "uv run \\"$FACTORY_BUNDLED_SKILLS_DIR/spec-writer/scripts/validate_spec.py\\" \\"$FACTORY_RESPONSE_FILE\\""
+command = "uv run \\"$FACTORY_SKILLS_DIR/spec-writer/scripts/validate_spec.py\\" \\"$FACTORY_RESPONSE_FILE\\""
 
 [checks.validate-review]
-command = "uv run \\"$FACTORY_BUNDLED_SKILLS_DIR/code-reviewer/scripts/validate_review.py\\" \\"$FACTORY_RESPONSE_FILE\\""
+command = "uv run \\"$FACTORY_SKILLS_DIR/code-reviewer/scripts/validate_review.py\\" \\"$FACTORY_RESPONSE_FILE\\""
 
 [checks.validate-security]
-command = "uv run \\"$FACTORY_BUNDLED_SKILLS_DIR/security-auditor/scripts/validate_security.py\\" \\"$FACTORY_RESPONSE_FILE\\""
+command = "uv run \\"$FACTORY_SKILLS_DIR/security-auditor/scripts/validate_security.py\\" \\"$FACTORY_RESPONSE_FILE\\""
 
 [checks.lint]
 command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run --frozen ruff check"
