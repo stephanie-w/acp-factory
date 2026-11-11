@@ -177,6 +177,27 @@ class StageConfig(BaseModel):
         return data
 
 
+class BudgetConfig(BaseModel):
+    """Execution budget guardrails to limit tokens, financial cost, and turns."""
+
+    max_tokens_per_run: int | None = Field(
+        default=None,
+        ge=1,
+        description="Cumulative token limit across all turns in a run",
+    )
+    max_cost_usd: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="Cumulative cost limit in USD across all turns in a run",
+    )
+    max_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum number of agent turns allowed in a run",
+    )
+
+
 class RetryConfig(BaseModel):
     """Retry and feedback loop configuration."""
 
@@ -236,6 +257,7 @@ class FactoryConfig(BaseModel):
     stages: dict[str, StageConfig] = Field(default_factory=dict)
     active_stage: str | None = Field(default=None)
     retry: RetryConfig = Field(default_factory=RetryConfig)
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
     fleet: FleetConfig | None = Field(
         default=None,
         description="Optional [fleet] multi-repo/organization orchestration section.",
@@ -519,6 +541,9 @@ class FactoryConfig(BaseModel):
         review_prompts: list[str] | None = None,
         setup_cmds: list[str] | None = None,
         max_attempts: int | None = None,
+        max_tokens: int | None = None,
+        max_cost: float | None = None,
+        max_turns: int | None = None,
         worktree: bool | None = None,
         keep_worktree: bool | None = None,
         dry_run: bool | None = None,
@@ -591,6 +616,22 @@ class FactoryConfig(BaseModel):
             updated.checks = merged_checks
         if max_attempts is not None:
             updated.retry.max_attempts = max_attempts
+        if max_tokens is not None or max_cost is not None or max_turns is not None:
+            # Rebuild the sub-model so CLI overrides re-run validation (e.g. reject
+            # a zero/negative cap that would silently disable enforcement).
+            updated.budget = BudgetConfig(
+                max_tokens_per_run=(
+                    max_tokens
+                    if max_tokens is not None
+                    else updated.budget.max_tokens_per_run
+                ),
+                max_cost_usd=(
+                    max_cost if max_cost is not None else updated.budget.max_cost_usd
+                ),
+                max_turns=(
+                    max_turns if max_turns is not None else updated.budget.max_turns
+                ),
+            )
         if worktree is not None:
             updated.worktree = worktree
         if keep_worktree is not None:
@@ -626,9 +667,10 @@ def resolve_resources_dir(
             return candidate
 
     repo_root = Path(__file__).resolve().parents[2]
-    sibling = (repo_root.parent / "coding-ai-resources").resolve()
-    if sibling.is_dir():
-        return sibling
+    for candidate_root in (repo_root, *repo_root.parents[:2]):
+        sibling = (candidate_root.parent / "coding-ai-resources").resolve()
+        if sibling.is_dir():
+            return sibling
     return None
 
 

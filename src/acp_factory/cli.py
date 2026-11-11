@@ -23,6 +23,38 @@ app = typer.Typer(
 )
 
 
+@app.callback()
+def _budget_callback(
+    ctx: typer.Context,
+    max_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-tokens",
+            min=1,
+            help="Cumulative token cap across all turns in a run (overrides [budget]).",
+        ),
+    ] = None,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            min=0.0,
+            help="Cumulative cost cap in USD across all turns in a run (overrides [budget]).",
+        ),
+    ] = None,
+    max_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--max-turns",
+            min=1,
+            help="Maximum number of agent turns allowed in a run (overrides [budget]).",
+        ),
+    ] = None,
+) -> None:
+    """Execution budget guardrails overriding the `[budget]` configuration section."""
+    ctx.obj = {"max_tokens": max_tokens, "max_cost": max_cost, "max_turns": max_turns}
+
+
 STARTER_CONFIG_YAML = """\
 # factory.yaml — acp-factory configuration
 version: "1"
@@ -47,6 +79,11 @@ checks:
 retry:
   max_attempts: 3
   keep_worktree_on_failure: true
+
+budget:
+  max_tokens_per_run: 100000
+  max_cost_usd: 2.00
+  max_turns: 3
 """
 
 
@@ -61,6 +98,11 @@ timeout = 600
 [retry]
 max_attempts = 3
 keep_worktree_on_failure = true
+
+[budget]
+max_tokens_per_run = 100000
+max_cost_usd = 2.00
+max_turns = 3
 
 [stages.triage]
 agent = "opencode"
@@ -272,6 +314,7 @@ DEFAULT_STAGE_PROMPTS: dict[str, str] = {
 
 @app.command("run")
 def run_cmd(
+    ctx: typer.Context,
     task_arg: Annotated[
         str | None,
         typer.Argument(
@@ -435,12 +478,42 @@ def run_cmd(
             help="Disable automatic GitHub writes; save output files and print manual gh commands.",
         ),
     ] = None,
+    max_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-tokens",
+            min=1,
+            help="Cumulative token cap across all turns in a run (overrides [budget]).",
+        ),
+    ] = None,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            min=0.0,
+            help="Cumulative cost cap in USD across all turns in a run (overrides [budget]).",
+        ),
+    ] = None,
+    max_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--max-turns",
+            min=1,
+            help="Maximum number of agent turns allowed in a run (overrides [budget]).",
+        ),
+    ] = None,
 ) -> None:
     """Execute the [Setup -> Worker Agent -> Checks -> Feedback Loop] workflow."""
     resolved_workspace = workspace.resolve()
     try:
         cfg = FactoryConfig.discover(resolved_workspace, config_file)
         effective_task = task_opt or task_arg
+        budget = ctx.obj or {}
+        eff_max_tokens = (
+            max_tokens if max_tokens is not None else budget.get("max_tokens")
+        )
+        eff_max_cost = max_cost if max_cost is not None else budget.get("max_cost")
+        eff_max_turns = max_turns if max_turns is not None else budget.get("max_turns")
         cfg = cfg.with_overrides(
             stage=stage,
             workspace=resolved_workspace,
@@ -457,6 +530,9 @@ def run_cmd(
             review_prompts=review,
             setup_cmds=setup,
             max_attempts=max_attempts,
+            max_tokens=eff_max_tokens,
+            max_cost=eff_max_cost,
+            max_turns=eff_max_turns,
             worktree=worktree,
             keep_worktree=keep_worktree,
             dry_run=dry_run,
@@ -493,6 +569,7 @@ def run_cmd(
 
 @app.command("issue")
 def issue_cmd(
+    ctx: typer.Context,
     issue_number: Annotated[
         int,
         typer.Argument(help="GitHub Issue number to process (e.g. 42)."),
@@ -527,6 +604,7 @@ def issue_cmd(
 ) -> None:
     """Inspect a GitHub Issue's `factory:*` label, run its stage, update its body in-place, and transition its label."""
     try:
+        budget = ctx.obj or {}
         outcome = asyncio.run(
             run_issue_stage(
                 workspace.resolve(),
@@ -535,6 +613,9 @@ def issue_cmd(
                 config_file=config_file,
                 dry_run=dry_run,
                 verbose=verbose,
+                max_tokens=budget.get("max_tokens"),
+                max_cost=budget.get("max_cost"),
+                max_turns=budget.get("max_turns"),
             )
         )
     except Exception as exc:
@@ -643,6 +724,7 @@ def review_cmd(
 
 @app.command("next")
 def next_cmd(
+    ctx: typer.Context,
     workspace: Annotated[
         Path,
         typer.Option("--workspace", "-w", help="Target workspace directory."),
@@ -690,12 +772,18 @@ def next_cmd(
     resolved_workspace = workspace.resolve()
 
     async def _run_next() -> int:
+        budget = ctx.obj or {}
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
         use_fleet = fleet if fleet is not None else (base_cfg.fleet is not None)
 
         if use_fleet:
             from .runner.loop import run_fleet_next
 
+            base_cfg = base_cfg.with_overrides(
+                max_tokens=budget.get("max_tokens"),
+                max_cost=budget.get("max_cost"),
+                max_turns=budget.get("max_turns"),
+            )
             effective_limit = (
                 limit if limit is not None else (None if all_issues else 1)
             )
@@ -751,6 +839,9 @@ def next_cmd(
                 config_file=config_file,
                 dry_run=dry_run,
                 verbose=verbose,
+                max_tokens=budget.get("max_tokens"),
+                max_cost=budget.get("max_cost"),
+                max_turns=budget.get("max_turns"),
             )
             if outcome.stage_verdict:
                 v = outcome.stage_verdict

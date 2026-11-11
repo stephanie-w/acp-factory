@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from .acp.events import UsageTotals
 
 FACTORY_BLOCK_START = "<!-- factory:start -->"
 FACTORY_BLOCK_END = "<!-- factory:end -->"
@@ -93,6 +96,63 @@ def set_factory_meta(factory_block: str, **updates: str) -> str:
 def strip_factory_meta(factory_block: str) -> str:
     """Remove the `<!-- factory:meta ... -->` comment from a factory block."""
     return FACTORY_META_RE.sub("", factory_block).strip()
+
+
+def _parse_non_negative_int(value: str | None) -> int:
+    """Parse a non-negative int from meta text, returning 0 on missing/bad input."""
+    if value is None:
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _parse_non_negative_float(value: str | None) -> float:
+    """Parse a non-negative float from meta text, returning 0.0 on missing/bad input."""
+    if value is None:
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(parsed):
+        return 0.0
+    return parsed if parsed > 0.0 else 0.0
+
+
+def budget_usage_from_meta(factory_block: str) -> UsageTotals:
+    """Parse cumulative budget usage counters seeded in the factory meta comment."""
+    meta = parse_factory_meta(factory_block)
+    return UsageTotals(
+        tokens=_parse_non_negative_int(meta.get("tokens")),
+        cost_usd=_parse_non_negative_float(meta.get("cost")),
+        turns=_parse_non_negative_int(meta.get("turns")),
+    )
+
+
+def format_cost_usd(value: float) -> str:
+    """Format a cumulative USD cost for meta persistence, trimming float noise."""
+    return str(round(value, 6))
+
+
+def render_budget_escalation(
+    *,
+    reason: str,
+    total_tokens: int,
+    total_cost_usd: float,
+    turns_used: int,
+) -> str:
+    """Render a `## Budget Escalation` markdown section for a breached run."""
+    return (
+        "## Budget Escalation\n"
+        "Execution halted because an execution budget cap was breached:\n"
+        f"- **Reason:** {reason}\n"
+        f"- **Cumulative Tokens:** {total_tokens:,}\n"
+        f"- **Cumulative Cost (USD):** ${total_cost_usd:.2f}\n"
+        f"- **Turns Completed:** {turns_used}"
+    )
 
 
 def strip_factory_findings(factory_block: str) -> str:

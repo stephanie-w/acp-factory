@@ -202,6 +202,27 @@ acp-factory run "Fix edge case in parser" --stage build --export transcript.md
 
 ---
 
+## Execution Budget Guardrails
+
+`acp-factory` can cap cumulative token usage, financial cost, and agent turns to protect against runaway tool loops, prompt inflation, and unexpected LLM API spend. Configure limits via the `[budget]` section (TOML or YAML):
+
+```toml
+[budget]
+max_tokens_per_run = 100000   # cumulative token cap across all turns (optional)
+max_cost_usd = 2.00           # cumulative cost cap in USD (optional, 0.0 disables)
+max_turns = 3                 # maximum agent turns per run (optional)
+```
+
+Each cap is optional and disabled when omitted. When a cap is breached mid-run, execution halts deterministically, the run is marked failed, and (in issue workflow mode) the issue is escalated to `factory:needs-human` with a `## Budget Escalation` banner. Cumulative tokens, cost, and turns are recorded in `.factory/runs/<run-id>/run.json` under `"usage"` and `"budget"`.
+
+The same limits can be overridden per invocation with global CLI flags:
+
+```bash
+acp-factory run --task "Run test task" --max-tokens 50000 --max-cost 1.50 --max-turns 2
+```
+
+---
+
 ## Documentation & Roadmap
 
 - **[Workflow & Core Concepts (`docs/workflow.md`)](docs/workflow.md)**: Detailed guide to the 5-stage GitHub label state machine, Task definition, in-place Issue Body spec contract, two-tier open questions handling, and worktree lifecycle.
