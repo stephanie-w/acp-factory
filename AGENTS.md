@@ -125,3 +125,25 @@ Before signaling completion, verify:
 
 - **Interactive Commands**: If a task requires running an interactive CLI or a command that depends on a specific terminal state (like `uv run acp-client`), **request the developer to run it**.
 - **Observational Data**: Ask the developer for specific output or logs if the environment prevents you from seeing them directly.
+
+## 9. Project Architecture & Navigation Pointers
+
+`acp-factory` is a pure multi-stage software engineering orchestrator built on `acpterm` (Agent Client Protocol). Stage personas (`agents/*.agent.md`), prompts (`prompts/*.md`), and skills (`skills/*/SKILL.md`) live externally in the `coding-ai-resources` catalog (configured via `resources_dir` or `FACTORY_RESOURCES_DIR`).
+
+### Codebase Map (`src/acp_factory/`)
+- `cli.py`: Typer CLI entrypoints (`run`, `issue`, `next`, `review`, `status`, `init`).
+- `config.py`: `FactoryConfig`, `StageConfig`, `CheckConfig`, `FleetConfig`, and `resolve_resources_dir`.
+- `acp/client.py`: `FactoryACPClient` wrapping `acpterm.acp_agent.ACPAgent`, `resolve_persona_text`, and `resolve_skill_paths`.
+- `acp/events.py`: `TurnEventTracker` and Markdown transcript recorder.
+- `runner/loop.py`: Core stage execution loop (`run_factory`, `run_issue_stage`, `run_fleet_next`, `run_branch_review`).
+- `runner/checks.py`: Sequential shell & agent review check runner (`$FACTORY_SKILLS_DIR`, `$FACTORY_RESPONSE_FILE`, read-only `gh` shim).
+- `runner/worktree.py`: Git worktree lifecycle (`.worktrees/issue-<id>`) and fleet checkout validation.
+- `task.py`: `TaskContext`, `<!-- factory:start/end -->` and `<!-- factory:meta -->` parsers, and `parse_stage_verdict`.
+- `github.py`: `gh` CLI wrappers, stage admission control, PR creation, and `--dry-run` plan builders.
+
+### Runtime & Artifact Directories
+- `.factory/config.toml`: Central multi-stage (`triage`, `spec`, `build`, `review`, `retro`) and `[fleet]` configuration.
+- `.factory/runs/<run-id>/`: Structured per-run artifacts (`summary.json`, `attempt-N-transcript.md`, `attempt-N-checks.json`, and `--dry-run` proposed Issue/PR bodies).
+- `.worktrees/issue-<id>/`: Persistent git worktrees created on branch `factory/issue-<id>` during `build` and `review`, cleaned up on `done`.
+- `docs/workflow.md` & `docs/fleet-orchestration.md`: Full stage state machine and stateless fleet design specs.
+
