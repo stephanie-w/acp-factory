@@ -813,3 +813,42 @@ def test_cli_next_and_status_limit_help() -> None:
     res_status = runner.invoke(app, ["status", "--help"])
     assert res_status.exit_code == 0
     assert "--limit" in res_status.output or "-n" in res_status.output
+
+
+def test_cli_next_fleet_effective_limit_defaults(tmp_path: Path) -> None:
+    """CLI next in fleet mode defaults to limit=1 when neither --limit nor --all is passed."""
+    from unittest.mock import AsyncMock, patch
+
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+    from acp_factory.config import FactoryConfig
+
+    cfg = FactoryConfig.model_validate(
+        {"fleet": {"repositories": {"acme/repo": str(tmp_path)}}}
+    )
+
+    runner = CliRunner()
+    with (
+        patch("acp_factory.config.FactoryConfig.discover", return_value=cfg),
+        patch(
+            "acp_factory.runner.loop.run_fleet_next", new_callable=AsyncMock
+        ) as mock_fleet_next,
+    ):
+        mock_fleet_next.return_value = []
+        # Case 1: no flags -> effective_limit=1
+        res = runner.invoke(app, ["next", "--fleet"])
+        assert res.exit_code == 0
+        assert mock_fleet_next.call_args.kwargs["limit"] == 1
+
+        # Case 2: --all -> effective_limit=None
+        mock_fleet_next.reset_mock()
+        res = runner.invoke(app, ["next", "--fleet", "--all"])
+        assert res.exit_code == 0
+        assert mock_fleet_next.call_args.kwargs["limit"] is None
+
+        # Case 3: --limit 5 -> effective_limit=5
+        mock_fleet_next.reset_mock()
+        res = runner.invoke(app, ["next", "--fleet", "-n", "5"])
+        assert res.exit_code == 0
+        assert mock_fleet_next.call_args.kwargs["limit"] == 5

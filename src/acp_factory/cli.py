@@ -695,9 +695,12 @@ def next_cmd(
         if use_fleet:
             from .runner.loop import run_fleet_next
 
+            effective_limit = (
+                limit if limit is not None else (None if all_issues else 1)
+            )
             results = await run_fleet_next(
                 base_cfg,
-                limit=limit,
+                limit=effective_limit,
                 dry_run=dry_run,
                 verbose=verbose,
             )
