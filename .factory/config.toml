@@ -45,6 +45,15 @@ skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/review.md"
 checks = ["validate-review"]
 
+[stages.retro]
+agent = "opencode"
+mode = "plan"
+read_only = true
+persona = "agents/architect.agent.md"
+skills = ["retro"]
+prompt = "prompts/retro.md"
+checks = []
+
 [checks.validate-triage]
 command = "uv run \"$FACTORY_SKILLS_DIR/issue-triage/scripts/validate_triage.py\" \"$FACTORY_RESPONSE_FILE\""
 

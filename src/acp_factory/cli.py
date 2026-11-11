@@ -97,6 +97,15 @@ skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/REVIEW.md"
 checks = ["validate-review"]
 
+[stages.retro]
+agent = "opencode"
+mode = "plan"
+read_only = true
+persona = "personas/architect.md"
+skills = ["retro"]
+prompt = "prompts/RETRO.md"
+checks = []
+
 [checks.validate-triage]
 command = "uv run \\"$FACTORY_SKILLS_DIR/issue-triage/scripts/validate_triage.py\\" \\"$FACTORY_RESPONSE_FILE\\""
 
@@ -250,6 +259,13 @@ DEFAULT_STAGE_PROMPTS: dict[str, str] = {
         "Secrets/Host-Path Exposure, Unsafe Defaults, and Dependencies, proving each finding with a concrete `Exploit / Trigger`.\n"
         "2. Output ONLY the structured security report matching `skills/security-auditor/templates/security-report.md` "
         "(starting with `### Security Audit Summary` and ending with `STATUS: <ACCEPTED | REVISION_NEEDED>`)."
+    ),
+    "RETRO.md": (
+        "Execute the `retro` skill against this repository's recent `.factory/runs/` artifacts (`summary.json`, "
+        "`attempt-*-checks.json`, `attempt-*-transcript.md`), `AGENTS.md`, and `.factory/config.toml`. Do not modify any files:\n"
+        "1. Evaluate across the 7 retrospective categories (Navigation, Automated Checks, Coding Standards & Reviewer Rubric, "
+        "`AGENTS.md` Diet, Tool Economy, No-ops, and Information Access).\n"
+        "2. Output a ranked Markdown retrospective report (`HIGH`, `MEDIUM`, `LOW`) with concrete evidence citations and unified `diff` proposals."
     ),
 }
 
