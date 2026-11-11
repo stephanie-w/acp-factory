@@ -81,7 +81,7 @@ prompt = "prompts/SPEC.md"
 [stages.build]
 agent = "opencode"
 read_only = false
-pre = ["uv sync"]
+pre = ["uv sync --frozen"]
 persona = "personas/implementer.md"
 skills = ["tdd-builder"]
 prompt = "prompts/BUILD.md"
@@ -95,10 +95,10 @@ skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/REVIEW.md"
 
 [checks.lint]
-command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run ruff check"
+command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run --frozen ruff check"
 
 [checks.test]
-command = "uv run pytest"
+command = "uv run --frozen pytest"
 
 [checks.review]
 persona = "personas/reviewer.md"
@@ -549,6 +549,10 @@ def issue_cmd(
         console.print(
             f"[bold green]✓ Issue #{issue_number}[/bold green] stage [cyan]{v.stage}[/cyan] "
             f"-> label [bold yellow]{v.target_label}[/bold yellow] ({v.summary})"
+        )
+    elif outcome.failure_reason:
+        console.print(
+            f"[bold red]Issue #{issue_number} stage failed:[/bold red] {outcome.failure_reason}"
         )
     raise typer.Exit(code=outcome.exit_code)
 

@@ -28,7 +28,7 @@ prompt = "prompts/SPEC.md"
 [stages.build]
 agent = "opencode"
 read_only = false
-pre = ["uv sync"]
+pre = ["uv sync --frozen"]
 persona = "personas/implementer.md"
 skills = ["tdd-builder"]
 prompt = "prompts/BUILD.md"
@@ -42,10 +42,10 @@ skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/REVIEW.md"
 
 [checks.lint]
-command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run ruff check"
+command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run --frozen ruff check"
 
 [checks.test]
-command = "uv run pytest"
+command = "uv run --frozen pytest"
 
 [checks.review]
 persona = "personas/reviewer.md"
