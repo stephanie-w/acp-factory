@@ -72,7 +72,9 @@ class FactoryRunOutcome:
     dry_run_plan: DryRunPlan | None = None
 
 
-def build_initial_prompt(task: str, checks: list[CheckConfig]) -> str:
+def build_initial_prompt(
+    task: str, checks: list[CheckConfig], *, read_only: bool = False
+) -> str:
     """Construct the initial task prompt sent to the ACP worker agent."""
     lines = [
         "# Coding Task",
@@ -81,10 +83,16 @@ def build_initial_prompt(task: str, checks: list[CheckConfig]) -> str:
     ]
     if checks:
         lines.append("## Verification Checks")
-        lines.append(
-            "After you complete your changes, the following verification checks will be "
-            "executed sequentially in this workspace:"
-        )
+        if read_only:
+            lines.append(
+                "After your turn finishes, the orchestrator automatically writes your response text "
+                "to `$FACTORY_RESPONSE_FILE` (do not write this file yourself) and runs these checks:"
+            )
+        else:
+            lines.append(
+                "After you complete your changes, the following verification checks will be "
+                "executed sequentially in this workspace:"
+            )
         for idx, chk in enumerate(checks, start=1):
             if chk.cmd:
                 lines.append(f"{idx}. **{chk.name}** (`{chk.cmd}`)")
@@ -92,7 +100,9 @@ def build_initial_prompt(task: str, checks: list[CheckConfig]) -> str:
                 lines.append(f"{idx}. **{chk.name}** (Review: {chk.prompt})")
         lines.append("")
         lines.append(
-            "Ensure your implementation is complete, clean, and satisfies all checks."
+            "Ensure your output is complete, clean, and satisfies all checks."
+            if read_only
+            else "Ensure your implementation is complete, clean, and satisfies all checks."
         )
     return "\n".join(lines)
 
@@ -368,7 +378,9 @@ async def run_factory(
             config_dir=config.config_dir,
             verbose=verbose,
         ) as acp_client:
-            prompt = build_initial_prompt(config.task, config.checks)
+            prompt = build_initial_prompt(
+                config.task, config.checks, read_only=config.agent.read_only
+            )
 
             context_tag = ""
             if issue_number is not None and config.active_stage:

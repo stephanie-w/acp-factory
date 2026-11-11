@@ -141,6 +141,15 @@ async def test_feedback_loop_recovers_on_second_attempt(tmp_path: Path) -> None:
 
 def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     from acp_factory.runner.checks import CheckResult
+    from acp_factory.runner.loop import build_initial_prompt
+
+    ro_prompt = build_initial_prompt(
+        "Write spec",
+        [CheckConfig(name="validate-spec", cmd="uv run validate_spec.py")],
+        read_only=True,
+    )
+    assert "do not write this file yourself" in ro_prompt
+    assert "$FACTORY_RESPONSE_FILE" in ro_prompt
 
     results = [
         CheckResult(
