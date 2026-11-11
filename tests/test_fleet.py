@@ -394,6 +394,45 @@ def test_pr_ready_is_not_actionable_stage() -> None:
     assert t.current_stage is None
 
 
+def test_repo_stage_ignores_user_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: fleet `resolve_repo_stage` does not inherit the operator's user-level config."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    acp_dir = home / ".acp-factory"
+    acp_dir.mkdir(parents=True)
+    (acp_dir / "config.toml").write_text(
+        'version = "1"\n'
+        "[stages.build]\n"
+        'pre = ["user-pre"]\n'
+        'checks = ["user-check"]\n'
+        "[checks.user-check]\n"
+        'command = "user cmd"\n',
+        encoding="utf-8",
+    )
+
+    central = FactoryConfig.model_validate(
+        {
+            "stages": {
+                "build": {
+                    "persona": "personas/implementer.md",
+                    "pre": ["central-pre"],
+                    "checks": ["test"],
+                }
+            },
+            "named_checks": {"test": {"name": "test", "command": "pytest"}},
+        }
+    )
+
+    bare_repo = tmp_path / "bare"
+    bare_repo.mkdir()
+    resolved = central.resolve_repo_stage("build", bare_repo)
+
+    assert resolved.setup == ["central-pre"]
+    assert [c.name for c in resolved.checks] == ["test"]
+
+
 def test_resolve_repo_stage_wraps_prompt_with_task_context(tmp_path: Path) -> None:
     """A stage prompt wraps the issue context instead of being overwritten (Finding 1)."""
     central = FactoryConfig.model_validate(

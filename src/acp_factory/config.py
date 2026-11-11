@@ -19,6 +19,11 @@ DEFAULT_CONFIG_FILES = (
     "factory.yml",
 )
 
+USER_CONFIG_FILES = (
+    Path("~/.acp-factory/config.toml"),
+    Path("~/.config/acp-factory/config.toml"),
+)
+
 
 class AgentConfig(BaseModel):
     """ACP worker agent configuration (global or stage-specific)."""
@@ -304,9 +309,20 @@ class FactoryConfig(BaseModel):
 
     @classmethod
     def discover(
-        cls, workspace: Path, config_path: Path | None = None
+        cls,
+        workspace: Path,
+        config_path: Path | None = None,
+        *,
+        allow_user_defaults: bool = True,
     ) -> FactoryConfig:
-        """Load from an explicit config path or auto-discover in the workspace."""
+        """Load from an explicit config path or auto-discover in the workspace.
+
+        Discovery precedence (highest first): an explicit `config_path`, a
+        repo-local config file (``DEFAULT_CONFIG_FILES``), a user-level config
+        file (``USER_CONFIG_FILES``), then built-in defaults. `allow_user_defaults`
+        opts out of the user-level fallback so fleet repos never inherit the
+        operator's personal settings.
+        """
         if config_path is not None:
             resolved = (
                 config_path if config_path.is_absolute() else (workspace / config_path)
@@ -317,6 +333,12 @@ class FactoryConfig(BaseModel):
             candidate = workspace / rel_path
             if candidate.exists():
                 return cls.from_file(candidate)
+
+        if allow_user_defaults:
+            for user_path in USER_CONFIG_FILES:
+                candidate = user_path.expanduser()
+                if candidate.exists():
+                    return cls.from_file(candidate)
 
         cfg = cls()
         cfg._config_dir = workspace.resolve()
@@ -432,7 +454,7 @@ class FactoryConfig(BaseModel):
             resolved.agent.read_only = stage_name in ("triage", "spec", "review")
             resolved.active_stage = stage_name
 
-        repo_cfg = FactoryConfig.discover(repo_checkout)
+        repo_cfg = FactoryConfig.discover(repo_checkout, allow_user_defaults=False)
         repo_stage = repo_cfg.stages.get(stage_name)
         if repo_stage is None:
             return resolved
