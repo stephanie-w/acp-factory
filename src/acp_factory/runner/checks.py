@@ -266,9 +266,7 @@ async def run_single_check(
             check.cmd, cwd, timeout=check.timeout, extra_env=extra_env
         )
         passed = rc == 0
-        chk_status: Literal["pass", "retry", "stop"] = (
-            "pass" if rc == 0 else ("retry" if rc == 1 else "stop")
-        )
+        chk_status: Literal["pass", "retry", "stop"] = "pass" if rc == 0 else "retry"
         return CheckResult(
             name=check.name,
             check_type="cmd",

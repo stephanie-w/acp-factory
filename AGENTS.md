@@ -56,25 +56,7 @@ To ensure a safe and collaborative development experience, follow this interacti
 
 ## 2. Strict Anti-Patterns (The "Do Not Use" List)
 
-Violating these rules will result in rejected code.
-
-### 🚫 Code Structure
-- **No Mutable Defaults**: `def foo(items=[])` is forbidden. Use `items=None`.
-- **No Broad Exceptions**: `except Exception:` without logging or re-raising is forbidden.
-- **No Global State**: Do not rely on or modify global variables. Pass state explicitly.
-- **No Magic Numbers**: Define constants with descriptive names (e.g., `MAX_RETRIES = 3` instead of just `3`).
-
-### 🚫 Observability
-- **No `print()` Statements**: Use the standard `logging` module or `structlog`. `print()` is for CLI output only, not debugging.
-- **No Silent Failures**: Errors must be explicitly handled or bubbled up.
-
-### 🚫 Filesystem
-- **No Hardcoded Paths**: Use `pathlib.Path` and relative paths. Never use absolute paths like `/home/user/...`.
-
-### 🚫 Typing (Modern Python 3.10+)
-- **No `typing.List`, `typing.Dict`, etc.**: Use built-in generics (e.g., `list[str]`, `dict[str, int]`).
-- **No `typing.Optional`**: Use the union operator `X | None`.
-- **No `typing.Union`**: Use the `|` operator (e.g., `int | str`).
+Typing/modern-syntax and bug-bear rules are enforced deterministically by `just check` (ruff `E,W,F,I,B,C4,UP,RUF`). Subjective standards (test effectiveness, revert-test heuristic, domain edge cases) live in the reviewer rubric, not here.
 
 ## 3. Python Tech Stack Summary
 
