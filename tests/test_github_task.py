@@ -235,7 +235,7 @@ async def test_run_issue_stage_spec_and_done(tmp_path: Path) -> None:
         assert outcome.stage_verdict.target_label == LABEL_SPEC_READY
         mock_update.assert_awaited_once()
         mock_transition.assert_awaited_once_with(
-            fake_task, LABEL_SPEC_READY, cwd=tmp_path.resolve()
+            fake_task, LABEL_SPEC_READY, cwd=tmp_path.resolve(), repo_slug=None
         )
 
     # Test `done` stage cleanup (including when triggered automatically by a CLOSED issue with leftover labels)
@@ -263,7 +263,7 @@ async def test_run_issue_stage_spec_and_done(tmp_path: Path) -> None:
         assert done_outcome.stage_verdict.target_label == LABEL_COMPLETED
         mock_rm_wt.assert_awaited_once_with(tmp_path.resolve(), 7)
         mock_transition_done.assert_awaited_once_with(
-            done_task, LABEL_COMPLETED, cwd=tmp_path.resolve()
+            done_task, LABEL_COMPLETED, cwd=tmp_path.resolve(), repo_slug=None
         )
 
 
@@ -575,7 +575,7 @@ async def test_run_issue_stage_review_publish_guard_aborts_on_sha_mismatch(
         assert res.stage_verdict.target_label == LABEL_NEEDS_HUMAN
         mock_pr.assert_not_awaited()
         mock_transition.assert_awaited_once_with(
-            task, LABEL_NEEDS_HUMAN, cwd=tmp_path.resolve()
+            task, LABEL_NEEDS_HUMAN, cwd=tmp_path.resolve(), repo_slug=None
         )
 
 
@@ -625,7 +625,7 @@ async def test_run_issue_stage_review_accepted_publishes_with_sha(
         mock_pr.assert_awaited_once()
         assert "Reviewed-SHA: `pre-sha`" in mock_pr.call_args.kwargs["pr_body"]
         mock_transition.assert_awaited_once_with(
-            task, LABEL_PR_READY, cwd=tmp_path.resolve()
+            task, LABEL_PR_READY, cwd=tmp_path.resolve(), repo_slug=None
         )
 
 

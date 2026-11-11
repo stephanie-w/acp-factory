@@ -72,10 +72,14 @@
   - [x] Replace (instead of stacking) `## Latest Review Findings (Round N/3)` in-place on `REVISION_NEEDED`, and strip temporary findings from the spec block when `ACCEPTED` so obsolete failure notes never leak into the PR's `## Specification`.
   - [x] Inject a delta-focused review brief (`git diff <last_reviewed_sha>..HEAD` + prior findings) on Round 2+ to prevent reviewer "moving goalposts", and enforce a deterministic 3-round circuit breaker (`factory:needs-human`).
   - [x] Enforce a pre-review and pre-publish `REVIEWED_AT == HEAD` + clean working tree (`git status --porcelain == ""`) guard before pushing or opening/updating a PR, stamping `Reviewed-SHA` in the PR body.
-- [ ] **Stateless Multi-Repo / Organization-Wide Fleet Orchestration (`config.py`, `github.py`, `loop.py`, `cli.py`)**:
-  - [ ] Support `[fleet]` configuration mapping `"owner/repo"` to existing local `~/DEV/...` checkouts or `"auto"` clones under `workspaces_dir` (plus optional `org` discovery), branching new issue worktrees from a freshly fetched `origin/<default-branch>`.
-  - [ ] Keep prompts, personas, and skills centralized while optionally overlaying target-repo `pre` setup and `[checks.*]` (zero `.factory/` scaffolding required in target repos).
-  - [ ] Enforce stage-aware per-repo admission control in `acp-factory next --fleet` (`done` cleanups first; read-only `triage`/`spec` always allowed up to Gate 1; at most 1 active `build`/`review`/`pr-ready` branch per repo to prevent merge-conflict cascades) with per-repo error isolation and `acp-factory status --fleet`.
+- [x] **Stateless Multi-Repo / Organization-Wide Fleet Orchestration (`config.py`, `github.py`, `loop.py`, `cli.py`)**:
+  - [x] Support `[fleet]` configuration mapping `"owner/repo"` to existing local `~/DEV/...` checkouts only (no on-demand cloning; `org` discovery stays deferred), branching new issue worktrees from a freshly fetched `origin/<default-branch>`.
+  - [x] Keep prompts, personas, and skills centralized while optionally overlaying target-repo `pre` setup and `[checks.*]` (zero `.factory/` scaffolding required in target repos).
+  - [x] Enforce stage-aware per-repo admission control in `acp-factory next --fleet` (`done` cleanups first; read-only `triage`/`spec` always allowed up to Gate 1; at most 1 active `build`/`review`/`pr-ready` branch per repo to prevent merge-conflict cascades) with per-repo error isolation and `acp-factory status --fleet`.
+- [ ] **Continuous Orchestration (Daemon / Scheduling Loop)** *(deferred — discussion after fleet runner lands)*:
+  - [ ] Decide trigger model: batch-only via external scheduler (cron / systemd timer / GitHub Actions / webhook) vs. in-process `next --fleet --watch` loop vs. GitHub webhook/event-driven.
+  - [ ] If an in-process loop is chosen: add a configurable `poll_interval_seconds` (fetch frequency knob), concurrency/batching for many repos, and per-repo backoff/rate-limit handling around `gh` + `git fetch`.
+  - [ ] Note the trade-off: an in-process resident loop reintroduces a long-lived process, weakening the "100% stateless on disk / no daemon" design goal in `docs/fleet-orchestration.md` §1.
 - [ ] **Bot vs. Human Attribution on GitHub**:
   - [ ] Configure local git author (`user.name = "acp-factory[bot]"`) inside `.worktrees/issue-<id>` so agent commits are visually distinct from personal commits.
   - [ ] Support optional `FACTORY_GH_TOKEN` / GitHub App token override for `gh` CLI calls so issue edits and PR creation can use a dedicated bot account without changing personal `gh auth` state.

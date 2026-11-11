@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .task import (
     ALL_FACTORY_STAGE_LABELS,
+    LABEL_PR_READY,
     StageVerdict,
     TaskContext,
     clean_spec_block,
@@ -28,6 +29,8 @@ class DryRunPlan:
     issue_body_file: Path | None = None
     pr_body_file: Path | None = None
     commands: list[str] = field(default_factory=list)
+    verdict_status: str = ""
+    publish_pr: bool = False
 
 
 class GitHubError(RuntimeError):
@@ -61,18 +64,20 @@ async def run_gh(
     return stdout
 
 
-async def fetch_issue(issue_number: int, cwd: Path) -> TaskContext:
+async def fetch_issue(
+    issue_number: int, cwd: Path, *, repo_slug: str | None = None
+) -> TaskContext:
     """Fetch a single GitHub Issue and parse its body, factory block, labels, and human comments."""
-    out = await run_gh(
-        [
-            "issue",
-            "view",
-            str(issue_number),
-            "--json",
-            "number,title,state,body,labels,comments,url",
-        ],
-        cwd=cwd,
-    )
+    cmd = [
+        "issue",
+        "view",
+        str(issue_number),
+        "--json",
+        "number,title,state,body,labels,comments,url",
+    ]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+    out = await run_gh(cmd, cwd=cwd)
     data = json.loads(out)
     return TaskContext.from_gh_json(data)
 
@@ -82,8 +87,14 @@ async def list_actionable_issues(
     *,
     stage_label: str | None = None,
     limit: int = 50,
+    repo_slug: str | None = None,
+    include_branch_contending: bool = False,
 ) -> list[TaskContext]:
-    """List GitHub Issues that have an actionable `factory:*` stage (including closed issues with leftover worktrees)."""
+    """List GitHub Issues that have an actionable `factory:*` stage (including closed issues with leftover worktrees).
+
+    `include_branch_contending` (fleet admission) additionally retains `pr-ready` issues
+    whose `current_stage` is None but that still occupy a branch/PR slot.
+    """
     cmd = [
         "issue",
         "list",
@@ -94,6 +105,8 @@ async def list_actionable_issues(
         "--json",
         "number,title,state,body,labels,comments,url",
     ]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
     if stage_label:
         cmd.extend(["--label", stage_label])
 
@@ -103,7 +116,11 @@ async def list_actionable_issues(
     seen_numbers: set[int] = set()
     for item in items:
         task = TaskContext.from_gh_json(item)
-        if stage_label or task.current_stage is not None:
+        if (
+            stage_label
+            or task.current_stage is not None
+            or (include_branch_contending and _is_branch_contending(task))
+        ):
             tasks.append(task)
             seen_numbers.add(task.issue_number)
 
@@ -117,7 +134,9 @@ async def list_actionable_issues(
                     issue_num = int(num_str)
                     if issue_num not in seen_numbers:
                         try:
-                            wt_task = await fetch_issue(issue_num, cwd=cwd)
+                            wt_task = await fetch_issue(
+                                issue_num, cwd=cwd, repo_slug=repo_slug
+                            )
                         except GitHubError:
                             continue
                         if wt_task.current_stage == "done":
@@ -129,21 +148,31 @@ async def list_actionable_issues(
     return tasks
 
 
-async def list_all_factory_issues(cwd: Path, *, limit: int = 50) -> list[TaskContext]:
-    """Return open GitHub Issues carrying any `factory:*` label plus any closed issues that still have a local worktree."""
-    out = await run_gh(
-        [
-            "issue",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            str(limit),
-            "--json",
-            "number,title,state,body,labels,comments,url",
-        ],
-        cwd=cwd,
-    )
+async def list_all_factory_issues(
+    cwd: Path,
+    *,
+    limit: int = 50,
+    repo_slug: str | None = None,
+    scan_worktrees: bool = True,
+) -> list[TaskContext]:
+    """Return open GitHub Issues carrying any `factory:*` label plus any closed issues that still have a local worktree.
+
+    `scan_worktrees` is False when `cwd` is only a valid spawn directory (e.g. a missing
+    fleet checkout falls back to `Path.cwd()`), so unrelated `.worktrees/` dirs are ignored.
+    """
+    cmd = [
+        "issue",
+        "list",
+        "--state",
+        "open",
+        "--limit",
+        str(limit),
+        "--json",
+        "number,title,state,body,labels,comments,url",
+    ]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+    out = await run_gh(cmd, cwd=cwd)
     items = json.loads(out) if out else []
     tasks: list[TaskContext] = []
     seen_numbers: set[int] = set()
@@ -154,7 +183,7 @@ async def list_all_factory_issues(cwd: Path, *, limit: int = 50) -> list[TaskCon
             seen_numbers.add(task.issue_number)
 
     worktrees_root = cwd / ".worktrees"
-    if worktrees_root.is_dir():
+    if scan_worktrees and worktrees_root.is_dir():
         for entry in sorted(worktrees_root.iterdir()):
             if entry.is_dir() and entry.name.startswith("issue-"):
                 num_str = entry.name.removeprefix("issue-")
@@ -162,7 +191,9 @@ async def list_all_factory_issues(cwd: Path, *, limit: int = 50) -> list[TaskCon
                     issue_num = int(num_str)
                     if issue_num not in seen_numbers:
                         try:
-                            wt_task = await fetch_issue(issue_num, cwd=cwd)
+                            wt_task = await fetch_issue(
+                                issue_num, cwd=cwd, repo_slug=repo_slug
+                            )
                         except GitHubError:
                             continue
                         tasks.append(wt_task)
@@ -172,21 +203,81 @@ async def list_all_factory_issues(cwd: Path, *, limit: int = 50) -> list[TaskCon
     return tasks
 
 
+@dataclass
+class RepoAdmission:
+    """Stage-aware per-repo admission decision for the fleet runner."""
+
+    repo_slug: str
+    pr_ready_issues: list[TaskContext] = field(default_factory=list)
+    build_review_issues: list[TaskContext] = field(default_factory=list)
+    actionable_issues: list[TaskContext] = field(default_factory=list)
+
+    @property
+    def has_pr_ready(self) -> bool:
+        """True when any issue is awaiting Human Gate 2 (blocks new build/review)."""
+        return bool(self.pr_ready_issues)
+
+
+def build_repo_admission(
+    repo_slug: str,
+    tasks: list[TaskContext],
+    *,
+    max_active_branches_per_repo: int = 1,
+) -> RepoAdmission:
+    """Classify a repository's issues for stage-aware admission control.
+
+    Branch-contending stages (`build`, `review`, `pr-ready`) are mutually exclusive per
+    repo. A `pr-ready` issue (awaiting Human Gate 2 merge) blocks any new `build`/`review`
+    regardless of issue-number order.
+    """
+    pr_ready: list[TaskContext] = []
+    build_review: list[TaskContext] = []
+    actionable: list[TaskContext] = []
+    for task in tasks:
+        stage = task.current_stage
+        if LABEL_PR_READY in task.labels:
+            pr_ready.append(task)
+        elif stage in ("build", "review"):
+            build_review.append(task)
+        if stage is not None:
+            actionable.append(task)
+
+    pr_ready.sort(key=lambda t: t.issue_number)
+    build_review.sort(key=lambda t: t.issue_number)
+    build_review = build_review[:max_active_branches_per_repo]
+    return RepoAdmission(
+        repo_slug=repo_slug,
+        pr_ready_issues=pr_ready,
+        build_review_issues=build_review,
+        actionable_issues=actionable,
+    )
+
+
+def _is_branch_contending(task: TaskContext) -> bool:
+    """Return True when a task holds a branch/PR-contending stage or label.
+
+    `pr-ready` is a Human Gate 2 label (not an actionable stage), so it is detected
+    by label rather than by `current_stage`.
+    """
+    return task.current_stage in ("build", "review") or LABEL_PR_READY in task.labels
+
+
 async def update_issue_factory_block(
     task: TaskContext,
     new_factory_block: str,
     cwd: Path,
+    *,
+    repo_slug: str | None = None,
 ) -> str:
     """Update the `<!-- factory:start --> ... <!-- factory:end -->` block in-place on the GitHub Issue.
 
     Never posts comments on the issue thread; updates the Issue Body via stdin (`--body-file -`).
     """
     full_body = render_issue_body(task.original_body, new_factory_block)
-    await run_gh(
-        ["issue", "edit", str(task.issue_number), "--body-file", "-"],
-        cwd=cwd,
-        input_text=full_body,
-    )
+    cmd = ["issue", "edit", str(task.issue_number), "--body-file", "-"]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+    await run_gh(cmd, cwd=cwd, input_text=full_body)
     task.factory_block = new_factory_block.strip()
     return full_body
 
@@ -215,22 +306,26 @@ def _extract_repo_slug(url: str) -> str | None:
     return None
 
 
-async def ensure_label_exists(label: str, cwd: Path) -> None:
+async def ensure_label_exists(
+    label: str, cwd: Path, *, repo_slug: str | None = None
+) -> None:
     """Ensure a `factory:*` label exists in the GitHub repository."""
     color = LABEL_COLOR_MAP.get(label, "EDEDED")
-    await run_gh(
-        ["label", "create", label, "--color", color, "--force"],
-        cwd=cwd,
-    )
+    cmd = ["label", "create", label, "--color", color, "--force"]
+    if repo_slug:
+        cmd.extend(["--repo", repo_slug])
+    await run_gh(cmd, cwd=cwd)
 
 
 async def transition_issue_label(
     task: TaskContext,
     target_label: str,
     cwd: Path,
+    *,
+    repo_slug: str | None = None,
 ) -> list[str]:
     """Deterministically replace existing `factory:*` stage labels on the issue with `target_label`."""
-    await ensure_label_exists(target_label, cwd=cwd)
+    await ensure_label_exists(target_label, cwd=cwd, repo_slug=repo_slug)
 
     labels_to_remove = [
         lbl
@@ -239,14 +334,16 @@ async def transition_issue_label(
     ]
     if labels_to_remove:
         rm_cmd = ["issue", "edit", str(task.issue_number)]
+        if repo_slug:
+            rm_cmd.extend(["--repo", repo_slug])
         for rem in labels_to_remove:
             rm_cmd.extend(["--remove-label", rem])
         await run_gh(rm_cmd, cwd=cwd)
 
-    await run_gh(
-        ["issue", "edit", str(task.issue_number), "--add-label", target_label],
-        cwd=cwd,
-    )
+    add_cmd = ["issue", "edit", str(task.issue_number), "--add-label", target_label]
+    if repo_slug:
+        add_cmd.extend(["--repo", repo_slug])
+    await run_gh(add_cmd, cwd=cwd)
 
     updated_labels = [lbl for lbl in task.labels if lbl not in labels_to_remove]
     if target_label not in updated_labels:
@@ -260,6 +357,7 @@ async def push_and_create_or_update_pr(
     *,
     pr_body: str,
     cwd: Path,
+    repo_slug: str | None = None,
 ) -> str:
     """Push `task.branch` to origin and open or update a GitHub Pull Request (without ever merging)."""
     proc = await asyncio.create_subprocess_exec(
@@ -290,6 +388,7 @@ async def push_and_create_or_update_pr(
             "open",
             "--json",
             "number,url",
+            *(["--repo", repo_slug] if repo_slug else []),
         ],
         cwd=cwd,
     )
@@ -298,7 +397,16 @@ async def push_and_create_or_update_pr(
         pr_num = str(existing[0]["number"])
         pr_url = str(existing[0]["url"])
         await run_gh(
-            ["pr", "edit", pr_num, "--title", pr_title, "--body-file", "-"],
+            [
+                "pr",
+                "edit",
+                pr_num,
+                "--title",
+                pr_title,
+                "--body-file",
+                "-",
+                *(["--repo", repo_slug] if repo_slug else []),
+            ],
             cwd=cwd,
             input_text=full_pr_body,
         )
@@ -315,6 +423,7 @@ async def push_and_create_or_update_pr(
             pr_title,
             "--body-file",
             "-",
+            *(["--repo", repo_slug] if repo_slug else []),
         ],
         cwd=cwd,
         input_text=full_pr_body,
@@ -435,6 +544,8 @@ def build_dry_run_standalone_pr_plan(
         updated_factory_block=verdict.updated_factory_block,
         pr_body_file=pr_body_file,
         commands=commands,
+        verdict_status=verdict.status,
+        publish_pr=verdict.publish_pr,
     )
 
 
@@ -555,6 +666,8 @@ def build_dry_run_gh_plan(
         issue_body_file=issue_body_file,
         pr_body_file=pr_body_file,
         commands=commands,
+        verdict_status=verdict.status,
+        publish_pr=verdict.publish_pr,
     )
 
 

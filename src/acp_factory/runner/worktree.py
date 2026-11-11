@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import shutil
 import tempfile
 import uuid
@@ -12,6 +13,11 @@ from pathlib import Path
 
 class WorktreeError(RuntimeError):
     """Raised when git worktree creation or cleanup fails."""
+
+
+_REPO_SLUG_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+)
 
 
 async def _run_git(cwd: Path, *args: str) -> tuple[int, str, str]:
@@ -42,6 +48,79 @@ async def is_worktree_clean(cwd: Path) -> bool:
     """Return True when `git status --porcelain` is empty in `cwd`."""
     rc, out, _err = await _run_git(cwd, "status", "--porcelain")
     return rc == 0 and out == ""
+
+
+async def detect_default_branch(repo: Path) -> str:
+    """Return the repository's default branch.
+
+    Prefers `refs/remotes/origin/HEAD`; falls back to `git ls-remote --symref origin HEAD`
+    (works for shallow/partial clones where the symbolic ref is absent).
+    """
+    rc, ref, _err = await _run_git(
+        repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"
+    )
+    if rc == 0 and ref:
+        return ref.split("/", 1)[1] if "/" in ref else ref
+
+    rc2, out, err2 = await _run_git(repo, "ls-remote", "--symref", "origin", "HEAD")
+    if rc2 != 0 or not out:
+        raise WorktreeError(
+            f"Cannot detect default branch in {repo}: {err2 or 'no origin/HEAD'}"
+        )
+    # `git ls-remote --symref origin HEAD` prints e.g.
+    #   ref: refs/heads/main\tHEAD
+    for line in out.splitlines():
+        if line.startswith("ref: refs/heads/"):
+            return line.split("refs/heads/", 1)[1].split("\t", 1)[0].strip()
+    raise WorktreeError(f"Cannot parse default branch from ls-remote in {repo}: {out}")
+
+
+def _expand_path(raw: str) -> Path:
+    """Expand a user path (leading `~`) into an absolute `Path`."""
+    return Path(raw).expanduser() if raw.startswith("~") else Path(raw)
+
+
+def resolve_fleet_repo_path(
+    repo_slug: str,
+    *,
+    repository_map_value: str,
+) -> Path:
+    """Resolve a fleet repository to its local checkout path (explicit path only)."""
+    if not _REPO_SLUG_RE.match(repo_slug):
+        raise WorktreeError(
+            f"Invalid fleet repository slug '{repo_slug}'. Expected 'owner/repo'."
+        )
+    return _expand_path(repository_map_value).resolve()
+
+
+async def ensure_fleet_repo_checkout(
+    repo_slug: str,
+    *,
+    repository_map_value: str,
+) -> Path:
+    """Resolve a fleet target repository to a local checkout and ensure a fresh baseline.
+
+    `repository_map_value` must be an explicit local checkout path (absolute or
+    `~`-relative); on-demand cloning is intentionally not supported. After resolving,
+    `git fetch --prune origin` guarantees new issue worktrees never branch from a stale
+    local HEAD.
+    """
+    checkout = resolve_fleet_repo_path(
+        repo_slug,
+        repository_map_value=repository_map_value,
+    )
+
+    if not checkout.exists():
+        raise WorktreeError(
+            f"Fleet repository '{repo_slug}' maps to missing path '{checkout}'"
+        )
+    if not (checkout / ".git").exists():
+        raise WorktreeError(f"'{checkout}' is not a git repository")
+
+    rc, _out, err = await _run_git(checkout, "fetch", "--prune", "origin")
+    if rc != 0:
+        raise WorktreeError(f"git fetch --prune origin failed in {checkout}: {err}")
+    return checkout
 
 
 class WorktreeManager:
@@ -77,8 +156,12 @@ class WorktreeManager:
         """Return the deterministic branch name `factory/issue-<id>` for a GitHub Issue."""
         return f"factory/issue-{issue_number}"
 
-    async def create(self) -> Path:
-        """Create or reuse a git worktree if enabled, or return repo_root."""
+    async def create(self, *, base_ref: str | None = None) -> Path:
+        """Create or reuse a git worktree if enabled, or return repo_root.
+
+        `base_ref` overrides the ref to branch from (default `HEAD`). Fleet runs pass
+        `origin/<default-branch>` so new issue branches start from a fresh baseline.
+        """
         if not self.enabled:
             return self.repo_root
 
@@ -89,6 +172,8 @@ class WorktreeManager:
             raise WorktreeError(
                 f"Cannot create git worktree: '{self.repo_root}' is not a git repository ({err})."
             )
+
+        effective_base = base_ref or "HEAD"
 
         if self.issue_number is not None:
             self.branch_name = self.issue_branch_name(self.issue_number)
@@ -103,6 +188,7 @@ class WorktreeManager:
             branch_rc, _, _ = await _run_git(
                 self.repo_root, "rev-parse", "--verify", self.branch_name
             )
+
             if branch_rc == 0:
                 rc, _out, err = await _run_git(
                     self.repo_root,
@@ -119,7 +205,7 @@ class WorktreeManager:
                     "-b",
                     self.branch_name,
                     str(wt_path),
-                    "HEAD",
+                    effective_base,
                 )
             if rc != 0:
                 raise WorktreeError(
@@ -141,7 +227,7 @@ class WorktreeManager:
             "-b",
             self.branch_name,
             str(wt_path),
-            "HEAD",
+            effective_base,
         )
         if rc != 0:
             raise WorktreeError(f"Failed to create git worktree at {wt_path}: {err}")
