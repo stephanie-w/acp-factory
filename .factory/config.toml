@@ -32,7 +32,7 @@ checks = ["validate-spec"]
 agent = "opencode"
 read_only = false
 pre = ["uv sync --frozen"]
-persona = "personas/implementer.md"
+persona = "agents/implementer.agent.md"
 skills = ["tdd-builder"]
 prompt = "prompts/build.md"
 checks = ["lint", "test"]
@@ -81,10 +81,3 @@ prompt = "prompts/review.md"
 persona = "agents/security.agent.md"
 skills = ["security-auditor"]
 prompt = "prompts/security.md"
-
-[fleet]
-max_active_branches_per_repo = 1
-
-[fleet.repositories]
-"stephanie-w/acp-factory" = "/home/stephanie/DEV/factory"
-"stephanie-w/acpterm" = "/home/stephanie/DEV/acpterm"
