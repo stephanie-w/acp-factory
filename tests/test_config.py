@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -285,3 +286,154 @@ def test_scaffolded_multi_stage_config_resolves_all_stages_and_skills(
 
     assert "security" in cfg.named_checks
     assert cfg.named_checks["security"].skills == ["security-auditor"]
+
+
+def test_user_level_home_config_loaded_in_bare_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: a bare workspace falls back to ~/.acp-factory/config.toml."""
+    workspace = tmp_path / "bare"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    acp_dir = home / ".acp-factory"
+    acp_dir.mkdir(parents=True)
+    (acp_dir / "config.toml").write_text(
+        'version = "1"\ntask = "personal-default-task"\n\n[agent]\nname = "opencode"\n',
+        encoding="utf-8",
+    )
+
+    cfg = FactoryConfig.discover(workspace)
+    assert cfg.task == "personal-default-task"
+    assert cfg.agent.name == "opencode"
+    assert cfg.config_dir == acp_dir.resolve()
+
+
+def test_user_level_xdg_config_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: ~/.config/acp-factory/config.toml is used when the home path is absent."""
+    workspace = tmp_path / "bare"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    xdg_dir = home / ".config" / "acp-factory"
+    xdg_dir.mkdir(parents=True)
+    (xdg_dir / "config.toml").write_text(
+        'version = "1"\ntask = "xdg-task"\n', encoding="utf-8"
+    )
+
+    cfg = FactoryConfig.discover(workspace)
+    assert cfg.task == "xdg-task"
+    assert cfg.config_dir == xdg_dir.resolve()
+
+
+def test_repo_local_beats_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-3: a repo-local config overrides the user-level config."""
+    workspace = tmp_path / "repo"
+    (workspace / ".factory").mkdir(parents=True)
+    (workspace / ".factory" / "config.toml").write_text(
+        'version = "1"\ntask = "repo-task"\n', encoding="utf-8"
+    )
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    acp_dir = home / ".acp-factory"
+    acp_dir.mkdir(parents=True)
+    (acp_dir / "config.toml").write_text(
+        'version = "1"\ntask = "user-task"\n', encoding="utf-8"
+    )
+
+    cfg = FactoryConfig.discover(workspace)
+    assert cfg.task == "repo-task"
+
+
+def test_explicit_config_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-4: an explicit --config path overrides repo-local and user-level config."""
+    workspace = tmp_path / "repo"
+    (workspace / ".factory").mkdir(parents=True)
+    (workspace / ".factory" / "config.toml").write_text(
+        'version = "1"\ntask = "repo-task"\n', encoding="utf-8"
+    )
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    acp_dir = home / ".acp-factory"
+    acp_dir.mkdir(parents=True)
+    (acp_dir / "config.toml").write_text(
+        'version = "1"\ntask = "user-task"\n', encoding="utf-8"
+    )
+
+    explicit = tmp_path / "explicit.toml"
+    explicit.write_text('version = "1"\ntask = "explicit-task"\n', encoding="utf-8")
+
+    cfg = FactoryConfig.discover(workspace, config_path=explicit)
+    assert cfg.task == "explicit-task"
+
+
+def test_no_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-5: with no repo-local or user config, built-in defaults are returned."""
+    workspace = tmp_path / "bare"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    cfg = FactoryConfig.discover(workspace)
+    assert cfg.agent.name == "opencode"
+    assert cfg.task == ""
+    assert cfg.config_dir == workspace.resolve()
+
+
+def test_user_level_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: persona, prompt, and skill paths resolve relative to the config file."""
+    workspace = tmp_path / "bare"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    acp_dir = home / ".acp-factory"
+    (acp_dir / "personas").mkdir(parents=True)
+    (acp_dir / "skills" / "personal-skill").mkdir(parents=True)
+    (acp_dir / "personas" / "architect.md").write_text(
+        "Personal architect persona.", encoding="utf-8"
+    )
+    skill_file = acp_dir / "skills" / "personal-skill" / "SKILL.md"
+    skill_file.write_text("# Personal Skill\n", encoding="utf-8")
+
+    (acp_dir / "config.toml").write_text(
+        'version = "1"\n'
+        "[agent]\n"
+        'name = "opencode"\n'
+        'persona = "personas/architect.md"\n'
+        'skills = ["personal-skill"]\n',
+        encoding="utf-8",
+    )
+
+    cfg = FactoryConfig.discover(workspace)
+    client = FactoryACPClient(
+        workspace=workspace,
+        agent_config=cfg.agent,
+        config_dir=cfg.config_dir,
+    )
+    assert client.persona_text == "Personal architect persona."
+    assert client.skill_paths == [skill_file.resolve()]
+
+
+def test_malformed_user_config_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: an existing but malformed user-level config raises instead of falling through."""
+    workspace = tmp_path / "bare"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    acp_dir = home / ".acp-factory"
+    acp_dir.mkdir(parents=True)
+    (acp_dir / "config.toml").write_text("[unclosed\n", encoding="utf-8")
+
+    with pytest.raises(tomllib.TOMLDecodeError):
+        FactoryConfig.discover(workspace)

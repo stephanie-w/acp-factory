@@ -53,6 +53,33 @@ uv tool install -e .
 
 ---
 
+## Configuration Precedence
+
+`acp-factory` resolves configuration from the highest-precedence source available (explicit `--config` > repo-local > user-level > built-in defaults), in this order:
+
+1. **Explicit `--config` CLI argument** (`-c`) — the highest precedence.
+2. **Repo-local config** — `.factory/config.toml`, `.factory/config.yaml`, `.factory/config.yml`, `factory.toml`, `factory.yaml`, or `factory.yml` in the workspace.
+3. **User-level config** — `~/.acp-factory/config.toml`, then `~/.config/acp-factory/config.toml` (the first existing file wins).
+4. **Built-in defaults** — `FactoryConfig()`.
+
+Persona, prompt, and skill paths in a config file resolve relative to that config file's directory, so a user-level config can reference shared assets without copying them into every repository. Fleet runs intentionally skip the user-level fallback so bare target repos never inherit the operator's personal `pre`/`checks` settings.
+
+Example `~/.acp-factory/config.toml`:
+
+```toml
+version = "1"
+
+[agent]
+name = "opencode"
+persona = "personas/architect.md"
+
+task = "personal-default-task"
+```
+
+Place personas and skills alongside the config file (e.g. `~/.acp-factory/personas/architect.md`, `~/.acp-factory/skills/<skill>/SKILL.md`).
+
+---
+
 ## Quick Start
 
 ### 1. Scaffold a Multi-Stage `.factory/` Workspace
