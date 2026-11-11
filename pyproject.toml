@@ -22,7 +22,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-acpterm = { path = "/home/stephanie/DEV/acpterm", editable = true }
+acpterm = { git = "https://github.com/stephanie-w/acpterm.git" }
 
 [build-system]
 requires = ["uv_build>=0.9.0,<0.12"]
