@@ -113,6 +113,30 @@ acp-factory status --fleet
 
 `--fleet` is auto-enabled whenever a `[fleet]` section is present in the active config.
 
+#### How to Test Fleet Mode
+
+1. **Configure local checkouts** in `.factory/config.toml`:
+   ```toml
+   [fleet]
+   max_active_branches_per_repo = 1
+
+   [fleet.repositories]
+   "owner/repo-a" = "~/DEV/repo-a"
+   "owner/repo-b" = "~/DEV/repo-b"
+   ```
+
+2. **Inspect multi-repo status** across all configured repositories:
+   ```bash
+   acp-factory status --fleet
+   ```
+   *Expected*: A consolidated table listing each repository, its open `factory:*` issues, human gates, and local worktrees without mutating git or GitHub state.
+
+3. **Dry-run a single fleet pass** (safe verification without GitHub writes):
+   ```bash
+   acp-factory next --fleet -n 1 --dry-run
+   ```
+   *Expected*: The orchestrator selects the next actionable issue, runs its stage in dry-run mode, logs the active repository/issue/stage in the terminal header, saves proposed run artifacts under `.factory/runs/<run-id>/`, and prints manual `gh` commands without mutating GitHub.
+
 ### 3. Review a Standalone Working Branch (With Optional PR Creation)
 
 Review any checked-out branch in a target repository (even without a GitHub Issue or `.factory/` setup) using the bundled `code-reviewer` and `security-auditor` skills:

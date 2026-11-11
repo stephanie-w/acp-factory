@@ -180,3 +180,39 @@ flowchart TD
 | **4. `REVIEWED_AT == HEAD` Guard, Delta Review Brief & Fleet Runner** | [`src/acp_factory/runner/loop.py`](../src/acp_factory/runner/loop.py) | Pre-review clean-tree & SHA snapshot + pre-publish SHA guard in `run_issue_stage` and `run_branch_review`; Round 2+ delta review context builder; `run_fleet_next` and `collect_fleet_status` with stage-aware per-repo admission and error isolation. |
 | **5. CLI Surface (`status --fleet`, `next --fleet`)** | [`src/acp_factory/cli.py`](../src/acp_factory/cli.py) | `--fleet` flag (auto-enabled when `[fleet]` is configured in the active config) on `acp-factory status` (adds `Repository` column) and `acp-factory next`. |
 | **6. Automated Test Suite** | `tests/test_fleet.py`, [`tests/test_github_task.py`](../tests/test_github_task.py) | Unit tests covering `factory:meta` round tracking, findings replacement/stripping, 3-round circuit breaker, SHA mismatch publish abort, stage-aware per-repo busy guard, and cross-repo error isolation. |
+
+---
+
+## 5. How to Test & Verify Fleet Mode
+
+Follow these steps to deterministically verify fleet orchestration behavior:
+
+1. **Minimal Test Configuration**:
+   Ensure `.factory/config.toml` contains at least one mapped local repository:
+   ```toml
+   [fleet]
+   max_active_branches_per_repo = 1
+
+   [fleet.repositories]
+   "owner/repo" = "~/DEV/repo"
+   ```
+
+2. **Read-Only Status Verification**:
+   ```bash
+   acp-factory status --fleet
+   ```
+   - Verifies that GitHub issues are pulled via `gh issue list --repo owner/repo` without cloning.
+   - Checks that active worktrees (`.worktrees/issue-<id>`) are correctly reported.
+
+3. **Safe Dry-Run Execution**:
+   ```bash
+   acp-factory next --fleet -n 1 --dry-run
+   ```
+   - Verifies per-repo admission control (done cleanup first, then read-only triage/spec, then at most 1 build/review branch).
+   - Verifies that dry-run mode writes artifacts locally under `.factory/runs/<run-id>/` and prints copy-pasteable `gh` commands without mutating remote issues or branches.
+
+4. **Automated Test Suite**:
+   ```bash
+   just test-fast && just typecheck
+   ```
+   - Executes all unit tests covering admission invariants, circuit breakers, SHA mismatch aborts, and `--limit` capping.
