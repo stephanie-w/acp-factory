@@ -97,7 +97,10 @@ def _ensure_readonly_gh_shim_dir() -> Path:
 
 
 def build_workspace_env(
-    cwd: Path, *, restrict_gh_writes: bool = False
+    cwd: Path,
+    *,
+    restrict_gh_writes: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Prepare the environment for subprocesses executing in the target workspace/worktree.
 
@@ -106,6 +109,8 @@ def build_workspace_env(
     """
     _ = cwd
     env = dict(os.environ)
+    bundled_repo_root = Path(__file__).resolve().parents[3]
+    env.setdefault("FACTORY_BUNDLED_SKILLS_DIR", str(bundled_repo_root / "skills"))
 
     if restrict_gh_writes:
         shim_dir = str(_ensure_readonly_gh_shim_dir())
@@ -113,6 +118,8 @@ def build_workspace_env(
         env["PATH"] = (
             f"{shim_dir}{os.pathsep}{current_path}" if current_path else shim_dir
         )
+    if extra_env:
+        env.update(extra_env)
     return env
 
 
@@ -146,10 +153,11 @@ async def run_shell_command(
     cwd: Path,
     *,
     timeout: int = 300,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, str, float]:
     """Execute a shell command in its own process group with clean termination on timeout/cancel."""
     start = time.monotonic()
-    env = build_workspace_env(cwd)
+    env = build_workspace_env(cwd, extra_env=extra_env)
 
     proc = await asyncio.create_subprocess_shell(
         cmd,
@@ -238,11 +246,12 @@ async def run_single_check(
     acp_client: FactoryACPClient | None = None,
     config_dir: Path | None = None,
     max_output_lines: int = 150,
+    extra_env: dict[str, str] | None = None,
 ) -> CheckResult:
     """Execute a single check (either deterministic shell command or agent review prompt)."""
     if check.cmd is not None:
         rc, output, duration = await run_shell_command(
-            check.cmd, cwd, timeout=check.timeout
+            check.cmd, cwd, timeout=check.timeout, extra_env=extra_env
         )
         passed = rc == 0
         chk_status: Literal["pass", "retry", "stop"] = (
@@ -364,6 +373,7 @@ async def run_checks_sequential(
     config_dir: Path | None = None,
     max_output_lines: int = 150,
     on_check_complete: Callable[[CheckResult], None] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[bool, list[CheckResult]]:
     """Run all configured checks in sequence, stopping immediately at the first failure (fail-fast)."""
     results: list[CheckResult] = []
@@ -374,6 +384,7 @@ async def run_checks_sequential(
             acp_client=acp_client,
             config_dir=config_dir,
             max_output_lines=max_output_lines,
+            extra_env=extra_env,
         )
         results.append(result)
         if on_check_complete is not None:

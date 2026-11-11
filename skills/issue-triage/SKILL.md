@@ -7,6 +7,10 @@ description: Evaluate incoming tickets against the codebase, detect duplicates o
 
 Use this skill during the `triage` stage to ensure the builder never starts from a vague, duplicate, or oversized ticket.
 
+## Resources in This Skill Package
+- **Template**: `templates/triage-report.md` — canonical Markdown output skeleton.
+- **Validation Script**: `scripts/validate_triage.py` — deterministic validator verifying required sections, privacy rules, and terminal `STATUS:` token.
+
 ## 1. Triage Procedure
 
 1. **Read & Ground in the Codebase**:
@@ -29,21 +33,6 @@ Use this skill during the `triage` stage to ensure the builder never starts from
 4. **Check Project Infrastructure**:
    - Note which existing verification commands (linters, typecheckers, test runners, DAG compilers, or IaC validators) apply to the touched area, or flag if project-wide test/validation infrastructure is missing so the `spec` stage can escalate it.
 
-## 2. Output Structure
+## 2. Output Contract
 
-Format your triage report cleanly in Markdown with no conversational intro or outro:
-
-```markdown
-### Codebase Inspection
-- **Touched Area**: `<repo-relative paths>`
-- **Current Behavior & Root Cause**: <concise findings verified in code>
-- **Duplicates / Related Issues**: `None` (or `DUPLICATE_OF: #<id>` / `ALSO_FIXES: #<id>`)
-- **Estimated Scope**: `<Small | Medium | Too Big (~N lines across M files)>`
-- **Verification Tooling Available**: `<commands available in repo, or missing tooling notes>`
-
-### Suggested Split (Only when TOO_BIG)
-1. **<Ticket Title 1>**: <one line of scope>
-2. **<Ticket Title 2>**: <one line of scope>
-
-STATUS: <OK | DUPLICATE | TOO_BIG | NEEDS_HUMAN>
-```
+Format your triage report strictly matching `templates/triage-report.md` (with no conversational intro or outro). Your output is validated by `scripts/validate_triage.py`.

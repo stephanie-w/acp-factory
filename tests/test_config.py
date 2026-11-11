@@ -283,6 +283,9 @@ def test_scaffolded_multi_stage_config_resolves_all_stages_and_skills(
         )
         assert len(client.skill_paths) == len(expected_skills)
         assert client.persona_text is not None
+        decorated = client._decorate_first_turn_prompt("Run task", client.skill_paths)
+        assert "Template:" in decorated
+        assert "Validation Script:" in decorated
 
     assert "security" in cfg.named_checks
     assert cfg.named_checks["security"].skills == ["security-auditor"]

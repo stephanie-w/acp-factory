@@ -158,34 +158,63 @@ def test_parse_stage_verdicts_across_pipeline() -> None:
     assert "Latest Review Findings" in v_rev_retry.updated_factory_block
 
 
-def test_spec_strips_monologue_and_catches_unformatted_open_questions() -> None:
-    raw_agent_output = (
-        "I'll analyze the codebase to write a precise specification for this issue."
-        "I'll explore the codebase directly. The read tools are restricted in this planning context.\n\n"
-        "Let me ask one focused question before finalizing, since there are two genuinely ambiguous choices.\n\n"
-        "---\n\n"
-        "Before I finalize the spec, I have two questions that the codebase alone can't resolve:\n\n"
-        "**[1]** Where should `FACTORY_GH_TOKEN` be read from — what is the injection mechanism?\n\n"
-        "a. Environment variable only\nb. .env file\n\n(Answer: 1=a or 1=b)\n\n"
-        "---\n\n"
-        "**[2]** What should happen when `FACTORY_GH_TOKEN` is not set?\n\n"
-        "a. Hard fail\nb. Soft fallback\n\n(Answer: 2=a or 2=b)"
-    )
-    verdict = parse_stage_verdict("spec", raw_agent_output)
+def test_spec_validator_catches_unformatted_questions_and_normalizes_valid_spec(
+    tmp_path: Path,
+) -> None:
+    import subprocess
 
+    repo_root = Path(__file__).resolve().parents[1]
+    validator = repo_root / "skills" / "spec-writer" / "scripts" / "validate_spec.py"
+
+    # 1. Unformatted monologue + questions without headings/STATUS fails validation
+    unformatted_output = (
+        "I'll analyze the codebase to write a precise specification for this issue.\n\n"
+        "Before I finalize the spec, I have two questions:\n\n"
+        "**[1]** Where should `FACTORY_GH_TOKEN` be read from?\n"
+        "a. Environment variable only\nb. .env file\n\n(Answer: 1=a or 1=b)"
+    )
+    resp_file = tmp_path / "response.md"
+    resp_file.write_text(unformatted_output, encoding="utf-8")
+
+    proc_fail = subprocess.run(
+        ["python3", str(validator), str(resp_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc_fail.returncode == 1
+    assert "Specification validation failed" in proc_fail.stderr
+    assert "Missing terminal 'STATUS:" in proc_fail.stderr
+
+    # 2. Properly formatted NEEDS_HUMAN spec with leading monologue is normalized cleanly
+    valid_needs_human = (
+        "I'll inspect the codebase first.\n\n"
+        "# Specification\n\n"
+        "## Problem\nToken source is ambiguous.\n\n"
+        "## Open Questions\n"
+        "1. Where should `FACTORY_GH_TOKEN` be read from?\n"
+        "   - Option A (Recommended): Environment variable only\n"
+        "   - Option B: `.env` file\n\n"
+        "STATUS: NEEDS_HUMAN\n"
+        "Let me know which option you prefer!"
+    )
+    resp_file.write_text(valid_needs_human, encoding="utf-8")
+    proc_ok = subprocess.run(
+        ["python3", str(validator), str(resp_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc_ok.returncode == 0
+    normalized = resp_file.read_text(encoding="utf-8")
+    assert normalized.startswith("# Specification")
+    assert "I'll inspect the codebase" not in normalized
+    assert "Let me know which option" not in normalized
+
+    verdict = parse_stage_verdict("spec", normalized)
     assert verdict.target_label == LABEL_NEEDS_HUMAN
     assert verdict.status == "needs_human"
-    # Conversational monologue paragraphs must be stripped
-    assert "I'll analyze the codebase" not in verdict.updated_factory_block
-    assert "Let me ask one focused question" not in verdict.updated_factory_block
-    assert "The read tools are restricted" not in verdict.updated_factory_block
-    # Open Questions heading must be prepended
-    assert verdict.updated_factory_block.startswith("## Open Questions")
-    assert (
-        "**[1]** Where should `FACTORY_GH_TOKEN` be read from"
-        in verdict.updated_factory_block
-    )
-    assert "**[2]** What should happen" in verdict.updated_factory_block
+    assert "## Open Questions" in verdict.updated_factory_block
 
 
 def test_structured_json_review_check_verdict() -> None:

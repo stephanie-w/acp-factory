@@ -169,3 +169,189 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "Lint" in prompt
     assert "Pytest" in prompt
     assert "AssertionError: 1 != 2" in prompt
+
+
+async def test_spec_validation_check_self_heals_via_factory_response_file(
+    tmp_path: Path,
+) -> None:
+    cfg = FactoryConfig(
+        task="Write specification for token auth",
+        active_stage="spec",
+        checks=[
+            CheckConfig(
+                name="validate-spec",
+                cmd='uv run "$FACTORY_BUNDLED_SKILLS_DIR/spec-writer/scripts/validate_spec.py" "$FACTORY_RESPONSE_FILE"',
+            )
+        ],
+        retry=RetryConfig(max_attempts=3),
+    )
+
+    prompts_received: list[str] = []
+
+    class FakeSpecACPClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.tracker = AsyncMock()
+            self.tracker.history = []
+
+        async def __aenter__(self) -> FakeSpecACPClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def send_prompt(self, prompt: str, **kwargs: object) -> TurnResult:
+            prompts_received.append(prompt)
+            if len(prompts_received) == 1:
+                # Attempt 1: unformatted monologue without required sections or STATUS
+                text = (
+                    "I'll explore the codebase first.\n\n"
+                    "Before finalizing, I have a question:\n"
+                    "**[1]** Which token env var should we use? (Answer: 1=a or 1=b)"
+                )
+            else:
+                # Attempt 2: properly formatted spec after receiving validation error feedback
+                text = (
+                    "Here is the corrected specification:\n\n"
+                    "# Specification\n\n"
+                    "## Problem\nMissing token auth.\n\n"
+                    "## Behavior\n1. Read token from env.\n\n"
+                    "## Files to Touch\n- `src/acp_factory/config.py`\n\n"
+                    "## Decisions\n- None yet.\n\n"
+                    "## Assumptions\n- Standard env var lookup.\n\n"
+                    "## Acceptance Criteria\n"
+                    "| ID | Done when | How to check |\n"
+                    "| :--- | :--- | :--- |\n"
+                    "| AC-1 | Token is loaded | `uv run pytest` |\n\n"
+                    "## Out of Scope\n- OAuth flows.\n\n"
+                    "STATUS: SPEC_READY\n"
+                )
+            return TurnResult(
+                stop_reason="end_turn",
+                summary=TurnSummary(
+                    prompt=prompt,
+                    response_text=text,
+                    thought_text="",
+                    stop_reason="end_turn",
+                    duration_seconds=0.05,
+                    tool_call_count=0,
+                ),
+            )
+
+    with patch("acp_factory.runner.loop.FactoryACPClient", FakeSpecACPClient):
+        outcome = await run_factory(cfg, tmp_path)
+
+    assert outcome.succeeded is True
+    assert outcome.attempts_used == 2
+    assert len(prompts_received) == 2
+    assert "Specification validation failed" in prompts_received[1]
+    assert outcome.last_response_text.startswith("# Specification")
+    assert "Here is the corrected specification" not in outcome.last_response_text
+
+
+def test_all_skill_validators_and_templates_exist_and_work(tmp_path: Path) -> None:
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[1]
+    skills_dir = repo_root / "skills"
+
+    # 1. Triage validator
+    triage_file = tmp_path / "triage.md"
+    triage_file.write_text(
+        "Let me check the repo.\n\n"
+        "### Codebase Inspection\n"
+        "- **Touched Area**: `src/acp_factory/cli.py`\n"
+        "- **Current Behavior & Root Cause**: Missing flag.\n"
+        "- **Duplicates / Related Issues**: `None`\n"
+        "- **Estimated Scope**: `Small (~30 lines across 1 file)`\n"
+        "- **Verification Tooling Available**: `uv run pytest`\n\n"
+        "STATUS: OK\n",
+        encoding="utf-8",
+    )
+    res_triage = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "issue-triage" / "scripts" / "validate_triage.py"),
+            str(triage_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_triage.returncode == 0
+    assert triage_file.read_text(encoding="utf-8").startswith("### Codebase Inspection")
+
+    # 2. Review validator
+    review_file = tmp_path / "review.md"
+    review_file.write_text(
+        "### Risk Classification: LOW\n"
+        "- **Reason**: Test-only update.\n\n"
+        "### Acceptance Criteria Verification\n"
+        "| ID | Status | Evidence |\n"
+        "| :--- | :--- | :--- |\n"
+        "| AC-1 | PASS | `tests/test_checks.py:1` |\n\n"
+        "### Findings\n"
+        "- None.\n\n"
+        "STATUS: ACCEPTED\n",
+        encoding="utf-8",
+    )
+    res_review = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "code-reviewer" / "scripts" / "validate_review.py"),
+            str(review_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_review.returncode == 0
+
+    # Contradictory review (ACCEPTED with [blocking] finding) must fail
+    bad_review = tmp_path / "bad_review.md"
+    bad_review.write_text(
+        "### Risk Classification: MEDIUM\n"
+        "- **Reason**: Logic change.\n\n"
+        "### Findings\n"
+        "1. `[blocking]` `[unambiguous]` `src/app.py:10`\n"
+        "   - **Problem**: Crash\n\n"
+        "STATUS: ACCEPTED\n",
+        encoding="utf-8",
+    )
+    res_bad_review = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "code-reviewer" / "scripts" / "validate_review.py"),
+            str(bad_review),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_bad_review.returncode == 1
+    assert (
+        "STATUS is ACCEPTED/PASS, but '[blocking]' or '[major]'"
+        in res_bad_review.stderr
+    )
+
+    # 3. Security validator
+    sec_file = tmp_path / "security.md"
+    sec_file.write_text(
+        "### Security Audit Summary\n"
+        "- **Untrusted Inputs Traced**: `None`\n"
+        "- **Findings Count**: `0 blocking, 0 major, 0 minor`\n\n"
+        "### Security Findings\n"
+        "- None.\n\n"
+        "STATUS: ACCEPTED\n",
+        encoding="utf-8",
+    )
+    res_sec = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "security-auditor" / "scripts" / "validate_security.py"),
+            str(sec_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_sec.returncode == 0

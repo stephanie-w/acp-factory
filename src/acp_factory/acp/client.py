@@ -246,10 +246,18 @@ class FactoryACPClient:
         if attached_skills:
             skill_lines = ["# Active Skills"]
             skill_lines.append(
-                "Read and follow the instructions in these attached skill definitions:"
+                "Read and follow the instructions, templates, and validation scripts in these attached skill packages:"
             )
             for sp in attached_skills:
                 skill_lines.append(f"- `{sp}`")
+                templates_dir = sp.parent / "templates"
+                if templates_dir.is_dir():
+                    for tmpl in sorted(templates_dir.glob("*.md")):
+                        skill_lines.append(f"  - Template: `{tmpl}`")
+                scripts_dir = sp.parent / "scripts"
+                if scripts_dir.is_dir():
+                    for script in sorted(scripts_dir.glob("*.py")):
+                        skill_lines.append(f"  - Validation Script: `{script}`")
             sections.append("\n".join(skill_lines))
         sections.append(prompt)
         return "\n\n".join(sections)
@@ -273,6 +281,11 @@ class FactoryACPClient:
             for sp in self.skill_paths:
                 if sp not in turn_resources:
                     turn_resources.append(sp)
+                templates_dir = sp.parent / "templates"
+                if templates_dir.is_dir():
+                    for tmpl in sorted(templates_dir.glob("*.md")):
+                        if tmpl not in turn_resources:
+                            turn_resources.append(tmpl)
             if self.persona_text or self.skill_paths:
                 effective_prompt = self._decorate_first_turn_prompt(
                     prompt, self.skill_paths

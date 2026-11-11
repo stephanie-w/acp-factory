@@ -7,6 +7,10 @@ description: Write verified, unambiguous technical specifications with falsifiab
 
 Use this skill during the `spec` stage to turn a triaged ticket into a self-contained specification that an implementer and reviewer can execute and verify deterministically.
 
+## Resources in This Skill Package
+- **Template**: `templates/spec.md` — canonical Markdown specification skeleton.
+- **Validation Script**: `scripts/validate_spec.py` — deterministic validator verifying headings, `AC-n` table format, `## Open Questions` rules, privacy guardrails, and terminal `STATUS:`.
+
 ## 1. Pre-Specification Verification
 
 1. **Read All Context**:
@@ -28,67 +32,29 @@ Ask the human **only what is theirs to decide**:
      - Choosing missing project-wide test, build, or validation tooling.
      - Breaking public API/CLI/event/model payload contracts.
      - Cloud/MLOps cost, compute, or security decisions (GPU/instance types, scaling bounds, IAM permissions, network exposure, data retention/deletion policies).
-   - For every open question, provide **2–3 concrete options** and state your **recommended option** with a one-line rationale.
+   - For every open question, provide **2–3 concrete options** and state your **recommended option** with a one-line rationale under a `## Open Questions` heading.
 3. **Fold Answered Questions into `## Decisions`**:
    - When human comments answer prior open questions, record the chosen option and rationale under `## Decisions` and remove the resolved `## Open Questions` section.
 
-## 3. Falsifiable Acceptance Criteria Table (`AC-n`)
+## 3. Falsifiable Acceptance Criteria Table (`AC-n`) & Testability Rules
 
-Every specification MUST include an `## Acceptance Criteria` table using stable `AC-1`, `AC-2`, ... identifiers (never renumber existing IDs on spec revisions):
+Every `SPEC_READY` specification MUST include an `## Acceptance Criteria` table using stable `AC-1`, `AC-2`, ... identifiers (never renumber existing IDs on spec revisions):
 
 | ID | Done when | How to check |
 | :--- | :--- | :--- |
 | `AC-1` | <Observable behavior, state change, or contract outcome> | <Deterministic local check: specific test to write/run, CLI command + expected output, DAG/schema compile check, or static IaC validation> |
 
-Rules for `AC-n` rows:
+Rules for `AC-n` rows and testability:
 - **No vague words** ("appropriately", "correctly", "properly", "fast"). State exact inputs, outputs, status codes, or error messages.
 - **Must be falsifiable**: Every `How to check` must be a concrete test or command that runs locally inside an isolated worktree without requiring live production credentials or external cloud mutations, and would fail if the requirement is not met.
-- **Mandatory documentation check**: If the change introduces or modifies user-facing CLI commands, flags, configuration options/precedence, public interfaces, or workflows, include an explicit `AC-n` row verifying that relevant documentation (e.g. `README.md`, `docs/`, or CLI help) is updated. A specification touching user-facing interfaces without an `AC-n` for documentation is NOT ready (`STATUS: SPEC_READY`).
+- **Mandatory documentation check**: If the change introduces or modifies user-facing CLI commands, flags, configuration options/precedence, public interfaces, or workflows, include an explicit `AC-n` row verifying that relevant documentation (e.g. `README.md`, `docs/`, or CLI `--help`) is updated.
+- **Mandatory `## How to Test` guide**: If the change touches user-facing CLI commands, flags, or configuration options, include a concrete `## How to Test` section with a minimal working configuration snippet, exact terminal command, and expected output.
 
-## 4. Specification Template
-
-```markdown
-# Specification
-
-## Problem
-<Who is affected, what goes wrong or is missing today, and why it matters in 2–4 sentences.>
-
-## Behavior
-1. <Numbered, testable behaviors covering success, invalid/borderline input, and failure handling.>
-
-## Design
-<Include ONLY when the change spans multiple modules or services: a concise Mermaid diagram of the flow and the module/interface/schema boundaries.>
-
-## Files to Touch
-- `path/to/file.ext` — <concise summary of changes>
-
-## Decisions
-- <Each settled decision, who made it (human comment, parent issue), and why — or `- None yet.`>
-
-## Assumptions
-- <Reversible, code-local choices made without blocking on human input — or `- None.`>
-
-## Acceptance Criteria
-| ID | Done when | How to check |
-| :--- | :--- | :--- |
-| AC-1 | <Observable outcome> | <Test or local verification command> |
-| AC-2 | Relevant documentation (README.md, docs/) updated with <feature/behavior> | <Inspection or command e.g. git diff --exit-code README.md> |
-
-## How to Test
-<MANDATORY for user-facing CLI/config changes: minimal configuration snippet, exact terminal command to run, and expected output.>
-
-## Out of Scope
-- <What this ticket explicitly does not change.>
-
-STATUS: <SPEC_READY | NEEDS_HUMAN>
-```
-*(If `STATUS: NEEDS_HUMAN`, include `## Open Questions` right before `STATUS: NEEDS_HUMAN`.)*
-
-## 5. Specification Revision Workflow (Incremental Mode)
+## 4. Specification Revision Workflow (Incremental Mode)
 
 When an existing specification is present in the context or when a `# Spec Revision Brief` is supplied:
 1. **Incremental over Scratch**: Do not restart broad codebase exploration. Focus your attention exclusively on the requests and questions raised in `## Human Comments`.
 2. **Stable Criteria**: Never delete or renumber existing `AC-n` rows that have already been vetted. Append newly requested criteria as `AC-(n+1)`.
 3. **Resolve Open Questions**: Move answered questions from `## Open Questions` into `## Decisions` with the human's rationale.
 4. **Targeted Diffs**: Only update `## Behavior`, `## Files to Touch`, or `## Out of Scope` where the human comment explicitly modifies scope or settles a question.
-5. **Output Full Document**: Always emit the entire updated Markdown specification so the living spec remains self-contained.
+5. **Output Full Document**: Always emit the entire updated Markdown specification matching `templates/spec.md` (checked by `scripts/validate_spec.py`).

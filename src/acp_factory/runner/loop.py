@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -395,14 +397,32 @@ async def run_factory(
                     f"Validation Checks (Attempt {attempt}/{config.retry.max_attempts})",
                     style="cyan",
                 )
-                all_passed, results = await run_checks_sequential(
-                    config.checks,
-                    active_cwd,
-                    acp_client=acp_client,
-                    config_dir=config.config_dir,
-                    max_output_lines=config.retry.max_output_lines,
-                    on_check_complete=ui.show_check_result,
-                )
+                with tempfile.TemporaryDirectory(
+                    prefix=f"acp-factory-{run_id}-attempt-{attempt}-"
+                ) as resp_tmp_dir:
+                    resp_file = Path(resp_tmp_dir) / "response.md"
+                    resp_file.write_text(last_response_text, encoding="utf-8")
+                    check_env: dict[str, str] = {
+                        "FACTORY_RESPONSE_FILE": str(resp_file),
+                    }
+                    if config.active_stage:
+                        check_env["FACTORY_STAGE"] = config.active_stage
+
+                    all_passed, results = await run_checks_sequential(
+                        config.checks,
+                        active_cwd,
+                        acp_client=acp_client,
+                        config_dir=config.config_dir,
+                        max_output_lines=config.retry.max_output_lines,
+                        on_check_complete=ui.show_check_result,
+                        extra_env=check_env,
+                    )
+                    if all_passed and resp_file.is_file():
+                        with contextlib.suppress(Exception):
+                            normalized_resp = resp_file.read_text(encoding="utf-8")
+                            if normalized_resp.strip():
+                                last_response_text = normalized_resp
+
                 check_history.append(results)
 
                 if all_passed:

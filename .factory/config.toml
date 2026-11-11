@@ -16,6 +16,7 @@ read_only = true
 persona = "personas/triage.md"
 skills = ["issue-triage"]
 prompt = "prompts/TRIAGE.md"
+checks = ["validate-triage"]
 
 [stages.spec]
 agent = "opencode"
@@ -24,6 +25,7 @@ read_only = true
 persona = "personas/architect.md"
 skills = ["spec-writer"]
 prompt = "prompts/SPEC.md"
+checks = ["validate-spec"]
 
 [stages.build]
 agent = "opencode"
@@ -40,6 +42,19 @@ read_only = true
 persona = "personas/reviewer.md"
 skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/REVIEW.md"
+checks = ["validate-review"]
+
+[checks.validate-triage]
+command = "uv run \"$FACTORY_BUNDLED_SKILLS_DIR/issue-triage/scripts/validate_triage.py\" \"$FACTORY_RESPONSE_FILE\""
+
+[checks.validate-spec]
+command = "uv run \"$FACTORY_BUNDLED_SKILLS_DIR/spec-writer/scripts/validate_spec.py\" \"$FACTORY_RESPONSE_FILE\""
+
+[checks.validate-review]
+command = "uv run \"$FACTORY_BUNDLED_SKILLS_DIR/code-reviewer/scripts/validate_review.py\" \"$FACTORY_RESPONSE_FILE\""
+
+[checks.validate-security]
+command = "uv run \"$FACTORY_BUNDLED_SKILLS_DIR/security-auditor/scripts/validate_security.py\" \"$FACTORY_RESPONSE_FILE\""
 
 [checks.lint]
 command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run --frozen ruff check"
@@ -56,3 +71,4 @@ prompt = "prompts/REVIEW.md"
 persona = "personas/security.md"
 skills = ["security-auditor"]
 prompt = "prompts/SECURITY.md"
+

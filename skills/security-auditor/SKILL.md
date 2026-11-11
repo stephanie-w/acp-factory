@@ -7,6 +7,10 @@ description: Audit branch changes from an attacker's perspective by tracing untr
 
 Use this skill during `review` (or as a dedicated security check) to evaluate a change for one thing only: **what an attacker or untrusted caller could do with it**.
 
+## Resources in This Skill Package
+- **Template**: `templates/security-report.md` — canonical Markdown security audit report skeleton.
+- **Validation Script**: `scripts/validate_security.py` — deterministic validator verifying `### Security Audit Summary`, `### Security Findings`, severity/status consistency, and privacy rules.
+
 ## 1. Security Audit Procedure
 
 1. **Trace Untrusted Input from Source to Sink**:
@@ -19,7 +23,7 @@ Use this skill during `review` (or as a dedicated security check) to evaluate a 
    - **Unsafe Defaults & Resource Exhaustion**: Permissive CORS (`*`), SSRF / open redirects to user-controlled URLs, unbounded memory/batch/file reads without size or timeout limits, or unpinned container/model artifacts (`:latest`).
    - **Dependencies & Supply Chain**: Newly added packages—are they explicitly approved in the spec, real (not typosquatted), maintained, and pinned in lockfiles?
 3. **Prove Every Suspected Hole**:
-   - For every `[blocking]` or `[major]` security finding, specify the **concrete input, payload, or configuration state (`Exploit:`)** that triggers the vulnerability.
+   - For every `[blocking]` or `[major]` security finding, specify the **concrete input, payload, or configuration state (`Exploit / Trigger`)** that triggers the vulnerability.
    - Report only real security issues; leave general code style or non-security correctness to `code-reviewer`.
 
 ## 2. Security Severity Rubric
@@ -28,21 +32,6 @@ Use this skill during `review` (or as a dedicated security check) to evaluate a 
 - **`major`**: A security weakness that requires one additional mistake or non-default condition to become exploitable (e.g., missing timeout/size bound on external input, overly broad permissions).
 - **`minor`**: Defense-in-depth hardening recommendation that is not currently exploitable.
 
-## 3. Security Report Format
+## 3. Output Contract
 
-When running as a standalone security check, output ONLY this structured Markdown report ending with `STATUS:`:
-
-```markdown
-### Security Audit Summary
-- **Untrusted Inputs Traced**: `<list entry points / inputs inspected, or None>`
-- **Findings Count**: `<N blocking, M major, K minor>`
-
-### Security Findings
-1. `[blocking|major|minor]` `path/to/file.py:123`
-   - **Problem**: <vulnerability description>
-   - **Exploit / Trigger**: `<concrete input or call sequence that triggers it>`
-   - **Fix**: <concrete remediation>
-*(Write `- None.` if no security findings.)*
-
-STATUS: <ACCEPTED | REVISION_NEEDED>
-```
+When running as a standalone security check, output ONLY the structured Markdown report matching `templates/security-report.md` ending with `STATUS:` (validated by `scripts/validate_security.py`).
