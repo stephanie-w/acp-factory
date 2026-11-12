@@ -165,6 +165,14 @@ class StageConfig(BaseModel):
     timeout: int | None = Field(
         default=None, ge=1, description="Stage-specific per-turn timeout in seconds"
     )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Stage-specific environment variables merged into checks and agent subprocesses",
+    )
+    strip_env: list[str] = Field(
+        default_factory=list,
+        description="Stage-specific additional environment variable names to strip from workspace subprocesses",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -271,6 +279,14 @@ class FactoryConfig(BaseModel):
     dry_run: bool = Field(
         default=False,
         description="When true, never execute mutating gh/git push commands; output files and human commands instead.",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Custom environment variables injected into checks, setup, and ACP agent subprocesses.",
+    )
+    strip_env: list[str] = Field(
+        default_factory=list,
+        description="Additional environment variable names to strip from workspace subprocesses.",
     )
 
     _config_dir: Path | None = PrivateAttr(default=None)
@@ -455,6 +471,15 @@ class FactoryConfig(BaseModel):
                 )
             resolved_checks.append(chk)
 
+        if stage.env:
+            merged_env = dict(resolved.env)
+            merged_env.update(stage.env)
+            resolved.env = merged_env
+        if stage.strip_env:
+            resolved.strip_env = list(
+                dict.fromkeys(resolved.strip_env + stage.strip_env)
+            )
+
         resolved.checks = resolved_checks
         return resolved
 
@@ -520,6 +545,15 @@ class FactoryConfig(BaseModel):
                     )
                 resolved_checks.append(chk)
             resolved.checks = resolved_checks
+
+        if repo_stage.env:
+            merged_env = dict(resolved.env)
+            merged_env.update(repo_stage.env)
+            resolved.env = merged_env
+        if repo_stage.strip_env:
+            resolved.strip_env = list(
+                dict.fromkeys(resolved.strip_env + repo_stage.strip_env)
+            )
 
         return resolved
 

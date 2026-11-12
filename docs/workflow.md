@@ -104,6 +104,8 @@ stateDiagram-v2
 
 ## 3. Per-Stage Agent Customization, Domain-Agnostic Core & `apm` Skills
 
+> 📖 **See [docs/model-selection.md](model-selection.md) for stage-by-stage model recommendations, reasoning strategies, and cross-model verification setups.**
+
 ### A. Domain-Agnostic Factory Core vs. Pluggable Domain Skills
 `acp-factory` separates **universal factory governance** from **domain/tech-stack specifics**:
 

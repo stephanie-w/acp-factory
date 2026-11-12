@@ -116,7 +116,21 @@ def build_initial_prompt(
         "# Coding Task",
         task.strip(),
         "",
+        "## Execution Mode: Autonomous & Non-Interactive",
+        "- You are executing autonomously in an automated orchestrator with NO human in the loop to answer questions, approve plans, or confirm decisions.",
+        "- Do NOT pause to ask clarifying questions, request approval, or propose a strategy and wait for confirmation.",
+        "- If repository instructions (such as `AGENTS.md` or `CLAUDE.md`) specify an interactive confirmation workflow (e.g. 'wait for user approval before proceeding'), that waiting requirement is strictly superseded: proceed directly to execute and verify the task to completion.",
     ]
+    if read_only:
+        lines.append(
+            "- Complete your analysis and output your full structured report directly. If any ambiguity requires human decisions, document it within your report (e.g. under `## Open Questions` with `STATUS: NEEDS_HUMAN`), but never end your turn waiting for interactive chat confirmation."
+        )
+    else:
+        lines.append(
+            "- Complete all necessary research, file modifications, and verification autonomously within your turn."
+        )
+    lines.append("")
+
     if checks:
         lines.append("## Verification Checks")
         if read_only:
@@ -184,6 +198,11 @@ def build_retry_prompt(
     lines.append(
         "Analyze the failure output above, fix the root cause in the workspace without "
         "breaking prior work or previously passing checks, and verify your changes."
+    )
+    lines.append(
+        "Remember: You are executing autonomously with no human operator in the loop. "
+        "Do NOT end your turn asking questions or proposing a strategy for approval; "
+        "apply all changes directly to the workspace."
     )
     return "\n".join(lines)
 
@@ -382,7 +401,11 @@ async def run_factory(
             ui.show_phase_banner("Setup Phase", style="blue")
             for setup_cmd in config.setup:
                 rc, output, duration = await run_shell_command(
-                    setup_cmd, active_cwd, timeout=config.agent.timeout
+                    setup_cmd,
+                    active_cwd,
+                    timeout=config.agent.timeout,
+                    extra_env=config.env or None,
+                    strip_env=config.strip_env or None,
                 )
                 setup_logs.append(f"$ {setup_cmd} (exit {rc})\n{output}")
                 passed = rc == 0
@@ -433,6 +456,8 @@ async def run_factory(
             config_dir=config.config_dir,
             resources_dir=resolved_res_dir,
             verbose=verbose,
+            extra_env=config.env or None,
+            strip_env=config.strip_env or None,
         ) as acp_client:
             prompt = build_initial_prompt(
                 config.task, config.checks, read_only=config.agent.read_only
@@ -492,9 +517,13 @@ async def run_factory(
                 ) as resp_tmp_dir:
                     resp_file = Path(resp_tmp_dir) / "response.md"
                     resp_file.write_text(last_response_text, encoding="utf-8")
-                    check_env: dict[str, str] = {
-                        "FACTORY_RESPONSE_FILE": str(resp_file),
-                    }
+                    check_env = dict(config.env)
+                    check_env.update(
+                        {
+                            "FACTORY_RUN_ID": run_id,
+                            "FACTORY_RESPONSE_FILE": str(resp_file),
+                        }
+                    )
                     if config.active_stage:
                         check_env["FACTORY_STAGE"] = config.active_stage
                     if resolved_res_dir is not None:
@@ -517,6 +546,7 @@ async def run_factory(
                         max_output_lines=config.retry.max_output_lines,
                         on_check_complete=ui.show_check_result,
                         extra_env=check_env,
+                        strip_env=config.strip_env or None,
                     )
                     if all_passed and resp_file.is_file():
                         with contextlib.suppress(Exception):

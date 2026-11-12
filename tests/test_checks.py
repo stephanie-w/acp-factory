@@ -9,6 +9,7 @@ from acp_factory.acp.client import TurnResult
 from acp_factory.acp.events import TurnSummary
 from acp_factory.config import CheckConfig, FactoryConfig, RetryConfig
 from acp_factory.runner.checks import (
+    build_workspace_env,
     parse_review_verdict,
     run_checks_sequential,
     truncate_check_output,
@@ -150,6 +151,17 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     )
     assert "do not write this file yourself" in ro_prompt
     assert "$FACTORY_RESPONSE_FILE" in ro_prompt
+    assert "Execution Mode: Autonomous & Non-Interactive" in ro_prompt
+    assert "AGENTS.md" in ro_prompt
+    assert "strictly superseded" in ro_prompt
+
+    mutating_prompt = build_initial_prompt(
+        "Build feature",
+        [CheckConfig(name="test", cmd="pytest")],
+        read_only=False,
+    )
+    assert "Complete all necessary research, file modifications" in mutating_prompt
+    assert "Do NOT pause to ask clarifying questions" in mutating_prompt
 
     results = [
         CheckResult(
@@ -178,6 +190,7 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "Lint" in prompt
     assert "Pytest" in prompt
     assert "AssertionError: 1 != 2" in prompt
+    assert "Remember: You are executing autonomously" in prompt
 
 
 async def test_spec_validation_check_self_heals_via_factory_response_file(
@@ -367,3 +380,99 @@ def test_all_skill_validators_and_templates_exist_and_work(tmp_path: Path) -> No
         check=False,
     )
     assert res_sec.returncode == 0
+
+
+def test_build_workspace_env_strips_host_virtualenv_and_path(tmp_path: Path) -> None:
+    fake_venv = tmp_path / "host_venv"
+    fake_venv_bin = fake_venv / "bin"
+    fake_venv_bin.mkdir(parents=True)
+
+    fake_conda = tmp_path / "host_conda"
+    fake_conda_bin = fake_conda / "bin"
+    fake_conda_bin.mkdir(parents=True)
+
+    mock_env = {
+        "PATH": f"{fake_venv_bin}:/usr/local/bin:{fake_conda_bin}:/usr/bin",
+        "VIRTUAL_ENV": str(fake_venv),
+        "VIRTUAL_ENV_PROMPT": "(host_venv)",
+        "PYTHONPATH": "/opt/custom_python",
+        "PYTHONHOME": "/opt/python",
+        "CONDA_PREFIX": str(fake_conda),
+        "CONDA_DEFAULT_ENV": "base",
+        "USER": "developer",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path)
+
+    # Host venv/conda environment variables stripped
+    assert "VIRTUAL_ENV" not in env
+    assert "VIRTUAL_ENV_PROMPT" not in env
+    assert "PYTHONPATH" not in env
+    assert "PYTHONHOME" not in env
+    assert "CONDA_PREFIX" not in env
+    assert "CONDA_DEFAULT_ENV" not in env
+
+    # General environment retained
+    assert env.get("USER") == "developer"
+
+    # Virtualenv / Conda bin paths removed from PATH
+    path_entries = env["PATH"].split(":")
+    assert str(fake_venv_bin) not in path_entries
+    assert str(fake_conda_bin) not in path_entries
+    assert "/usr/local/bin" in path_entries
+    assert "/usr/bin" in path_entries
+
+
+def test_build_workspace_env_strips_node_and_npm_leak_vars(tmp_path: Path) -> None:
+    mock_env = {
+        "NODE_PATH": "/global/node_modules",
+        "NODE_OPTIONS": "--inspect",
+        "INIT_CWD": "/outer/caller/dir",
+        "npm_config_prefix": "/opt/npm",
+        "BUNDLE_GEMFILE": "/outer/Gemfile",
+        "BUNDLE_BIN_PATH": "/outer/bin/bundle",
+        "GEM_HOME": "/outer/gems",
+        "GEM_PATH": "/outer/gems",
+        "RUBYOPT": "-W3",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path)
+
+    for key in (
+        "NODE_PATH",
+        "NODE_OPTIONS",
+        "INIT_CWD",
+        "npm_config_prefix",
+        "BUNDLE_GEMFILE",
+        "BUNDLE_BIN_PATH",
+        "GEM_HOME",
+        "GEM_PATH",
+        "RUBYOPT",
+    ):
+        assert key not in env
+
+
+def test_build_workspace_env_custom_strip_and_extra_env(tmp_path: Path) -> None:
+    mock_env = {
+        "MY_SECRET_HOST_VAR": "secret",
+        "NODE_OPTIONS": "--inspect",
+        "PATH": "/usr/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(
+            tmp_path,
+            strip_env=["MY_SECRET_HOST_VAR"],
+            extra_env={
+                "TARGET_ENV": "production",
+                "NODE_OPTIONS": "--max-old-space-size=4096",  # Explicit extra_env wins
+            },
+        )
+
+    assert "MY_SECRET_HOST_VAR" not in env
+    assert env.get("TARGET_ENV") == "production"
+    # Explicit extra_env applied after default strip
+    assert env.get("NODE_OPTIONS") == "--max-old-space-size=4096"

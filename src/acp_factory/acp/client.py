@@ -168,6 +168,8 @@ class FactoryACPClient:
         verbose: bool = False,
         silent: bool = False,
         read_only: bool | None = None,
+        extra_env: dict[str, str] | None = None,
+        strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.config_dir = config_dir.resolve() if config_dir else self.workspace
@@ -179,6 +181,8 @@ class FactoryACPClient:
         self.verbose = verbose
         self.silent = silent
         self.read_only = agent_config.read_only if read_only is None else read_only
+        self.extra_env = extra_env
+        self.strip_env = strip_env
 
         self.persona_text: str | None = resolve_persona_text(
             agent_config.persona,
@@ -228,6 +232,8 @@ class FactoryACPClient:
                 self.workspace,
                 restrict_gh_writes=True,
                 resources_dir=self.resources_dir,
+                extra_env=self.extra_env,
+                strip_env=self.strip_env,
             )
             return orig_spawn(command, *args, **kwargs)
 

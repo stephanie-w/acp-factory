@@ -13,6 +13,7 @@ keep_worktree_on_failure = true
 [stages.triage]
 agent = "opencode"
 mode = "plan"
+model = "deepseek/deepseek-flash"
 read_only = true
 persona = "agents/triage.agent.md"
 skills = ["issue-triage", "html2md"]
@@ -22,6 +23,7 @@ checks = ["validate-triage"]
 [stages.spec]
 agent = "opencode"
 mode = "plan"
+model = "deepseek/deepseek-v4-pro"
 read_only = true
 persona = "agents/architect.agent.md"
 skills = ["spec-writer", "html2md"]
@@ -31,8 +33,9 @@ checks = ["validate-spec"]
 [stages.build]
 agent = "opencode"
 read_only = false
+model = "deepseek/deepseek-flash"
 pre = ["uv sync --frozen"]
-persona = "personas/implementer.md"
+persona = "agents/implementer.agent.md"
 skills = ["tdd-builder"]
 prompt = "prompts/build.md"
 checks = ["lint", "test"]
@@ -40,6 +43,7 @@ checks = ["lint", "test"]
 [stages.review]
 agent = "opencode"
 read_only = true
+model = "deepseek/deepseek-v4-pro"
 persona = "agents/reviewer.agent.md"
 skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/review.md"
@@ -48,6 +52,7 @@ checks = ["validate-review", "validate-security"]
 [stages.retro]
 agent = "opencode"
 mode = "plan"
+model = "deepseek/deepseek-flash"
 read_only = true
 persona = "agents/architect.agent.md"
 skills = ["retro"]
@@ -81,10 +86,3 @@ prompt = "prompts/review.md"
 persona = "agents/security.agent.md"
 skills = ["security-auditor"]
 prompt = "prompts/security.md"
-
-[fleet]
-max_active_branches_per_repo = 1
-
-[fleet.repositories]
-"stephanie-w/acp-factory" = "/home/stephanie/DEV/factory"
-"stephanie-w/acpterm" = "/home/stephanie/DEV/acpterm"
