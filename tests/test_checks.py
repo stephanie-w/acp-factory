@@ -510,6 +510,72 @@ def test_all_skill_validators_and_templates_exist_and_work(tmp_path: Path) -> No
     )
     assert res_sec.returncode == 0
 
+    # 4. Security validator accepts STATUS: NEEDS_HUMAN
+    sec_human_file = tmp_path / "security_needs_human.md"
+    sec_human_file.write_text(
+        "### Security Audit Summary\n"
+        "- **Untrusted Inputs Traced**: `None`\n"
+        "- **Findings Count**: `0 blocking, 0 major, 0 minor`\n\n"
+        "### Security Findings\n"
+        "- None.\n\n"
+        "STATUS: NEEDS_HUMAN\n",
+        encoding="utf-8",
+    )
+    res_sec_human = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "security-auditor" / "scripts" / "validate_security.py"),
+            str(sec_human_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_sec_human.returncode == 0
+
+    # 5. Combined review & security report validates cleanly against both validators
+    combined_file = tmp_path / "combined_review.md"
+    combined_file.write_text(
+        "### Risk Classification: MEDIUM\n"
+        "- **Reason**: Chained validators update.\n\n"
+        "### Acceptance Criteria Verification\n"
+        "| ID | Status | Evidence |\n"
+        "| :--- | :--- | :--- |\n"
+        "| AC-1 | PASS | `tests/test_checks.py:450` |\n\n"
+        "### Findings\n"
+        "- None.\n\n"
+        "### Security Audit Summary\n"
+        "- **Untrusted Inputs Traced**: `None`\n"
+        "- **Findings Count**: `0 blocking, 0 major, 0 minor`\n\n"
+        "### Security Findings\n"
+        "- None.\n\n"
+        "STATUS: ACCEPTED\n",
+        encoding="utf-8",
+    )
+    res_comb_review = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "code-reviewer" / "scripts" / "validate_review.py"),
+            str(combined_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_comb_review.returncode == 0
+
+    res_comb_sec = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "security-auditor" / "scripts" / "validate_security.py"),
+            str(combined_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_comb_sec.returncode == 0
+
 
 def test_build_workspace_env_strips_host_virtualenv_and_path(tmp_path: Path) -> None:
     fake_venv = tmp_path / "host_venv"
