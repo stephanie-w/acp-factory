@@ -47,7 +47,7 @@ read_only = true
 persona = "agents/reviewer.agent.md"
 skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/review.md"
-checks = ["validate-review"]
+checks = ["validate-review", "validate-security"]
 
 [stages.retro]
 agent = "opencode"
