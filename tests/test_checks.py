@@ -140,6 +140,70 @@ async def test_feedback_loop_recovers_on_second_attempt(tmp_path: Path) -> None:
     assert "Expected 42, got 1" in prompts_received[1]
 
 
+EMPTY_OUTPUT_REASON = "Agent produced no output (session aborted or failed)"
+
+
+def _no_check_config() -> FactoryConfig:
+    return FactoryConfig(task="Write specification", active_stage="spec")
+
+
+def _fake_client_returning(response_text: str) -> type:
+    class FakeNoCheckACPClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.tracker = AsyncMock()
+            self.tracker.history = []
+
+        async def __aenter__(self) -> FakeNoCheckACPClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def send_prompt(self, prompt: str, **kwargs: object) -> TurnResult:
+            return TurnResult(
+                stop_reason="end_turn",
+                summary=TurnSummary(
+                    prompt=prompt,
+                    response_text=response_text,
+                    thought_text="",
+                    stop_reason="end_turn",
+                    duration_seconds=0.01,
+                    tool_call_count=0,
+                ),
+            )
+
+    return FakeNoCheckACPClient
+
+
+async def test_run_factory_empty_response_fails_fast(tmp_path: Path) -> None:
+    for response_text in ("", "   \n\t "):
+        with (
+            patch(
+                "acp_factory.runner.loop.FactoryACPClient",
+                _fake_client_returning(response_text),
+            ),
+            patch("acp_factory.runner.loop.logger") as mock_logger,
+        ):
+            outcome = await run_factory(_no_check_config(), tmp_path)
+
+        assert outcome.succeeded is False
+        assert outcome.exit_code == 1
+        assert outcome.failure_reason == EMPTY_OUTPUT_REASON
+        mock_logger.error.assert_called_once_with(EMPTY_OUTPUT_REASON)
+
+
+async def test_run_factory_no_checks_success(tmp_path: Path) -> None:
+    with patch(
+        "acp_factory.runner.loop.FactoryACPClient",
+        _fake_client_returning("Specification complete.\nSTATUS: SPEC_READY"),
+    ):
+        outcome = await run_factory(_no_check_config(), tmp_path)
+
+    assert outcome.succeeded is True
+    assert outcome.exit_code == 0
+    assert outcome.failure_reason is None
+
+
 def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     from acp_factory.runner.checks import CheckResult
     from acp_factory.runner.loop import build_initial_prompt

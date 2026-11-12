@@ -69,6 +69,8 @@ stateDiagram-v2
     Done --> [*] : Cleans up local `.worktrees/issue-<id>` & sets `factory:completed`
 ```
 
+> **Fail-fast guard:** If a stage run's agent produces no output (the session aborts or fails before emitting any messages), the run fails immediately and the Issue transitions to `factory:needs-human` instead of advancing.
+
 ### Stage Reference
 
 1. **`triage` (`factory:triage`)**:

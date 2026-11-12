@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import re
 import tempfile
 import time
@@ -58,6 +59,10 @@ from .worktree import (
     is_worktree_clean,
     resolve_fleet_repo_path,
 )
+
+logger = logging.getLogger(__name__)
+
+EMPTY_OUTPUT_FAILURE_REASON = "Agent produced no output (session aborted or failed)"
 
 
 @dataclass
@@ -527,6 +532,10 @@ async def run_factory(
                     break
 
                 if not config.checks:
+                    if not last_response_text.strip():
+                        failure_reason = EMPTY_OUTPUT_FAILURE_REASON
+                        logger.error(failure_reason)
+                        break
                     succeeded = True
                     break
 
