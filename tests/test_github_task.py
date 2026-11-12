@@ -301,6 +301,39 @@ async def test_run_issue_stage_spec_and_done(tmp_path: Path) -> None:
         )
 
 
+async def test_run_issue_stage_empty_response_needs_human(tmp_path: Path) -> None:
+    task = TaskContext(
+        issue_number=13,
+        title="Write specification",
+        original_body="orig",
+        labels=[LABEL_SPEC],
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=False,
+        exit_code=1,
+        attempts_used=1,
+        total_duration_seconds=0.05,
+        failure_reason="Agent produced no output (session aborted or failed)",
+    )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.run_factory", new=AsyncMock(return_value=outcome)
+        ),
+        patch(
+            "acp_factory.runner.loop.transition_issue_label", new=AsyncMock()
+        ) as mock_transition,
+    ):
+        res = await run_issue_stage(tmp_path, 13)
+
+    assert res.succeeded is False
+    assert res.failure_reason == "Agent produced no output (session aborted or failed)"
+    mock_transition.assert_awaited_once_with(
+        task, LABEL_NEEDS_HUMAN, cwd=tmp_path.resolve(), repo_slug=None
+    )
+
+
 async def test_run_issue_stage_dry_run_never_mutates_github(tmp_path: Path) -> None:
     fake_task = TaskContext(
         issue_number=12,
