@@ -79,6 +79,30 @@ if not real_gh:
 os.execvpe(real_gh, [real_gh, *sys.argv[1:]], clean_env)
 """
 
+# Environment variables from host orchestrator sessions that leak into
+# and pollute child workspace subprocesses (checks, setup, ACP agent).
+DEFAULT_HOST_ENV_STRIP: tuple[str, ...] = (
+    # Python / Virtualenv / Conda
+    "VIRTUAL_ENV",
+    "VIRTUAL_ENV_PROMPT",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "CONDA_PROMPT_MODIFIER",
+    # Node / npm / pnpm / yarn
+    "NODE_PATH",
+    "NODE_OPTIONS",
+    "INIT_CWD",
+    "npm_config_prefix",
+    # Ruby / Bundler
+    "BUNDLE_GEMFILE",
+    "BUNDLE_BIN_PATH",
+    "GEM_HOME",
+    "GEM_PATH",
+    "RUBYOPT",
+)
+
 
 def _ensure_readonly_gh_shim_dir() -> Path:
     """Create and return the directory containing the read-only `gh` shim for agents."""
@@ -102,16 +126,48 @@ def build_workspace_env(
     restrict_gh_writes: bool = False,
     extra_env: dict[str, str] | None = None,
     resources_dir: Path | None = None,
+    strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> dict[str, str]:
     """Prepare the environment for subprocesses executing in the target workspace/worktree.
 
-    Language-agnostic: optionally prepends a read-only `gh` shim so agents cannot
-    directly mutate GitHub issues, PRs, or labels.
+    Language-agnostic: strips host runner environment leaks, optionally prepends a
+    read-only `gh` shim so agents cannot directly mutate GitHub issues, PRs, or labels,
+    and applies any caller-provided overrides.
     """
     from ..config import resolve_resources_dir
 
     _ = cwd
     env = dict(os.environ)
+
+    # 1. Purge host virtual environment bin paths from PATH before stripping keys
+    host_venv = env.get("VIRTUAL_ENV")
+    host_conda = env.get("CONDA_PREFIX")
+    paths_to_clean: set[str] = set()
+    if host_venv:
+        paths_to_clean.add(
+            os.path.abspath(Path(host_venv) / ("Scripts" if os.name == "nt" else "bin"))
+        )
+    if host_conda:
+        paths_to_clean.add(
+            os.path.abspath(
+                Path(host_conda) / ("Scripts" if os.name == "nt" else "bin")
+            )
+        )
+
+    if paths_to_clean and "PATH" in env:
+        current_paths = env["PATH"].split(os.pathsep)
+        env["PATH"] = os.pathsep.join(
+            p for p in current_paths if os.path.abspath(p) not in paths_to_clean
+        )
+
+    # 2. Strip declarative default host variables and any custom strip_env keys
+    keys_to_strip = set(DEFAULT_HOST_ENV_STRIP)
+    if strip_env:
+        keys_to_strip.update(strip_env)
+
+    for k in keys_to_strip:
+        env.pop(k, None)
+
     bundled_repo_root = Path(__file__).resolve().parents[3]
     resolved_res = resources_dir or resolve_resources_dir()
     if resolved_res is not None and (resolved_res / "skills").is_dir():
@@ -165,10 +221,11 @@ async def run_shell_command(
     *,
     timeout: int = 300,
     extra_env: dict[str, str] | None = None,
+    strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> tuple[int, str, float]:
     """Execute a shell command in its own process group with clean termination on timeout/cancel."""
     start = time.monotonic()
-    env = build_workspace_env(cwd, extra_env=extra_env)
+    env = build_workspace_env(cwd, extra_env=extra_env, strip_env=strip_env)
 
     proc = await asyncio.create_subprocess_shell(
         cmd,
@@ -259,11 +316,16 @@ async def run_single_check(
     resources_dir: Path | None = None,
     max_output_lines: int = 150,
     extra_env: dict[str, str] | None = None,
+    strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> CheckResult:
     """Execute a single check (either deterministic shell command or agent review prompt)."""
     if check.cmd is not None:
         rc, output, duration = await run_shell_command(
-            check.cmd, cwd, timeout=check.timeout, extra_env=extra_env
+            check.cmd,
+            cwd,
+            timeout=check.timeout,
+            extra_env=extra_env,
+            strip_env=strip_env,
         )
         passed = rc == 0
         chk_status: Literal["pass", "retry", "stop"] = "pass" if rc == 0 else "retry"
@@ -343,6 +405,8 @@ async def run_single_check(
                 config_dir=config_dir,
                 resources_dir=resources_dir,
                 read_only=True,
+                extra_env=extra_env,
+                strip_env=strip_env,
             ) as reviewer_client:
                 turn_res = await reviewer_client.send_prompt(
                     review_instruction,
@@ -369,7 +433,6 @@ async def run_single_check(
             name=check.name,
             check_type="prompt",
             command_or_prompt=check.prompt,
-            passed=passed,
             exit_code=0 if passed else (1 if rev_status == "retry" else 2),
             raw_output=response_text,
             truncated_output=truncate_check_output(
@@ -377,6 +440,7 @@ async def run_single_check(
             ),
             duration_seconds=duration,
             status=rev_status,
+            passed=passed,
         )
 
     raise ValueError(f"Invalid check configuration for '{check.name}'")
@@ -392,6 +456,7 @@ async def run_checks_sequential(
     max_output_lines: int = 150,
     on_check_complete: Callable[[CheckResult], None] | None = None,
     extra_env: dict[str, str] | None = None,
+    strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> tuple[bool, list[CheckResult]]:
     """Run all configured checks in sequence, stopping immediately at the first failure (fail-fast)."""
     results: list[CheckResult] = []
@@ -404,6 +469,7 @@ async def run_checks_sequential(
             resources_dir=resources_dir,
             max_output_lines=max_output_lines,
             extra_env=extra_env,
+            strip_env=strip_env,
         )
         results.append(result)
         if on_check_complete is not None:

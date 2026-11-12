@@ -491,3 +491,37 @@ prompt = "prompts/triage.md"
     )
     assert client.persona_text == "External triage agent persona."
     assert client.skill_paths == [html2md_skill.resolve()]
+
+
+def test_config_env_and_strip_env_parsing_and_stage_resolution(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "factory.toml"
+    cfg_file.write_text(
+        """\
+version = "1"
+strip_env = ["GLOBAL_LEAK_VAR"]
+
+[env]
+GLOBAL_FLAG = "1"
+COMMON_KEY = "global_val"
+
+[stages.build]
+strip_env = ["STAGE_LEAK_VAR"]
+
+[stages.build.env]
+STAGE_FLAG = "true"
+COMMON_KEY = "stage_override"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = FactoryConfig.from_file(cfg_file)
+    assert cfg.strip_env == ["GLOBAL_LEAK_VAR"]
+    assert cfg.env == {"GLOBAL_FLAG": "1", "COMMON_KEY": "global_val"}
+
+    resolved_build = cfg.resolve_stage("build", workspace=tmp_path)
+    assert resolved_build.strip_env == ["GLOBAL_LEAK_VAR", "STAGE_LEAK_VAR"]
+    assert resolved_build.env == {
+        "GLOBAL_FLAG": "1",
+        "STAGE_FLAG": "true",
+        "COMMON_KEY": "stage_override",
+    }

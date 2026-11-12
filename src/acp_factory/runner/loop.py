@@ -330,7 +330,11 @@ async def run_factory(
             ui.show_phase_banner("Setup Phase", style="blue")
             for setup_cmd in config.setup:
                 rc, output, duration = await run_shell_command(
-                    setup_cmd, active_cwd, timeout=config.agent.timeout
+                    setup_cmd,
+                    active_cwd,
+                    timeout=config.agent.timeout,
+                    extra_env=config.env or None,
+                    strip_env=config.strip_env or None,
                 )
                 setup_logs.append(f"$ {setup_cmd} (exit {rc})\n{output}")
                 passed = rc == 0
@@ -379,6 +383,8 @@ async def run_factory(
             config_dir=config.config_dir,
             resources_dir=resolved_res_dir,
             verbose=verbose,
+            extra_env=config.env or None,
+            strip_env=config.strip_env or None,
         ) as acp_client:
             prompt = build_initial_prompt(
                 config.task, config.checks, read_only=config.agent.read_only
@@ -416,9 +422,13 @@ async def run_factory(
                 ) as resp_tmp_dir:
                     resp_file = Path(resp_tmp_dir) / "response.md"
                     resp_file.write_text(last_response_text, encoding="utf-8")
-                    check_env: dict[str, str] = {
-                        "FACTORY_RESPONSE_FILE": str(resp_file),
-                    }
+                    check_env = dict(config.env)
+                    check_env.update(
+                        {
+                            "FACTORY_RUN_ID": run_id,
+                            "FACTORY_RESPONSE_FILE": str(resp_file),
+                        }
+                    )
                     if config.active_stage:
                         check_env["FACTORY_STAGE"] = config.active_stage
                     if resolved_res_dir is not None:
@@ -441,6 +451,7 @@ async def run_factory(
                         max_output_lines=config.retry.max_output_lines,
                         on_check_complete=ui.show_check_result,
                         extra_env=check_env,
+                        strip_env=config.strip_env or None,
                     )
                     if all_passed and resp_file.is_file():
                         with contextlib.suppress(Exception):
