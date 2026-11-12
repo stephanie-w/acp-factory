@@ -304,7 +304,7 @@ DEFAULT_STAGE_PROMPTS: dict[str, str] = {
     ),
     "RETRO.md": (
         "Execute the `retro` skill against this repository's recent `.factory/runs/` artifacts (`run.json`, "
-        "`attempt-*-checks.json`, `attempt-*-transcript.summary.json` / `transcript.json`), `AGENTS.md`, and `.factory/config.toml`. Do not modify any files:\n"
+        "`attempt-*/check-*.log`, `attempt-*/transcript.summary.json` / `transcript.json`), `AGENTS.md`, and `.factory/config.toml`. Do not modify any files:\n"
         "1. Evaluate across the 7 retrospective categories (Navigation, Automated Checks, Coding Standards & Reviewer Rubric, "
         "`AGENTS.md` Diet, Tool Economy, No-ops, and Information Access).\n"
         "2. Output a ranked Markdown retrospective report (`HIGH`, `MEDIUM`, `LOW`) with concrete evidence citations and unified `diff` proposals."

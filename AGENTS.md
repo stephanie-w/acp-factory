@@ -43,6 +43,8 @@ This document defines the **mandatory operational behaviors and protocols** for 
 
 ### Conversational Coding Workflow
 
+> **Interactive coding sessions only**: Autonomous factory stage runs (`triage`, `spec`, `build`, `review`, `retro`) execute without confirmation per the injected runner prompt — do not block waiting for user approval.
+
 To ensure a safe and collaborative development experience, follow this interactive workflow for all code modifications:
 
 1.  **Research & Analysis**: Thoroughly investigate the codebase to understand the current implementation and dependencies.
@@ -125,7 +127,12 @@ Before signaling completion, verify:
 
 ### Runtime & Artifact Directories
 - `.factory/config.toml`: Central multi-stage (`triage`, `spec`, `build`, `review`, `retro`) and `[fleet]` configuration.
-- `.factory/runs/<run-id>/`: Structured per-run artifacts (`summary.json`, `attempt-N-transcript.md`, `attempt-N-checks.json`, and `--dry-run` proposed Issue/PR bodies).
+- `.factory/runs/<run-id>/`: Structured per-run artifacts: `run.json` (stage, `succeeded`, `attempts_used`, `usage`), `attempt-N/transcript.summary.json` (condensed `tool_calls[]` for retro/jq), `attempt-N/transcript.json`, `attempt-N/transcript.md` (raw), `attempt-N/check-<n>-<slug>.log`, and `--dry-run` proposed Issue/PR bodies.
 - `.worktrees/issue-<id>/`: Persistent git worktrees created on branch `factory/issue-<id>` during `build` and `review`, cleaned up on `done`.
 - `docs/workflow.md` & `docs/fleet-orchestration.md`: Full stage state machine and stateless fleet design specs.
+
+### Check & Validator Wiring
+- Stage check commands: `.factory/config.toml` `[checks.<name>]` vs bundled defaults in `src/acp_factory/cli.py`.
+- Validator scripts live externally in `$FACTORY_SKILLS_DIR/<skill>/scripts/validate_*.py` (e.g. `issue-triage/scripts/validate_triage.py`).
+- `justfile` recipes (`just test`, `just test-fast`, `just fix`, `just typecheck`) vs `[checks.*]` — note `[checks.test]` runs `pytest -m 'not slow'`.
 
