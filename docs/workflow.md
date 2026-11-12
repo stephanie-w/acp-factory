@@ -157,3 +157,67 @@ While tuning personas, stage prompts, and `apm` skills, you can run in **Dry-Run
 2. **Human-Only GitHub Writes (`--dry-run`)**:
    - `acp-factory issue 42 --dry-run` fetches Issue `#42` and runs the full ACP stage live in your terminal.
    - Instead of mutating GitHub, it saves the proposed Issue Body to `.factory/runs/<run-id>/issue-42-body.md` (and PR body if applicable) and prints a **Manual GitHub Commands** panel with the exact `gh issue edit` / `gh pr create` commands for you to execute manually.
+
+---
+
+## 6. Engineering Retrospectives (`retro`)
+
+Retrospectives close the continuous improvement loop by having an architect agent analyze completed runs, multi-attempt failures, and check logs to propose concrete improvements to the agent environment (`AGENTS.md`, `.factory/config.toml`, automated checks, and prompts).
+
+### A. How to Run a Retrospective
+
+You can trigger a retrospective directly via the CLI:
+
+```bash
+# Run retro against recent .factory/runs/ in the current workspace:
+acp-factory run --stage retro
+
+# Target a specific workspace:
+acp-factory run --stage retro --workspace /path/to/repo
+
+# Run an ad-hoc retrospective focusing on a specific run ID:
+acp-factory run \
+  "Execute retro against run .factory/runs/20261112-120000-abc123 and AGENTS.md" \
+  --stage retro
+```
+
+### B. Structured Run Artifacts & Fast Querying with `jq`
+
+Each execution stores structured artifacts under `.factory/runs/<run-id>/`:
+- **`run.json`**: Top-level run metadata (attempts used, total duration, budget token/cost consumption, stage outcome, and failure reason).
+- **`attempt-<N>/transcript.summary.json`**: Condensed event snapshot with truncated tool output previews and omitted raw scratchpads. Tailored for token efficiency during `retro`.
+- **`attempt-<N>/transcript.json`**: Complete structured JSON event tree containing all tool invocations, inputs, file operations, permissions, and duration.
+- **`attempt-<N>/transcript.md`**: Full raw Markdown transcript for human deep dives.
+- **`attempt-<N>/check-<N>-<slug>.log`**: Raw stdout/stderr execution output from verification checks.
+
+You can easily query and analyze transcripts using `jq`:
+
+```bash
+# Quick attempt summary (duration, stop reason, tool count, tokens):
+jq '.summary' .factory/runs/<run-id>/attempt-1/transcript.summary.json
+
+# List all tool calls with status and title:
+jq '.tool_calls[] | {title: .title, status: .status}' .factory/runs/<run-id>/attempt-1/transcript.json
+
+# Find failed tool calls:
+jq '.tool_calls[] | select(.status != "completed")' .factory/runs/<run-id>/attempt-1/transcript.json
+
+# Calculate tool frequencies (tool economy):
+jq '.tool_calls | group_by(.title) | map({tool: .[0].title, count: length})' .factory/runs/<run-id>/attempt-1/transcript.json
+
+# List unique files touched during the turn:
+jq '.file_operations | map(.path) | unique' .factory/runs/<run-id>/attempt-1/transcript.summary.json
+```
+
+### C. The 7 Retrospective Categories
+
+The `retro` agent evaluates session evidence across 7 specific areas:
+1. **Navigation**: Did the agent waste turns hunting for files or entrypoints? (*Fix*: Add a 1–2 line pointer in `AGENTS.md`).
+2. **Automated Checks (Highest Leverage)**: Can a recurring error be caught by a deterministic check (`just`, linter rule, or validator) rather than a prose rule?
+3. **Coding Standards & Reviewer Rubric**: Did the reviewer catch genuine bugs, or did it flag noisy subjective patterns?
+4. **`AGENTS.md` Diet**: Are there bloated task-specific instructions in steering files that should be trimmed or moved to checks?
+5. **Tool Economy**: Were expensive tools or un-truncated commands run repeatedly?
+6. **No-ops**: Are there instructions that agents consistently ignore?
+7. **Information Access**: Was the agent blocked by missing local environment context or documentation?
+
+Output is formatted as a ranked Markdown report (`HIGH`, `MEDIUM`, `LOW`) with concrete unified diff proposals for human review.
