@@ -46,7 +46,7 @@ def _non_negative_float(value: Any) -> float:
 
 
 def extract_usage_metrics(usage: dict[str, Any] | None) -> tuple[int, float]:
-    """Extract `(tokens_used, cost_usd)` from an ACP `usage_update` payload.
+    """Extract `(tokens_used, cost_usd)` from an ACP `usage_update` or usage payload.
 
     Missing, malformed, or non-finite values are treated as zero so telemetry never
     crashes budget enforcement or falsely trips a cap.
@@ -54,7 +54,18 @@ def extract_usage_metrics(usage: dict[str, Any] | None) -> tuple[int, float]:
     if not usage:
         return 0, 0.0
 
-    tokens = _non_negative_int(usage.get("used"))
+    raw_tokens = (
+        usage.get("used")
+        or usage.get("total_tokens")
+        or usage.get("totalTokens")
+        or usage.get("tokens")
+    )
+    if raw_tokens is None and ("input_tokens" in usage or "output_tokens" in usage):
+        raw_tokens = _non_negative_int(usage.get("input_tokens")) + _non_negative_int(
+            usage.get("output_tokens")
+        )
+
+    tokens = _non_negative_int(raw_tokens)
     cost = usage.get("cost")
     if isinstance(cost, dict):
         amount: Any = cost.get("amount")

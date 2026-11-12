@@ -99,6 +99,18 @@ def test_extract_usage_metrics_bad_inputs() -> None:
 
     assert extract_usage_metrics({"used": 10, "cost": Cost()}) == (10, 0.05)
 
+    # Standard ACP Usage fields (total_tokens, totalTokens, input/output tokens)
+    assert extract_usage_metrics({"total_tokens": 500, "cost": {"amount": 0.01}}) == (
+        500,
+        0.01,
+    )
+    assert extract_usage_metrics({"totalTokens": 250}) == (250, 0.0)
+    assert extract_usage_metrics({"input_tokens": 100, "output_tokens": 50}) == (
+        150,
+        0.0,
+    )
+    assert extract_usage_metrics({"tokens": 80}) == (80, 0.0)
+
 
 def test_budget_breach_message_helpers() -> None:
     """Breach messages are deterministic and only fire for the configured caps."""
@@ -299,6 +311,7 @@ async def test_run_json_records_usage(tmp_path: Path) -> None:
     assert data["usage"]["total_tokens"] == 1250
     assert data["usage"]["total_cost_usd"] == 0.012
     assert data["usage"]["total_turns"] == 1
+    assert data["usage"]["telemetry_available"] is True
     assert data["budget"]["max_tokens_per_run"] == 100_000
     assert data["budget"]["max_cost_usd"] == 1.0
     assert data["budget"]["max_turns"] == 5

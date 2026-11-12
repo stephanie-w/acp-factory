@@ -355,6 +355,7 @@ def _persist_run_artifacts(
             "total_tokens": usage.tokens,
             "total_cost_usd": round(usage.cost_usd, 6),
             "total_turns": usage.turns,
+            "telemetry_available": bool(usage.tokens > 0 or usage.cost_usd > 0),
         },
     }
     (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
