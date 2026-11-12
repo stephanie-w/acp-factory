@@ -80,7 +80,21 @@ def build_initial_prompt(
         "# Coding Task",
         task.strip(),
         "",
+        "## Execution Mode: Autonomous & Non-Interactive",
+        "- You are executing autonomously in an automated orchestrator with NO human in the loop to answer questions, approve plans, or confirm decisions.",
+        "- Do NOT pause to ask clarifying questions, request approval, or propose a strategy and wait for confirmation.",
+        "- If repository instructions (such as `AGENTS.md` or `CLAUDE.md`) specify an interactive confirmation workflow (e.g. 'wait for user approval before proceeding'), that waiting requirement is strictly superseded: proceed directly to execute and verify the task to completion.",
     ]
+    if read_only:
+        lines.append(
+            "- Complete your analysis and output your full structured report directly. If any ambiguity requires human decisions, document it within your report (e.g. under `## Open Questions` with `STATUS: NEEDS_HUMAN`), but never end your turn waiting for interactive chat confirmation."
+        )
+    else:
+        lines.append(
+            "- Complete all necessary research, file modifications, and verification autonomously within your turn."
+        )
+    lines.append("")
+
     if checks:
         lines.append("## Verification Checks")
         if read_only:
@@ -148,6 +162,11 @@ def build_retry_prompt(
     lines.append(
         "Analyze the failure output above, fix the root cause in the workspace without "
         "breaking prior work or previously passing checks, and verify your changes."
+    )
+    lines.append(
+        "Remember: You are executing autonomously with no human operator in the loop. "
+        "Do NOT end your turn asking questions or proposing a strategy for approval; "
+        "apply all changes directly to the workspace."
     )
     return "\n".join(lines)
 

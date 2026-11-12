@@ -151,6 +151,17 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     )
     assert "do not write this file yourself" in ro_prompt
     assert "$FACTORY_RESPONSE_FILE" in ro_prompt
+    assert "Execution Mode: Autonomous & Non-Interactive" in ro_prompt
+    assert "AGENTS.md" in ro_prompt
+    assert "strictly superseded" in ro_prompt
+
+    mutating_prompt = build_initial_prompt(
+        "Build feature",
+        [CheckConfig(name="test", cmd="pytest")],
+        read_only=False,
+    )
+    assert "Complete all necessary research, file modifications" in mutating_prompt
+    assert "Do NOT pause to ask clarifying questions" in mutating_prompt
 
     results = [
         CheckResult(
@@ -179,6 +190,7 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "Lint" in prompt
     assert "Pytest" in prompt
     assert "AssertionError: 1 != 2" in prompt
+    assert "Remember: You are executing autonomously" in prompt
 
 
 async def test_spec_validation_check_self_heals_via_factory_response_file(
