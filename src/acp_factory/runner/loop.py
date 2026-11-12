@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ..acp.client import FactoryACPClient
 from ..acp.events import UsageTotals
@@ -286,6 +287,8 @@ def _persist_run_artifacts(
     check_history: list[list[CheckResult]],
     failure_reason: str | None,
     usage: UsageTotals | None = None,
+    turn_summaries: list[dict[str, Any]] | None = None,
+    turn_condensed: list[dict[str, Any]] | None = None,
 ) -> Path | None:
     """Write structured run logs into `.factory/runs/<run-id>/` if `.factory/` is present."""
     factory_dir = workspace / ".factory"
@@ -299,10 +302,26 @@ def _persist_run_artifacts(
     if setup_logs:
         (run_dir / "setup.log").write_text("\n\n".join(setup_logs), encoding="utf-8")
 
-    for idx, transcript_md in enumerate(turn_transcripts, start=1):
+    max_turns = max(
+        len(turn_transcripts),
+        len(turn_summaries or []),
+        len(turn_condensed or []),
+    )
+    for idx in range(1, max_turns + 1):
         attempt_dir = run_dir / f"attempt-{idx}"
         attempt_dir.mkdir(parents=True, exist_ok=True)
-        (attempt_dir / "transcript.md").write_text(transcript_md, encoding="utf-8")
+        if idx - 1 < len(turn_transcripts):
+            (attempt_dir / "transcript.md").write_text(
+                turn_transcripts[idx - 1], encoding="utf-8"
+            )
+        if turn_summaries and idx - 1 < len(turn_summaries):
+            (attempt_dir / "transcript.json").write_text(
+                json.dumps(turn_summaries[idx - 1], indent=2), encoding="utf-8"
+            )
+        if turn_condensed and idx - 1 < len(turn_condensed):
+            (attempt_dir / "transcript.summary.json").write_text(
+                json.dumps(turn_condensed[idx - 1], indent=2), encoding="utf-8"
+            )
 
     for idx, attempt_checks in enumerate(check_history, start=1):
         attempt_dir = run_dir / f"attempt-{idx}"
@@ -383,6 +402,8 @@ async def run_factory(
     check_history: list[list[CheckResult]] = []
     setup_logs: list[str] = []
     turn_transcripts: list[str] = []
+    turn_summaries: list[dict[str, Any]] = []
+    turn_condensed: list[dict[str, Any]] = []
     preserved_wt: Path | None = None
 
     active_cwd = await wt_manager.create(base_ref=base_ref)
@@ -580,6 +601,10 @@ async def run_factory(
             turn_transcripts = [
                 turn.transcript_markdown for turn in acp_client.tracker.history
             ]
+            turn_summaries = [turn.to_dict() for turn in acp_client.tracker.history]
+            turn_condensed = [
+                turn.to_condensed_dict() for turn in acp_client.tracker.history
+            ]
             if export_transcript and turn_transcripts:
                 export_path = export_transcript.resolve()
                 export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -611,6 +636,8 @@ async def run_factory(
         check_history=check_history,
         failure_reason=None if succeeded else failure_reason,
         usage=usage,
+        turn_summaries=turn_summaries,
+        turn_condensed=turn_condensed,
     )
     ui.show_final_summary(
         succeeded=succeeded,
