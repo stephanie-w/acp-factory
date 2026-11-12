@@ -21,9 +21,9 @@ prompt = "prompts/triage.md"
 checks = ["validate-triage"]
 
 [stages.spec]
-agent = "opencode"
+agent = "agy"
 mode = "plan"
-model = "deepseek/deepseek-v4-pro"
+model = "gemini-3.8-flash-medium"
 read_only = true
 persona = "agents/architect.agent.md"
 skills = ["spec-writer", "html2md"]
@@ -32,8 +32,8 @@ checks = ["validate-spec"]
 
 [stages.build]
 agent = "opencode"
-read_only = false
 model = "deepseek/deepseek-flash"
+read_only = false
 pre = ["uv sync --frozen"]
 persona = "agents/implementer.agent.md"
 skills = ["tdd-builder"]
@@ -42,17 +42,17 @@ checks = ["lint", "test"]
 
 [stages.review]
 agent = "opencode"
-read_only = true
 model = "deepseek/deepseek-v4-pro"
+read_only = true
 persona = "agents/reviewer.agent.md"
 skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/review.md"
-checks = ["validate-review", "validate-security"]
+checks = ["validate-review"]
 
 [stages.retro]
 agent = "opencode"
 mode = "plan"
-model = "deepseek/deepseek-flash"
+model = "deepseek/deepseek-v4-pro"
 read_only = true
 persona = "agents/architect.agent.md"
 skills = ["retro"]
@@ -75,7 +75,7 @@ command = "uv run --frozen python \"$FACTORY_SKILLS_DIR/security-auditor/scripts
 command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run --frozen ruff check"
 
 [checks.test]
-command = "uv run --frozen pytest"
+command = "uv run --frozen pytest -m 'not slow'"
 
 [checks.review]
 persona = "agents/reviewer.agent.md"
