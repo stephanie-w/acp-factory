@@ -208,17 +208,18 @@ acp-factory run "Fix edge case in parser" --stage build --export transcript.md
 
 ```toml
 [budget]
-max_tokens_per_run = 100000   # cumulative token cap across all turns (optional)
-max_cost_usd = 2.00           # cumulative cost cap in USD (optional, 0.0 disables)
-max_turns = 3                 # maximum agent turns per run (optional)
+max_tokens_per_run = 100000   # cumulative token cap across all turns (optional, disabled when omitted)
+max_cost_usd = 2.00           # cumulative cost cap in USD (optional, disabled when omitted; 0.0 allows zero spend)
+max_turns = 10                # maximum agent turns per run (optional, disabled when omitted)
 ```
 
-Each cap is optional and disabled when omitted. When a cap is breached mid-run, execution halts deterministically, the run is marked failed, and (in issue workflow mode) the issue is escalated to `factory:needs-human` with a `## Budget Escalation` banner. Cumulative tokens, cost, and turns are recorded in `.factory/runs/<run-id>/run.json` under `"usage"` and `"budget"`.
+Each cap is optional and disabled when omitted. Note that in GitHub issue lifecycle mode (`issue` / `next`), `tokens`, `cost`, and `turns` counters accumulate across stages in the issue factory meta comment for telemetry and auditing, while `max_turns` is evaluated as a per-run execution budget cap. When a cap is breached mid-run, execution halts deterministically, the run is marked failed, and (in issue workflow mode) the issue is escalated to `factory:needs-human` with a `## Budget Escalation` banner. Cumulative tokens, cost, and turns are recorded in `.factory/runs/<run-id>/run.json` under `"usage"` and `"budget"`.
 
-The same limits can be overridden per invocation with global CLI flags:
+The same limits can be overridden per invocation with CLI flags on `acp-factory` (global) or on subcommands (`run`, `issue`, `next`):
 
 ```bash
 acp-factory run --task "Run test task" --max-tokens 50000 --max-cost 1.50 --max-turns 2
+acp-factory issue 42 --max-turns 5
 ```
 
 ---

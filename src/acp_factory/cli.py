@@ -31,7 +31,7 @@ def _budget_callback(
         typer.Option(
             "--max-tokens",
             min=1,
-            help="Cumulative token cap across all turns in a run (overrides [budget]).",
+            help="Cumulative token cap across all turns in a run (overrides the budget configuration section).",
         ),
     ] = None,
     max_cost: Annotated[
@@ -39,7 +39,7 @@ def _budget_callback(
         typer.Option(
             "--max-cost",
             min=0.0,
-            help="Cumulative cost cap in USD across all turns in a run (overrides [budget]).",
+            help="Cumulative cost cap in USD across all turns in a run (overrides the budget configuration section).",
         ),
     ] = None,
     max_turns: Annotated[
@@ -47,7 +47,7 @@ def _budget_callback(
         typer.Option(
             "--max-turns",
             min=1,
-            help="Maximum number of agent turns allowed in a run (overrides [budget]).",
+            help="Maximum number of agent turns allowed in a run (overrides the budget configuration section).",
         ),
     ] = None,
 ) -> None:
@@ -83,7 +83,7 @@ retry:
 budget:
   max_tokens_per_run: 100000
   max_cost_usd: 2.00
-  max_turns: 3
+  # max_turns: 10  # Optional per-run turn limit (omitted by default)
 """
 
 
@@ -102,7 +102,7 @@ keep_worktree_on_failure = true
 [budget]
 max_tokens_per_run = 100000
 max_cost_usd = 2.00
-max_turns = 3
+# max_turns = 10  # Optional per-run turn limit (omitted by default)
 
 [stages.triage]
 agent = "opencode"
@@ -483,7 +483,7 @@ def run_cmd(
         typer.Option(
             "--max-tokens",
             min=1,
-            help="Cumulative token cap across all turns in a run (overrides [budget]).",
+            help="Cumulative token cap across all turns in a run (overrides the budget configuration section).",
         ),
     ] = None,
     max_cost: Annotated[
@@ -491,7 +491,7 @@ def run_cmd(
         typer.Option(
             "--max-cost",
             min=0.0,
-            help="Cumulative cost cap in USD across all turns in a run (overrides [budget]).",
+            help="Cumulative cost cap in USD across all turns in a run (overrides the budget configuration section).",
         ),
     ] = None,
     max_turns: Annotated[
@@ -499,7 +499,7 @@ def run_cmd(
         typer.Option(
             "--max-turns",
             min=1,
-            help="Maximum number of agent turns allowed in a run (overrides [budget]).",
+            help="Maximum number of agent turns allowed in a run (overrides the budget configuration section).",
         ),
     ] = None,
 ) -> None:
@@ -601,10 +601,39 @@ def issue_cmd(
         bool,
         typer.Option("--verbose", "-v", help="Log raw ACP JSON-RPC messages."),
     ] = False,
+    max_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-tokens",
+            min=1,
+            help="Cumulative token cap across all turns in a run (overrides the budget configuration section).",
+        ),
+    ] = None,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            min=0.0,
+            help="Cumulative cost cap in USD across all turns in a run (overrides the budget configuration section).",
+        ),
+    ] = None,
+    max_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--max-turns",
+            min=1,
+            help="Maximum number of agent turns allowed in a run (overrides the budget configuration section).",
+        ),
+    ] = None,
 ) -> None:
     """Inspect a GitHub Issue's `factory:*` label, run its stage, update its body in-place, and transition its label."""
     try:
         budget = ctx.obj or {}
+        eff_max_tokens = (
+            max_tokens if max_tokens is not None else budget.get("max_tokens")
+        )
+        eff_max_cost = max_cost if max_cost is not None else budget.get("max_cost")
+        eff_max_turns = max_turns if max_turns is not None else budget.get("max_turns")
         outcome = asyncio.run(
             run_issue_stage(
                 workspace.resolve(),
@@ -613,9 +642,9 @@ def issue_cmd(
                 config_file=config_file,
                 dry_run=dry_run,
                 verbose=verbose,
-                max_tokens=budget.get("max_tokens"),
-                max_cost=budget.get("max_cost"),
-                max_turns=budget.get("max_turns"),
+                max_tokens=eff_max_tokens,
+                max_cost=eff_max_cost,
+                max_turns=eff_max_turns,
             )
         )
     except Exception as exc:
@@ -767,12 +796,41 @@ def next_cmd(
         bool,
         typer.Option("--verbose", "-v", help="Log raw ACP JSON-RPC messages."),
     ] = False,
+    max_tokens: Annotated[
+        int | None,
+        typer.Option(
+            "--max-tokens",
+            min=1,
+            help="Cumulative token cap across all turns in a run (overrides the budget configuration section).",
+        ),
+    ] = None,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            min=0.0,
+            help="Cumulative cost cap in USD across all turns in a run (overrides the budget configuration section).",
+        ),
+    ] = None,
+    max_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--max-turns",
+            min=1,
+            help="Maximum number of agent turns allowed in a run (overrides the budget configuration section).",
+        ),
+    ] = None,
 ) -> None:
     """Find open GitHub Issues with actionable `factory:*` labels and run their current stage."""
     resolved_workspace = workspace.resolve()
 
     async def _run_next() -> int:
         budget = ctx.obj or {}
+        eff_max_tokens = (
+            max_tokens if max_tokens is not None else budget.get("max_tokens")
+        )
+        eff_max_cost = max_cost if max_cost is not None else budget.get("max_cost")
+        eff_max_turns = max_turns if max_turns is not None else budget.get("max_turns")
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
         use_fleet = fleet if fleet is not None else (base_cfg.fleet is not None)
 
@@ -780,9 +838,9 @@ def next_cmd(
             from .runner.loop import run_fleet_next
 
             base_cfg = base_cfg.with_overrides(
-                max_tokens=budget.get("max_tokens"),
-                max_cost=budget.get("max_cost"),
-                max_turns=budget.get("max_turns"),
+                max_tokens=eff_max_tokens,
+                max_cost=eff_max_cost,
+                max_turns=eff_max_turns,
             )
             effective_limit = (
                 limit if limit is not None else (None if all_issues else 1)
@@ -839,9 +897,9 @@ def next_cmd(
                 config_file=config_file,
                 dry_run=dry_run,
                 verbose=verbose,
-                max_tokens=budget.get("max_tokens"),
-                max_cost=budget.get("max_cost"),
-                max_turns=budget.get("max_turns"),
+                max_tokens=eff_max_tokens,
+                max_cost=eff_max_cost,
+                max_turns=eff_max_turns,
             )
             if outcome.stage_verdict:
                 v = outcome.stage_verdict

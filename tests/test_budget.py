@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock, patch
 
 from acp_factory.acp.client import TurnResult
 from acp_factory.acp.events import TurnSummary, UsageTotals, extract_usage_metrics
-from acp_factory.config import BudgetConfig, CheckConfig, FactoryConfig, RetryConfig
+from acp_factory.config import (
+    BudgetConfig,
+    CheckConfig,
+    FactoryConfig,
+    RetryConfig,
+    StageConfig,
+)
 from acp_factory.runner.loop import (
     FactoryRunOutcome,
     check_turn_cap,
@@ -383,3 +389,59 @@ def test_cli_run_applies_budget_overrides() -> None:
         assert called_cfg.budget.max_turns == 2
         assert called_cfg.budget.max_tokens_per_run == 100
         assert called_cfg.budget.max_cost_usd == 0.5
+
+
+def test_cli_issue_and_next_expose_budget_options() -> None:
+    """Findings 3: `issue` and `next` commands expose --max-tokens, --max-cost, and --max-turns."""
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+
+    runner = CliRunner()
+    for subcmd in ("issue", "next"):
+        res = runner.invoke(app, [subcmd, "--help"])
+        assert res.exit_code == 0
+        for flag in ("--max-tokens", "--max-cost", "--max-turns"):
+            assert flag in res.output
+
+
+async def test_stage_with_prior_turns_meta_respects_per_run_turn_cap(
+    tmp_path: Path,
+) -> None:
+    """Findings 1: a stage seeded with turns >= max_turns in factory meta still runs its turn."""
+    task = TaskContext(
+        issue_number=6,
+        title="stage test",
+        labels=["factory:triage"],
+        url="https://github.com/acme/repo/issues/6",
+        factory_block="<!-- factory:meta turns=3 tokens=50 cost=0.1 -->\n## Problem\nSome spec.",
+    )
+    fake, prompts = _fake_client()
+    # Provide a minimal base config with checks=[] so attempt 1 succeeds immediately
+    base_cfg = FactoryConfig(
+        task="triage task",
+        stages={
+            "triage": StageConfig(checks=[]),
+        },
+    )
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch("acp_factory.runner.loop.FactoryACPClient", fake),
+        patch("acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()),
+        patch("acp_factory.runner.loop.transition_issue_label", new=AsyncMock()),
+    ):
+        outcome = await run_issue_stage(
+            tmp_path,
+            6,
+            base_config=base_cfg,
+            dry_run=True,
+            max_turns=3,
+        )
+
+    # The stage run succeeded its 1 attempt, dispatched 1 agent turn, and updated cumulative turns to 4.
+    assert outcome.succeeded is True
+    assert outcome.budget_breached is False
+    assert len(prompts) == 1
+    assert outcome.usage.turns == 4
+    assert outcome.usage.tokens == 50
+    assert outcome.usage.cost_usd == 0.1

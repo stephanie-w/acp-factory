@@ -356,6 +356,7 @@ async def run_factory(
 
     succeeded = False
     attempts_used = 0
+    run_turns_used = 0
     last_response_text = ""
     failure_reason: str | None = None
     budget_breached = False
@@ -447,8 +448,8 @@ async def run_factory(
 
             for attempt in range(1, config.retry.max_attempts + 1):
                 # Pre-turn budget check: halt before dispatching another turn once the
-                # cumulative turn cap has been reached (no further agent turns run).
-                turn_breach = check_turn_cap(usage.turns, config.budget)
+                # run's agent turn cap has been reached (no further agent turns run).
+                turn_breach = check_turn_cap(run_turns_used, config.budget)
                 if turn_breach is not None:
                     failure_reason = turn_breach
                     budget_breached = True
@@ -465,6 +466,7 @@ async def run_factory(
                 last_response_text = turn_res.summary.response_text
 
                 # Post-turn accumulation: fold this turn's usage into the run totals.
+                run_turns_used += 1
                 usage.turns += 1
                 usage.tokens += turn_res.summary.tokens
                 usage.cost_usd += turn_res.summary.cost_usd
