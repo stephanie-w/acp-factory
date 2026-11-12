@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -34,6 +35,65 @@ async def _run_git(cwd: Path, *args: str) -> tuple[int, str, str]:
         stdout.decode("utf-8", errors="replace").strip(),
         stderr.decode("utf-8", errors="replace").strip(),
     )
+
+
+_GITDIR_RE = re.compile(r"^gitdir:\s*(.+?)\s*$")
+
+
+def _main_root_from_gitdir(gitdir: Path) -> Path:
+    """Return the main repository root that owns a linked-worktree `gitdir`."""
+    parts = gitdir.parts
+    if ".git" in parts:
+        index = parts.index(".git")
+        if index > 0:
+            return Path(*parts[:index])
+    return gitdir
+
+
+def _fallback_main_repo_root(path: Path) -> Path:
+    """Climb from `path` to the nearest `.git` entry and derive the main root."""
+    for candidate in (path, *path.parents):
+        dot_git = candidate / ".git"
+        if dot_git.is_dir():
+            return candidate
+        if dot_git.is_file():
+            try:
+                match = _GITDIR_RE.match(dot_git.read_text(encoding="utf-8").strip())
+            except OSError:
+                continue
+            if match is None:
+                continue
+            gitdir = Path(match.group(1)).expanduser()
+            if not gitdir.is_absolute():
+                gitdir = (candidate / gitdir).resolve()
+            return _main_root_from_gitdir(gitdir)
+    return path
+
+
+def resolve_main_repo_root(path: Path) -> Path:
+    """Return the canonical main repository root for `path`.
+
+    Handles being invoked from a repository subdirectory, a linked worktree, or a
+    worktree subdirectory. Prefers git's common directory; falls back to climbing
+    the filesystem for `.git` files/directories, then to `path.resolve()` when no
+    repository marker exists (e.g. mocked unit tests).
+    """
+    resolved = path.resolve()
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=resolved,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return _fallback_main_repo_root(resolved)
+
+    if proc.returncode == 0 and proc.stdout.strip():
+        common_dir = Path(proc.stdout.strip())
+        return common_dir.parent if common_dir.name == ".git" else common_dir
+    return _fallback_main_repo_root(resolved)
 
 
 async def get_head_sha(cwd: Path) -> str:
@@ -135,7 +195,8 @@ class WorktreeManager:
         keep_on_failure: bool = True,
         keep_on_success: bool = False,
     ) -> None:
-        self.repo_root = repo_root.resolve()
+        self.invocation_root = repo_root.resolve()
+        self.repo_root = resolve_main_repo_root(self.invocation_root)
         self.enabled = enabled or (issue_number is not None)
         self.issue_number = issue_number
         # Issue worktrees persist across build/review rounds until the `done` stage
@@ -149,7 +210,8 @@ class WorktreeManager:
     @staticmethod
     def issue_worktree_path(repo_root: Path, issue_number: int) -> Path:
         """Return the deterministic worktree path `.worktrees/issue-<id>` for a GitHub Issue."""
-        return repo_root.resolve() / ".worktrees" / f"issue-{issue_number}"
+        main_root = resolve_main_repo_root(repo_root)
+        return main_root / ".worktrees" / f"issue-{issue_number}"
 
     @staticmethod
     def issue_branch_name(issue_number: int) -> str:
@@ -178,6 +240,10 @@ class WorktreeManager:
         if self.issue_number is not None:
             self.branch_name = self.issue_branch_name(self.issue_number)
             wt_path = self.issue_worktree_path(self.repo_root, self.issue_number)
+            # Invoked from inside the target issue's own worktree: reuse it in place.
+            if self.invocation_root.is_relative_to(wt_path):
+                self.worktree_path = wt_path
+                return wt_path
             # Reuse existing worktree if already created in a prior build/review round
             if wt_path.exists() and (wt_path / ".git").exists():
                 self.worktree_path = wt_path
@@ -255,10 +321,11 @@ class WorktreeManager:
     @classmethod
     async def remove_issue_worktree(cls, repo_root: Path, issue_number: int) -> bool:
         """Remove the persistent `.worktrees/issue-<id>` worktree and local branch during the `done` stage."""
-        wt_path = cls.issue_worktree_path(repo_root, issue_number)
+        main_root = resolve_main_repo_root(repo_root)
+        wt_path = cls.issue_worktree_path(main_root, issue_number)
         branch = cls.issue_branch_name(issue_number)
         existed = wt_path.exists()
-        await _remove_worktree_and_branch(repo_root.resolve(), wt_path, branch)
+        await _remove_worktree_and_branch(main_root, wt_path, branch)
         return existed
 
 
