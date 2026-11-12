@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import re
 import tempfile
@@ -570,11 +569,6 @@ async def run_factory(
                         extra_env=check_env,
                         strip_env=config.strip_env or None,
                     )
-                    if all_passed and resp_file.is_file():
-                        with contextlib.suppress(Exception):
-                            normalized_resp = resp_file.read_text(encoding="utf-8")
-                            if normalized_resp.strip():
-                                last_response_text = normalized_resp
 
                 check_history.append(results)
 

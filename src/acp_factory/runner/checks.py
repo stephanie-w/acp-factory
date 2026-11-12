@@ -446,6 +446,31 @@ async def run_single_check(
     raise ValueError(f"Invalid check configuration for '{check.name}'")
 
 
+_UNSAFE_RESPONSE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _isolated_response_file(
+    response_file: Path, snapshot: bytes, index: int, check_name: str
+) -> Path:
+    """Write a per-check copy of the response file so checks cannot mutate shared state."""
+    slug = (
+        _UNSAFE_RESPONSE_FILENAME_RE.sub("-", check_name.strip()).strip("-") or "check"
+    )
+    suffix = response_file.suffix or ".md"
+    isolated = response_file.with_name(f"check-{index}-{slug}{suffix}")
+    isolated.write_bytes(snapshot)
+    return isolated
+
+
+def _restore_response_file(response_file: Path | None, snapshot: bytes | None) -> None:
+    """Best-effort restore of the original bytes if a check mutated the shared path."""
+    if response_file is None or snapshot is None:
+        return
+    with contextlib.suppress(OSError):
+        if not response_file.is_file() or response_file.read_bytes() != snapshot:
+            response_file.write_bytes(snapshot)
+
+
 async def run_checks_sequential(
     checks: list[CheckConfig],
     cwd: Path,
@@ -459,18 +484,46 @@ async def run_checks_sequential(
     strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> tuple[bool, list[CheckResult]]:
     """Run all configured checks in sequence, stopping immediately at the first failure (fail-fast)."""
+    response_file: Path | None = None
+    response_snapshot: bytes | None = None
+    if extra_env:
+        raw_response_path = extra_env.get("FACTORY_RESPONSE_FILE")
+        if raw_response_path:
+            candidate = Path(raw_response_path)
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            if candidate.is_file():
+                response_file = candidate
+                response_snapshot = candidate.read_bytes()
+
     results: list[CheckResult] = []
-    for check in checks:
-        result = await run_single_check(
-            check,
-            cwd,
-            acp_client=acp_client,
-            config_dir=config_dir,
-            resources_dir=resources_dir,
-            max_output_lines=max_output_lines,
-            extra_env=extra_env,
-            strip_env=strip_env,
-        )
+    for index, check in enumerate(checks, start=1):
+        check_env = extra_env
+        isolated_file: Path | None = None
+        try:
+            if response_file is not None and response_snapshot is not None:
+                isolated_file = _isolated_response_file(
+                    response_file, response_snapshot, index, check.name
+                )
+                check_env = {
+                    **(extra_env or {}),
+                    "FACTORY_RESPONSE_FILE": str(isolated_file),
+                }
+            result = await run_single_check(
+                check,
+                cwd,
+                acp_client=acp_client,
+                config_dir=config_dir,
+                resources_dir=resources_dir,
+                max_output_lines=max_output_lines,
+                extra_env=check_env,
+                strip_env=strip_env,
+            )
+        finally:
+            if isolated_file is not None:
+                with contextlib.suppress(OSError):
+                    isolated_file.unlink()
+            _restore_response_file(response_file, response_snapshot)
         results.append(result)
         if on_check_complete is not None:
             on_check_complete(result)
