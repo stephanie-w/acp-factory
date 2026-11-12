@@ -608,3 +608,32 @@ COMMON_KEY = "stage_override"
         "STAGE_FLAG": "true",
         "COMMON_KEY": "stage_override",
     }
+
+
+def test_prompt_resolution_prefers_local_factory_and_case_insensitive(
+    tmp_path: Path,
+) -> None:
+    from acp_factory.config import _load_markdown_or_inline
+
+    factory_dir = tmp_path / ".factory"
+    prompts_dir = factory_dir / "prompts"
+    prompts_dir.mkdir(parents=True)
+    (prompts_dir / "retro.md").write_text("Local Retro Prompt", encoding="utf-8")
+
+    # 1. Exact match via config_dir
+    res = _load_markdown_or_inline(
+        "prompts/retro.md", config_dir=factory_dir, workspace=tmp_path
+    )
+    assert res == "Local Retro Prompt"
+
+    # 2. Case-insensitive match (prompts/RETRO.md -> prompts/retro.md)
+    res_upper = _load_markdown_or_inline(
+        "prompts/RETRO.md", config_dir=factory_dir, workspace=tmp_path
+    )
+    assert res_upper == "Local Retro Prompt"
+
+    # 3. Direct short name (retro.md -> prompts/retro.md)
+    res_short = _load_markdown_or_inline(
+        "retro.md", config_dir=factory_dir, workspace=tmp_path
+    )
+    assert res_short == "Local Retro Prompt"

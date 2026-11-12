@@ -708,6 +708,20 @@ def resolve_resources_dir(
     return None
 
 
+def _find_case_insensitive_file(dir_path: Path, filename: str) -> Path | None:
+    """Find a file inside `dir_path` matching `filename` case-insensitively."""
+    if not dir_path.is_dir():
+        return None
+    lower_target = filename.lower()
+    try:
+        for entry in dir_path.iterdir():
+            if entry.is_file() and entry.name.lower() == lower_target:
+                return entry
+    except OSError:
+        return None
+    return None
+
+
 def _load_markdown_or_inline(
     value: str,
     *,
@@ -740,6 +754,7 @@ def _load_markdown_or_inline(
             raise FileNotFoundError(f"Prompt/persona file not found: {candidate_path}")
         return value
 
+    # 1. Exact match search
     for root in search_roots:
         resolved = (root / candidate_path).resolve()
         if resolved.is_file():
@@ -749,6 +764,18 @@ def _load_markdown_or_inline(
             sub_resolved = (root / subdir / candidate_path).resolve()
             if sub_resolved.is_file():
                 return sub_resolved.read_text(encoding="utf-8")
+
+    # 2. Case-insensitive fallback for cross-platform robustness
+    for root in search_roots:
+        target_dir = (root / candidate_path.parent).resolve()
+        matched = _find_case_insensitive_file(target_dir, candidate_path.name)
+        if matched is not None:
+            return matched.read_text(encoding="utf-8")
+        for subdir in ("agents", "prompts", "personas"):
+            sub_dir = (root / subdir / candidate_path.parent).resolve()
+            matched = _find_case_insensitive_file(sub_dir, candidate_path.name)
+            if matched is not None:
+                return matched.read_text(encoding="utf-8")
 
     if stripped.endswith(".md"):
         raise FileNotFoundError(
