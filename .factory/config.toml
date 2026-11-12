@@ -86,3 +86,8 @@ prompt = "prompts/review.md"
 persona = "agents/security.agent.md"
 skills = ["security-auditor"]
 prompt = "prompts/security.md"
+
+[budget]
+max_tokens_per_run = 100000
+max_cost_usd = 2.00
+max_turns = 3
