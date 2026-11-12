@@ -60,6 +60,67 @@ async def test_run_checks_sequential_fail_fast(tmp_path: Path) -> None:
     assert not marker_file.exists()
 
 
+async def test_sequential_checks_response_file_isolation(tmp_path: Path) -> None:
+    original = (
+        "Here is the combined review.\n\n"
+        "### Risk Classification: MEDIUM\n"
+        "- **Reason**: Logic change.\n\n"
+        "### Findings\n"
+        "- None.\n\n"
+        "### Security Audit Summary\n"
+        "- **Findings Count**: `0 blocking, 0 major, 0 minor`\n\n"
+        "### Security Findings\n"
+        "- None.\n\n"
+        "STATUS: ACCEPTED\n"
+    )
+    response_file = tmp_path / "response.md"
+    response_file.write_text(original, encoding="utf-8")
+
+    review_script = tmp_path / "review_check.py"
+    review_script.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "p = Path(os.environ['FACTORY_RESPONSE_FILE'])\n"
+        "text = p.read_text(encoding='utf-8')\n"
+        "assert '### Risk Classification: MEDIUM' in text\n"
+        "assert '### Security Audit Summary' in text\n"
+        "start = text.index('### Risk Classification')\n"
+        "p.write_text(text[start:], encoding='utf-8')\n"
+        f"Path({str(response_file)!r}).write_text('tampered by check 1', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    security_script = tmp_path / "security_check.py"
+    security_script.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "p = Path(os.environ['FACTORY_RESPONSE_FILE'])\n"
+        "text = p.read_text(encoding='utf-8')\n"
+        "assert '### Risk Classification: MEDIUM' in text\n"
+        "assert '### Security Audit Summary' in text\n"
+        "start = text.index('### Security Audit Summary')\n"
+        "p.write_text(text[start:], encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    checks = [
+        CheckConfig(name="validate-review", cmd=f"python3 {review_script}"),
+        CheckConfig(name="validate-security", cmd=f"python3 {security_script}"),
+    ]
+    extra_env = {"FACTORY_RESPONSE_FILE": str(response_file)}
+
+    all_passed, results = await run_checks_sequential(
+        checks, tmp_path, extra_env=extra_env
+    )
+
+    assert all_passed is True
+    assert [result.passed for result in results] == [True, True]
+    # Check 1 mutated the original path directly; the snapshot must be restored.
+    assert response_file.read_text(encoding="utf-8") == original
+    # Per-check copies are cleaned up and the caller's env is not mutated.
+    assert list(tmp_path.glob("check-*")) == []
+    assert extra_env["FACTORY_RESPONSE_FILE"] == str(response_file)
+
+
 async def test_run_review_prompt_check(tmp_path: Path) -> None:
     mock_client = AsyncMock()
     mock_client.send_prompt.return_value = TurnResult(
@@ -330,8 +391,12 @@ async def test_spec_validation_check_self_heals_via_factory_response_file(
     assert outcome.attempts_used == 2
     assert len(prompts_received) == 2
     assert "Specification validation failed" in prompts_received[1]
-    assert outcome.last_response_text.startswith("# Specification")
-    assert "Here is the corrected specification" not in outcome.last_response_text
+    # The runner keeps the raw agent turn response instead of the validator's
+    # mutated copy of $FACTORY_RESPONSE_FILE; markdown cleanup is deferred to
+    # `_clean_markdown_stage_body` when the verdict is parsed.
+    assert outcome.last_response_text.startswith("Here is the corrected specification:")
+    assert "# Specification" in outcome.last_response_text
+    assert outcome.last_response_text.rstrip().endswith("STATUS: SPEC_READY")
 
 
 def test_all_skill_validators_and_templates_exist_and_work(tmp_path: Path) -> None:
