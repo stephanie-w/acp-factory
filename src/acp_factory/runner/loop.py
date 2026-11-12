@@ -13,7 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..acp.client import FactoryACPClient
-from ..config import CheckConfig, FactoryConfig
+from ..acp.events import UsageTotals
+from ..config import BudgetConfig, CheckConfig, FactoryConfig
 from ..github import (
     DryRunPlan,
     build_dry_run_gh_plan,
@@ -35,11 +36,14 @@ from ..task import (
     StageVerdict,
     TaskContext,
     _clean_markdown_stage_body,
+    budget_usage_from_meta,
     extract_factory_findings,
+    format_cost_usd,
     format_task_prompt_context,
     parse_factory_meta,
     parse_review_round,
     parse_stage_verdict,
+    render_budget_escalation,
     set_factory_meta,
     strip_factory_findings,
 )
@@ -70,6 +74,38 @@ class FactoryRunOutcome:
     failure_reason: str | None = None
     stage_verdict: StageVerdict | None = None
     dry_run_plan: DryRunPlan | None = None
+    usage: UsageTotals = field(default_factory=UsageTotals)
+    budget_breached: bool = False
+
+
+def check_turn_cap(turns_used: int, budget: BudgetConfig) -> str | None:
+    """Return a deterministic breach message when the cumulative turn cap is reached."""
+    if budget.max_turns is not None and turns_used >= budget.max_turns:
+        return (
+            f"Budget cap breached: turn count ({turns_used}) reached "
+            f"max_turns ({budget.max_turns})"
+        )
+    return None
+
+
+def check_usage_cap(
+    total_tokens: int, total_cost_usd: float, budget: BudgetConfig
+) -> str | None:
+    """Return a deterministic breach message when token or cost caps are exceeded."""
+    if (
+        budget.max_tokens_per_run is not None
+        and total_tokens > budget.max_tokens_per_run
+    ):
+        return (
+            f"Budget cap breached: cumulative tokens {total_tokens:,} exceeded "
+            f"max_tokens_per_run ({budget.max_tokens_per_run:,})"
+        )
+    if budget.max_cost_usd is not None and total_cost_usd > budget.max_cost_usd:
+        return (
+            f"Budget cap breached: cumulative cost ${total_cost_usd:.2f} exceeded "
+            f"max_cost_usd (${budget.max_cost_usd:.2f})"
+        )
+    return None
 
 
 def build_initial_prompt(
@@ -249,12 +285,14 @@ def _persist_run_artifacts(
     turn_transcripts: list[str],
     check_history: list[list[CheckResult]],
     failure_reason: str | None,
+    usage: UsageTotals | None = None,
 ) -> Path | None:
     """Write structured run logs into `.factory/runs/<run-id>/` if `.factory/` is present."""
     factory_dir = workspace / ".factory"
     if not factory_dir.is_dir():
         return None
 
+    usage = usage or UsageTotals()
     run_dir = factory_dir / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -289,6 +327,16 @@ def _persist_run_artifacts(
         "max_attempts": config.retry.max_attempts,
         "duration_seconds": round(total_duration, 3),
         "failure_reason": failure_reason,
+        "budget": {
+            "max_tokens_per_run": config.budget.max_tokens_per_run,
+            "max_cost_usd": config.budget.max_cost_usd,
+            "max_turns": config.budget.max_turns,
+        },
+        "usage": {
+            "total_tokens": usage.tokens,
+            "total_cost_usd": round(usage.cost_usd, 6),
+            "total_turns": usage.turns,
+        },
     }
     (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
     return run_dir
@@ -305,6 +353,7 @@ async def run_factory(
     verbose: bool = False,
     export_transcript: Path | None = None,
     base_ref: str | None = None,
+    initial_usage: UsageTotals | None = None,
 ) -> FactoryRunOutcome:
     """Execute the full acp-factory workflow asynchronously."""
     ui = display or FactoryDisplay()
@@ -326,8 +375,11 @@ async def run_factory(
 
     succeeded = False
     attempts_used = 0
+    run_turns_used = 0
     last_response_text = ""
     failure_reason: str | None = None
+    budget_breached = False
+    usage = initial_usage if initial_usage is not None else UsageTotals()
     check_history: list[list[CheckResult]] = []
     setup_logs: list[str] = []
     turn_transcripts: list[str] = []
@@ -375,6 +427,7 @@ async def run_factory(
                         turn_transcripts=[],
                         check_history=[],
                         failure_reason=failure_reason,
+                        usage=usage,
                     )
                     ui.show_final_summary(
                         succeeded=False,
@@ -392,6 +445,7 @@ async def run_factory(
                         run_dir=run_dir,
                         preserved_worktree=preserved_wt,
                         failure_reason=failure_reason,
+                        usage=usage,
                     )
 
         # 2. Agent Worker & Check Feedback Loop
@@ -418,6 +472,14 @@ async def run_factory(
                 context_tag = f"#{issue_number}"
 
             for attempt in range(1, config.retry.max_attempts + 1):
+                # Pre-turn budget check: halt before dispatching another turn once the
+                # run's agent turn cap has been reached (no further agent turns run).
+                turn_breach = check_turn_cap(run_turns_used, config.budget)
+                if turn_breach is not None:
+                    failure_reason = turn_breach
+                    budget_breached = True
+                    break
+
                 attempts_used = attempt
                 ui.show_attempt_banner(
                     attempt, config.retry.max_attempts, context=context_tag
@@ -427,6 +489,20 @@ async def run_factory(
                     prompt, timeout=config.agent.timeout
                 )
                 last_response_text = turn_res.summary.response_text
+
+                # Post-turn accumulation: fold this turn's usage into the run totals.
+                run_turns_used += 1
+                usage.turns += 1
+                usage.tokens += turn_res.summary.tokens
+                usage.cost_usd += turn_res.summary.cost_usd
+
+                usage_breach = check_usage_cap(
+                    usage.tokens, usage.cost_usd, config.budget
+                )
+                if usage_breach is not None:
+                    failure_reason = usage_breach
+                    budget_breached = True
+                    break
 
                 if not config.checks:
                     succeeded = True
@@ -534,6 +610,7 @@ async def run_factory(
         turn_transcripts=turn_transcripts,
         check_history=check_history,
         failure_reason=None if succeeded else failure_reason,
+        usage=usage,
     )
     ui.show_final_summary(
         succeeded=succeeded,
@@ -553,6 +630,8 @@ async def run_factory(
         check_history=check_history,
         preserved_worktree=preserved_wt,
         failure_reason=None if succeeded else failure_reason,
+        usage=usage,
+        budget_breached=budget_breached,
     )
 
 
@@ -568,6 +647,9 @@ async def run_issue_stage(
     base_ref: str | None = None,
     base_config: FactoryConfig | None = None,
     repo_slug: str | None = None,
+    max_tokens: int | None = None,
+    max_cost: float | None = None,
+    max_turns: int | None = None,
 ) -> FactoryRunOutcome:
     """Execute the active GitHub label stage for a specific issue and transition its label.
 
@@ -735,6 +817,15 @@ async def run_issue_stage(
         )
         cfg.active_stage = stage
 
+    if max_tokens is not None or max_cost is not None or max_turns is not None:
+        cfg = cfg.with_overrides(
+            max_tokens=max_tokens, max_cost=max_cost, max_turns=max_turns
+        )
+
+    # Seed cumulative budget counters from the issue's persisted factory meta so
+    # token/cost/turn totals accumulate across stage transitions.
+    initial_usage = budget_usage_from_meta(task.factory_block)
+
     outcome = await run_factory(
         cfg,
         resolved_workspace,
@@ -744,9 +835,54 @@ async def run_issue_stage(
         display=ui,
         verbose=verbose,
         base_ref=base_ref if use_issue_worktree else None,
+        initial_usage=initial_usage,
     )
 
     if not outcome.succeeded:
+        if outcome.budget_breached:
+            escalation = render_budget_escalation(
+                reason=outcome.failure_reason or "Budget cap breached",
+                total_tokens=outcome.usage.tokens,
+                total_cost_usd=outcome.usage.cost_usd,
+                turns_used=outcome.usage.turns,
+            )
+            escalated_block = (
+                f"{strip_factory_findings(task.factory_block).strip()}\n\n{escalation}"
+            ).strip()
+            escalated_block = set_factory_meta(
+                escalated_block,
+                stage="needs-human",
+                tokens=str(outcome.usage.tokens),
+                cost=format_cost_usd(outcome.usage.cost_usd),
+                turns=str(outcome.usage.turns),
+            )
+            if effective_dry_run:
+                fail_verdict = StageVerdict(
+                    stage=stage,
+                    status="budget_breached",
+                    target_label=LABEL_NEEDS_HUMAN,
+                    updated_factory_block=escalated_block,
+                    summary=outcome.failure_reason or "Budget cap breached",
+                )
+                plan = build_dry_run_gh_plan(
+                    task,
+                    fail_verdict,
+                    workspace=resolved_workspace,
+                    run_dir=outcome.run_dir,
+                )
+                outcome.dry_run_plan = plan
+                ui.show_dry_run_plan(plan)
+            else:
+                await update_issue_factory_block(
+                    task,
+                    escalated_block,
+                    cwd=resolved_workspace,
+                    repo_slug=repo_slug,
+                )
+                await transition_issue_label(
+                    task, LABEL_NEEDS_HUMAN, cwd=resolved_workspace, repo_slug=repo_slug
+                )
+            return outcome
         if effective_dry_run:
             fail_verdict = StageVerdict(
                 stage=stage,
@@ -800,6 +936,16 @@ async def run_issue_stage(
                 summary="Publish aborted: working tree changed during review",
             )
             outcome.stage_verdict = verdict
+
+    # Persist cumulative budget usage into the factory meta so totals accumulate
+    # across stage transitions regardless of the stage's own verdict handling.
+    verdict.updated_factory_block = set_factory_meta(
+        verdict.updated_factory_block or task.factory_block,
+        tokens=str(outcome.usage.tokens),
+        cost=format_cost_usd(outcome.usage.cost_usd),
+        turns=str(outcome.usage.turns),
+    )
+    outcome.stage_verdict = verdict
 
     if effective_dry_run:
         plan = build_dry_run_gh_plan(

@@ -6,13 +6,14 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from acp_factory.acp.client import (
     FactoryACPClient,
     resolve_persona_text,
     resolve_skill_paths,
 )
-from acp_factory.config import CheckConfig, FactoryConfig
+from acp_factory.config import BudgetConfig, CheckConfig, FactoryConfig
 
 
 def test_parse_yaml_config_from_goal_spec(tmp_path: Path) -> None:
@@ -491,6 +492,88 @@ prompt = "prompts/triage.md"
     )
     assert client.persona_text == "External triage agent persona."
     assert client.skill_paths == [html2md_skill.resolve()]
+
+
+def test_budget_config_validation(tmp_path: Path) -> None:
+    """AC-1: [budget] parses limits and rejects negative/zero (or non-finite) values."""
+    # Defaults leave all caps disabled.
+    default = BudgetConfig()
+    assert default.max_tokens_per_run is None
+    assert default.max_cost_usd is None
+    assert default.max_turns is None
+
+    # Valid values (including a zero cost cap) are accepted.
+    valid = BudgetConfig(max_tokens_per_run=100_000, max_cost_usd=2.0, max_turns=3)
+    assert valid.max_tokens_per_run == 100_000
+    assert valid.max_cost_usd == 2.0
+    assert valid.max_turns == 3
+    assert BudgetConfig(max_cost_usd=0.0).max_cost_usd == 0.0
+
+    # Zero/negative tokens or turns are rejected.
+    for bad_tokens in (0, -1):
+        with pytest.raises(ValidationError):
+            BudgetConfig(max_tokens_per_run=bad_tokens)
+    for bad_turns in (0, -1):
+        with pytest.raises(ValidationError):
+            BudgetConfig(max_turns=bad_turns)
+
+    # Negative or non-finite cost is rejected.
+    with pytest.raises(ValidationError):
+        BudgetConfig(max_cost_usd=-0.01)
+    with pytest.raises(ValidationError):
+        BudgetConfig(max_cost_usd=float("inf"))
+    with pytest.raises(ValidationError):
+        BudgetConfig(max_cost_usd=float("nan"))
+
+    # FactoryConfig exposes a `budget` section, parsed from TOML and YAML.
+    toml_file = tmp_path / "factory.toml"
+    toml_file.write_text(
+        'version = "1"\n[budget]\nmax_tokens_per_run = 100000\nmax_cost_usd = 2.0\nmax_turns = 3\n',
+        encoding="utf-8",
+    )
+    cfg = FactoryConfig.from_file(toml_file)
+    assert cfg.budget.max_tokens_per_run == 100_000
+    assert cfg.budget.max_cost_usd == 2.0
+    assert cfg.budget.max_turns == 3
+
+    yaml_file = tmp_path / "factory.yaml"
+    yaml_file.write_text(
+        "version: '1'\nbudget:\n  max_tokens_per_run: 50000\n  max_cost_usd: 1.25\n  max_turns: 2\n",
+        encoding="utf-8",
+    )
+    cfg = FactoryConfig.from_file(yaml_file)
+    assert cfg.budget.max_tokens_per_run == 50_000
+    assert cfg.budget.max_cost_usd == 1.25
+    assert cfg.budget.max_turns == 2
+
+    # An invalid config file fails validation instead of silently disabling a cap.
+    invalid = tmp_path / "invalid.toml"
+    invalid.write_text('version = "1"\n[budget]\nmax_turns = 0\n', encoding="utf-8")
+    with pytest.raises(ValidationError):
+        FactoryConfig.from_file(invalid)
+
+
+def test_budget_cli_overrides() -> None:
+    """AC-2: CLI budget flags override `[budget]` values in `with_overrides`."""
+    base = FactoryConfig(
+        budget=BudgetConfig(max_tokens_per_run=1000, max_cost_usd=1.0, max_turns=3)
+    )
+    updated = base.with_overrides(max_tokens=2000, max_cost=2.5, max_turns=5)
+    assert updated.budget.max_tokens_per_run == 2000
+    assert updated.budget.max_cost_usd == 2.5
+    assert updated.budget.max_turns == 5
+
+    # Partial overrides leave the other caps untouched.
+    partial = base.with_overrides(max_tokens=3000)
+    assert partial.budget.max_tokens_per_run == 3000
+    assert partial.budget.max_cost_usd == 1.0
+    assert partial.budget.max_turns == 3
+
+    # Overrides re-run validation rather than silently disabling a cap.
+    with pytest.raises(ValidationError):
+        base.with_overrides(max_turns=0)
+    with pytest.raises(ValidationError):
+        base.with_overrides(max_cost=-1.0)
 
 
 def test_config_env_and_strip_env_parsing_and_stage_resolution(tmp_path: Path) -> None:
