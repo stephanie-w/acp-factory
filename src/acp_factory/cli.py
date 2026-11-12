@@ -12,6 +12,7 @@ from rich.table import Table
 from .config import FactoryConfig
 from .github import list_actionable_issues, list_all_factory_issues
 from .runner.loop import run_branch_review, run_factory, run_issue_stage
+from .runner.worktree import WorktreeManager, resolve_main_repo_root
 from .task import TaskContext
 from .ui.display import console
 
@@ -1010,6 +1011,7 @@ def status_cmd(
             return
 
         tasks = await list_all_factory_issues(resolved_workspace, limit=limit or 50)
+        main_root = resolve_main_repo_root(resolved_workspace)
         table = Table(title="acp-factory GitHub Issues & Worktrees")
         table.add_column("Issue", style="bold cyan", justify="right")
         table.add_column("Title")
@@ -1021,12 +1023,8 @@ def status_cmd(
             fac_labels = [lbl for lbl in t.labels if lbl.startswith("factory:")]
             state_desc = _state_description(t)
 
-            wt_path = resolved_workspace / ".worktrees" / f"issue-{t.issue_number}"
-            wt_status = (
-                str(wt_path.relative_to(resolved_workspace))
-                if wt_path.exists()
-                else "-"
-            )
+            wt_path = WorktreeManager.issue_worktree_path(main_root, t.issue_number)
+            wt_status = str(wt_path.relative_to(main_root)) if wt_path.exists() else "-"
             table.add_row(
                 f"#{t.issue_number}",
                 t.title,
