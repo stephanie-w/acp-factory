@@ -21,9 +21,10 @@ FACTORY_META_RE = re.compile(
 FACTORY_FINDINGS_START = "<!-- factory:findings:start -->"
 FACTORY_FINDINGS_END = "<!-- factory:findings:end -->"
 _FACTORY_FINDINGS_RE = re.compile(
-    rf"{re.escape(FACTORY_FINDINGS_START)}.*?{re.escape(FACTORY_FINDINGS_END)}",
+    rf"{re.escape(FACTORY_FINDINGS_START)}(.*?){re.escape(FACTORY_FINDINGS_END)}",
     re.DOTALL,
 )
+_FACTORY_FINDINGS_START_RE = re.compile(re.escape(FACTORY_FINDINGS_START))
 
 MAX_REVIEW_ROUNDS = 3
 
@@ -62,14 +63,32 @@ _FACTORY_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+_CODE_BLOCK_RE = re.compile(
+    r"(?P<fence>`{3,}|~{3,})[\s\S]*?(?P=fence)",
+)
+
+
+def _mask_code_blocks(text: str) -> str:
+    """Replace content inside markdown code fences with spaces to preserve character offsets."""
+    return _CODE_BLOCK_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+
+def _remove_unfenced_matches(pattern: re.Pattern[str], text: str) -> str:
+    """Delete `pattern` matches that occur outside markdown code fences."""
+    spans = [match.span() for match in pattern.finditer(_mask_code_blocks(text))]
+    for start, end in reversed(spans):
+        text = text[:start] + text[end:]
+    return text
+
 
 def parse_factory_meta(factory_block: str) -> dict[str, str]:
     """Parse `<!-- factory:meta k=v ... -->` key/value fields from a factory block."""
-    match = FACTORY_META_RE.search(factory_block)
+    match = FACTORY_META_RE.search(_mask_code_blocks(factory_block))
     if not match:
         return {}
     fields: dict[str, str] = {}
-    for token in match.group(1).split():
+    raw_fields = factory_block[match.start(1) : match.end(1)]
+    for token in raw_fields.split():
         if "=" in token:
             key, value = token.split("=", 1)
             fields[key] = value
@@ -86,7 +105,7 @@ def set_factory_meta(factory_block: str, **updates: str) -> str:
     """Merge `updates` into the factory block's meta comment, replacing it in place."""
     existing = parse_factory_meta(factory_block)
     merged = {key: value for key, value in {**existing, **updates}.items() if value}
-    body = FACTORY_META_RE.sub("", factory_block).strip()
+    body = _remove_unfenced_matches(FACTORY_META_RE, factory_block).strip()
     if not merged:
         return body
     meta = render_factory_meta(**merged)
@@ -95,7 +114,7 @@ def set_factory_meta(factory_block: str, **updates: str) -> str:
 
 def strip_factory_meta(factory_block: str) -> str:
     """Remove the `<!-- factory:meta ... -->` comment from a factory block."""
-    return FACTORY_META_RE.sub("", factory_block).strip()
+    return _remove_unfenced_matches(FACTORY_META_RE, factory_block).strip()
 
 
 def _parse_non_negative_int(value: str | None) -> int:
@@ -157,8 +176,8 @@ def render_budget_escalation(
 
 def strip_factory_findings(factory_block: str) -> str:
     """Remove the delimited findings section (including a dangling start marker) from a factory block."""
-    cleaned = _FACTORY_FINDINGS_RE.sub("", factory_block)
-    cleaned = cleaned.replace(FACTORY_FINDINGS_START, "")
+    cleaned = _remove_unfenced_matches(_FACTORY_FINDINGS_RE, factory_block)
+    cleaned = _remove_unfenced_matches(_FACTORY_FINDINGS_START_RE, cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -183,15 +202,10 @@ def replace_factory_findings(
 
 def extract_factory_findings(factory_block: str) -> str:
     """Return the content between the findings delimiters, without the markers."""
-    match = _FACTORY_FINDINGS_RE.search(factory_block)
+    match = _FACTORY_FINDINGS_RE.search(_mask_code_blocks(factory_block))
     if not match:
         return ""
-    return (
-        match.group(0)
-        .replace(FACTORY_FINDINGS_START, "")
-        .replace(FACTORY_FINDINGS_END, "")
-        .strip()
-    )
+    return factory_block[match.start(1) : match.end(1)].strip()
 
 
 def clean_spec_block(factory_block: str) -> str:
@@ -294,11 +308,11 @@ def split_issue_body(full_body: str) -> tuple[str, str]:
     Everything outside `<!-- factory:start --> ... <!-- factory:end -->` is preserved
     as `original_body`.
     """
-    match = _FACTORY_BLOCK_RE.search(full_body)
+    match = _FACTORY_BLOCK_RE.search(_mask_code_blocks(full_body))
     if not match:
         return full_body.strip(), ""
 
-    factory_content = match.group(1).strip()
+    factory_content = full_body[match.start(1) : match.end(1)].strip()
     before = full_body[: match.start()].rstrip()
     after = full_body[match.end() :].lstrip()
     if before and after:
@@ -391,16 +405,6 @@ _OPEN_QUESTIONS_RE = re.compile(
 _HEADING_START_RE = re.compile(r"^#{1,3}\s+\S", re.MULTILINE)
 
 
-_CODE_BLOCK_RE = re.compile(
-    r"(?P<fence>`{3,}|~{3,})[\s\S]*?(?P=fence)",
-)
-
-
-def _mask_code_blocks(text: str) -> str:
-    """Replace content inside markdown code fences with spaces of the same length to preserve character offsets."""
-    return _CODE_BLOCK_RE.sub(lambda m: " " * len(m.group(0)), text)
-
-
 def _find_terminal_status_or_verdict(text: str) -> tuple[re.Match[str] | None, str]:
     """Find the trailing non-fenced STATUS: or VERDICT: match.
 
@@ -467,7 +471,9 @@ def parse_stage_verdict(
         )
 
     if stage == "spec":
-        has_open_questions = bool(_OPEN_QUESTIONS_RE.search(cleaned_body))
+        has_open_questions = bool(
+            _OPEN_QUESTIONS_RE.search(_mask_code_blocks(cleaned_body))
+        )
         if raw_token in ("NEEDS_HUMAN", "NEEDS_INPUT", "OPEN_QUESTIONS") or (
             has_open_questions and raw_token != "SPEC_READY"
         ):
