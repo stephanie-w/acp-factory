@@ -461,6 +461,128 @@ def test_factory_meta_and_findings_primitives() -> None:
     assert clean_spec_block(with_findings) == "## Specification\n- X"
 
 
+def test_split_issue_body_preserves_code_block_delimiters() -> None:
+    original = (
+        "Example of a factory block inside a code fence:\n"
+        "```markdown\n"
+        "<!-- factory:start -->\n"
+        "example content\n"
+        "<!-- factory:end -->\n"
+        "```\n"
+        "After the example."
+    )
+    spec = (
+        "## Specification\n"
+        "Markers to demonstrate:\n"
+        "```html\n"
+        "<!-- factory:start -->\n"
+        "<!-- factory:end -->\n"
+        "```\n"
+        "Tail of spec."
+    )
+
+    rendered = render_issue_body(original, spec)
+    parsed_orig, parsed_block = split_issue_body(rendered)
+
+    assert parsed_orig == original
+    assert parsed_block == spec
+    assert parsed_orig.count("<!-- factory:start -->") == 1
+    assert parsed_orig.count("<!-- factory:end -->") == 1
+    assert "```markdown" in parsed_orig
+
+    # A second round-trip must remain stable.
+    assert split_issue_body(render_issue_body(parsed_orig, parsed_block)) == (
+        original,
+        spec,
+    )
+
+
+def test_split_issue_body_masks_tilde_and_unclosed_fences() -> None:
+    original = "~~~\n<!-- factory:start -->\n<!-- factory:end -->\n~~~\nReal body."
+    parsed_orig, parsed_block = split_issue_body(
+        render_issue_body(original, "## Specification\n- X")
+    )
+    assert parsed_orig == original
+    assert parsed_block == "## Specification\n- X"
+
+    # An unclosed fence cannot be masked, so no live block is detected.
+    unclosed = "```\n<!-- factory:start -->\nunclosed"
+    assert split_issue_body(unclosed) == (unclosed, "")
+    assert split_issue_body("") == ("", "")
+    assert split_issue_body("   \n\t ") == ("", "")
+
+
+def test_findings_helpers_preserve_code_block_markers() -> None:
+    example = (
+        "## Specification\n"
+        "Documentation example:\n"
+        "```markdown\n"
+        "<!-- factory:findings:start -->\n"
+        "example findings\n"
+        "<!-- factory:findings:end -->\n"
+        "```"
+    )
+    active = replace_factory_findings(
+        example, "## Findings\n- real", round_num=1, max_rounds=3
+    )
+
+    extracted = extract_factory_findings(active)
+    assert "## Findings\n- real" in extracted
+    assert "example findings" not in extracted
+
+    stripped = strip_factory_findings(active)
+    assert "example findings" in stripped
+    assert "<!-- factory:findings:start -->" in stripped
+    assert "real" not in stripped
+
+    # A dangling top-level start marker is still removed.
+    dangling = "## Specification\n<!-- factory:findings:start -->\nleftover"
+    assert "factory:findings:start" not in strip_factory_findings(dangling)
+
+
+def test_factory_meta_helpers_preserve_code_block_markers() -> None:
+    block = (
+        "## Specification\n"
+        "Meta example:\n"
+        "```html\n"
+        "<!-- factory:meta tokens=999 cost=99.0 turns=99 -->\n"
+        "```"
+    )
+    assert parse_factory_meta(block) == {}
+
+    updated = set_factory_meta(block, stage="review", tokens="5")
+    assert parse_factory_meta(updated) == {"stage": "review", "tokens": "5"}
+    assert "<!-- factory:meta tokens=999 cost=99.0 turns=99 -->" in updated
+
+    stripped = strip_factory_meta(updated)
+    assert "tokens=999" in stripped
+    assert "stage=review" not in stripped
+
+    assert parse_factory_meta("") == {}
+    assert strip_factory_meta("") == ""
+
+
+def test_spec_verdict_ignores_open_questions_in_code_blocks() -> None:
+    response = (
+        "# Specification\n\n"
+        "## Behavior\n"
+        "Example question template:\n"
+        "```markdown\n"
+        "## Open Questions\n"
+        "1. Example question?\n"
+        "```\n"
+    )
+    verdict = parse_stage_verdict("spec", response)
+    assert verdict.status == "spec_ready"
+    assert verdict.target_label == LABEL_SPEC_READY
+
+    needs_human = parse_stage_verdict(
+        "spec", "# Specification\n\n## Open Questions\n1. Real question?\n"
+    )
+    assert needs_human.status == "needs_human"
+    assert needs_human.target_label == LABEL_NEEDS_HUMAN
+
+
 def test_review_circuit_breaker_and_findings_replacement() -> None:
     spec = "## Specification\n- Add pagination."
 
