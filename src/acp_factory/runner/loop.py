@@ -312,16 +312,21 @@ def _extract_implementation_notes(response_text: str) -> str | None:
     return notes or None
 
 
-def _update_latest_build_notes_pointers(
-    factory_dir: Path, run_id: str, notes_text: str
+def _update_latest_pointer(
+    factory_dir: Path,
+    run_id: str,
+    *,
+    filename: str,
+    relative_target: Path,
+    text: str,
 ) -> None:
-    """Point `.factory/runs/latest` and `.factory/latest-build-notes.md` at the newest build notes.
+    """Point `.factory/runs/latest` and a `latest-*` artifact at the newest run.
 
-    Symlinks are preferred; when the platform forbids them, the notes are copied to
-    `.factory/latest-build-notes.md` so callers always have a discoverable artifact.
+    Symlinks are preferred; when the platform forbids them, the text is copied to
+    the artifact so callers always have a discoverable file.
     """
     latest_run = factory_dir / "runs" / "latest"
-    latest_notes = factory_dir / "latest-build-notes.md"
+    latest_artifact = factory_dir / filename
 
     try:
         if latest_run.is_symlink() or latest_run.exists():
@@ -331,17 +336,15 @@ def _update_latest_build_notes_pointers(
         logger.debug("Could not update latest run symlink: %s", exc)
 
     try:
-        if latest_notes.is_symlink() or latest_notes.exists():
-            latest_notes.unlink()
-        latest_notes.symlink_to(Path("runs") / run_id / "implementation-notes.md")
+        if latest_artifact.is_symlink() or latest_artifact.exists():
+            latest_artifact.unlink()
+        latest_artifact.symlink_to(Path("runs") / run_id / relative_target)
     except OSError as exc:
-        logger.debug(
-            "Could not symlink latest build notes, writing a copy instead: %s", exc
-        )
+        logger.debug("Could not symlink %s, writing a copy instead: %s", filename, exc)
         try:
-            latest_notes.write_text(notes_text, encoding="utf-8")
+            latest_artifact.write_text(text, encoding="utf-8")
         except OSError as write_exc:
-            logger.warning("Could not write latest build notes pointer: %s", write_exc)
+            logger.warning("Could not write %s pointer: %s", filename, write_exc)
 
 
 def _resolve_prior_build_notes(workspace: Path) -> str | None:
@@ -360,36 +363,6 @@ def _resolve_prior_build_notes(workspace: Path) -> str | None:
         except OSError as exc:
             logger.debug("Could not read prior build notes at %s: %s", candidate, exc)
     return None
-
-
-def _update_latest_report_pointers(
-    factory_dir: Path, run_id: str, report_text: str
-) -> None:
-    """Point `.factory/runs/latest` and `.factory/latest-report.md` at the newest report.
-
-    Symlinks are preferred; when the platform forbids them, the report is copied to
-    `.factory/latest-report.md` so callers always have a discoverable artifact.
-    """
-    latest_run = factory_dir / "runs" / "latest"
-    latest_report = factory_dir / "latest-report.md"
-
-    try:
-        if latest_run.is_symlink() or latest_run.exists():
-            latest_run.unlink()
-        latest_run.symlink_to(run_id, target_is_directory=True)
-    except OSError as exc:
-        logger.debug("Could not update latest run symlink: %s", exc)
-
-    try:
-        if latest_report.is_symlink() or latest_report.exists():
-            latest_report.unlink()
-        latest_report.symlink_to(Path("runs") / run_id / "report.md")
-    except OSError as exc:
-        logger.debug("Could not symlink latest report, writing a copy instead: %s", exc)
-        try:
-            latest_report.write_text(report_text, encoding="utf-8")
-        except OSError as write_exc:
-            logger.warning("Could not write latest report pointer: %s", write_exc)
 
 
 def _persist_run_artifacts(
@@ -483,7 +456,13 @@ def _persist_run_artifacts(
         report_text = _build_review_report(last_response_text)
         if report_text:
             (run_dir / "report.md").write_text(report_text, encoding="utf-8")
-            _update_latest_report_pointers(factory_dir, run_id, report_text)
+            _update_latest_pointer(
+                factory_dir,
+                run_id,
+                filename="latest-report.md",
+                relative_target=Path("report.md"),
+                text=report_text,
+            )
 
     if config.active_stage == "build":
         notes_text = _extract_implementation_notes(last_response_text)
@@ -491,7 +470,13 @@ def _persist_run_artifacts(
             (run_dir / "implementation-notes.md").write_text(
                 notes_text, encoding="utf-8"
             )
-            _update_latest_build_notes_pointers(factory_dir, run_id, notes_text)
+            _update_latest_pointer(
+                factory_dir,
+                run_id,
+                filename="latest-build-notes.md",
+                relative_target=Path("implementation-notes.md"),
+                text=notes_text,
+            )
 
     return run_dir
 
