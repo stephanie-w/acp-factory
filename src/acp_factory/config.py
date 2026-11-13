@@ -25,6 +25,11 @@ USER_CONFIG_FILES = (
     Path("~/.config/acp-factory/config.toml"),
 )
 
+USER_FLEET_FILES = (
+    Path("~/.acp-factory/fleet.toml"),
+    Path("~/.config/acp-factory/fleet.toml"),
+)
+
 
 class AgentConfig(BaseModel):
     """ACP worker agent configuration (global or stage-specific)."""
@@ -245,6 +250,53 @@ class FleetConfig(BaseModel):
         description="Review round circuit-breaker cap (factory:needs-human). When unset, inherits the top-level max_review_rounds.",
     )
 
+    @classmethod
+    def from_file(cls, path: Path) -> FleetConfig:
+        """Load a fleet configuration from a TOML file.
+
+        Supports both an explicit ``[fleet]`` table and flat root-level keys
+        (``repositories``, ``max_active_branches_per_repo``, ``max_review_rounds``)
+        so operators do not have to remember which nesting style to use.
+        """
+        resolved_path = path.expanduser().resolve()
+        if resolved_path.suffix.lower() != ".toml":
+            raise ValueError(
+                f"Unsupported fleet config extension '{resolved_path.suffix}'. Use .toml."
+            )
+        if not resolved_path.is_file():
+            raise FileNotFoundError(
+                f"Fleet configuration file not found: {resolved_path}"
+            )
+
+        data: Any = tomllib.loads(resolved_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Fleet configuration file {resolved_path} must contain a mapping/object."
+            )
+        fleet_data = data.get("fleet", data)
+        if not isinstance(fleet_data, dict):
+            raise ValueError(
+                f"Fleet configuration file {resolved_path} must contain a 'fleet' table "
+                "or root-level fleet keys."
+            )
+        return cls.model_validate(fleet_data)
+
+
+def discover_fleet_config(fleet_config_path: Path | None = None) -> FleetConfig | None:
+    """Load an explicit fleet file or discover the operator-level default.
+
+    When ``fleet_config_path`` is supplied it must exist (raising ``FileNotFoundError``).
+    Otherwise ``USER_FLEET_FILES`` is checked in order and the first existing file wins;
+    ``None`` is returned when no operator-level fleet file is present.
+    """
+    if fleet_config_path is not None:
+        return FleetConfig.from_file(fleet_config_path)
+    for candidate in USER_FLEET_FILES:
+        expanded = candidate.expanduser()
+        if expanded.is_file():
+            return FleetConfig.from_file(expanded)
+    return None
+
 
 class FactoryConfig(BaseModel):
     """Top-level configuration for an acp-factory run."""
@@ -306,6 +358,25 @@ class FactoryConfig(BaseModel):
         if self.fleet is not None and self.fleet.max_review_rounds is not None:
             return self.fleet.max_review_rounds
         return self.max_review_rounds
+
+    def with_fleet_overlay(
+        self, fleet_config_path: Path | None = None
+    ) -> FactoryConfig:
+        """Return a copy with a fleet configuration overlaid.
+
+        An explicit ``fleet_config_path`` always wins. Otherwise an operator-level
+        default is discovered only when this config has no ``[fleet]`` section, so
+        a repo-local fleet definition is never silently replaced.
+        """
+        updated = self.model_copy(deep=True)
+        updated._config_dir = self._config_dir
+        if fleet_config_path is not None:
+            updated.fleet = FleetConfig.from_file(fleet_config_path)
+        elif self.fleet is None:
+            discovered = discover_fleet_config()
+            if discovered is not None:
+                updated.fleet = discovered
+        return updated
 
     @model_validator(mode="before")
     @classmethod
