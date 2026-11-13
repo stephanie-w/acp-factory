@@ -61,7 +61,9 @@ class AgentConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_command(cls, data: Any) -> Any:
+    def _normalize_command(
+        cls, data: str | dict[str, Any] | AgentConfig
+    ) -> dict[str, Any] | AgentConfig:
         if isinstance(data, str):
             return {"name": data}
         if isinstance(data, dict):
@@ -108,7 +110,9 @@ class CheckConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_shorthand(cls, data: Any) -> Any:
+    def _normalize_shorthand(
+        cls, data: str | dict[str, Any] | CheckConfig
+    ) -> dict[str, Any] | CheckConfig:
         if isinstance(data, str):
             return {"name": data, "cmd": data}
         if isinstance(data, dict) and "command" in data and "cmd" not in data:
@@ -181,7 +185,9 @@ class StageConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_stage(cls, data: Any) -> Any:
+    def _normalize_stage(
+        cls, data: dict[str, Any] | StageConfig
+    ) -> dict[str, Any] | StageConfig:
         if isinstance(data, dict):
             cmd = data.get("command")
             if isinstance(cmd, str):
@@ -398,7 +404,9 @@ class FactoryConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _parse_checks_mapping(cls, data: Any) -> Any:
+    def _parse_checks_mapping(
+        cls, data: dict[str, Any] | FactoryConfig
+    ) -> dict[str, Any] | FactoryConfig:
         """Allow `checks` in TOML/YAML to be either a list of CheckConfigs or a dict of named checks."""
         if not isinstance(data, dict):
             return data

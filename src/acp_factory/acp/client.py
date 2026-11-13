@@ -7,8 +7,11 @@ import contextlib
 import shutil
 import sys
 import uuid
+from collections.abc import Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 from unittest.mock import patch
 
@@ -253,18 +256,35 @@ class FactoryACPClient:
 
         orig_spawn = acpterm_agent_mod.spawn_stdio_transport
 
-        def _spawn_in_workspace(command: str, *args: str, **kwargs: Any) -> Any:
+        def _spawn_in_workspace(
+            command: str,
+            *args: str,
+            env: Mapping[str, str] | None = None,
+            cwd: str | Path | None = None,
+            stderr: int | None = -1,
+            limit: int | None = None,
+            shutdown_timeout: float = 2.0,
+        ) -> AbstractAsyncContextManager[
+            tuple[asyncio.StreamReader, asyncio.StreamWriter, asyncio.subprocess.Process]
+        ]:
             from ..runner.checks import build_workspace_env
 
-            kwargs["cwd"] = str(self.workspace)
-            kwargs["env"] = build_workspace_env(
-                self.workspace,
-                restrict_gh_writes=True,
-                resources_dir=self.resources_dir,
-                extra_env=self.extra_env,
-                strip_env=self.strip_env,
+            _ = env
+            return orig_spawn(
+                command,
+                *args,
+                env=build_workspace_env(
+                    self.workspace,
+                    restrict_gh_writes=True,
+                    resources_dir=self.resources_dir,
+                    extra_env=self.extra_env,
+                    strip_env=self.strip_env,
+                ),
+                cwd=str(self.workspace),
+                stderr=stderr,
+                limit=limit,
+                shutdown_timeout=shutdown_timeout,
             )
-            return orig_spawn(command, *args, **kwargs)
 
         try:
             with (
@@ -376,5 +396,10 @@ class FactoryACPClient:
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         await self.stop()

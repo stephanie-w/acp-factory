@@ -10,6 +10,8 @@ from typing import Any
 from acpterm.output import _state as acpterm_output_state
 from acpterm.transcript import TranscriptRecorder
 
+type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValue] | None
+
 
 @dataclass
 class UsageTotals:
@@ -20,7 +22,7 @@ class UsageTotals:
     turns: int = 0
 
 
-def _non_negative_int(value: Any) -> int:
+def _non_negative_int(value: int | float | bool | None) -> int:
     """Coerce a telemetry value to a non-negative int, defaulting to 0 for bad input."""
     if isinstance(value, bool) or value is None:
         return 0
@@ -33,7 +35,7 @@ def _non_negative_int(value: Any) -> int:
     return 0
 
 
-def _non_negative_float(value: Any) -> float:
+def _non_negative_float(value: int | float | bool | None) -> float:
     """Coerce a telemetry value to a non-negative float, defaulting to 0.0 for bad input."""
     if isinstance(value, bool) or value is None:
         return 0.0
@@ -74,7 +76,7 @@ def extract_usage_metrics(usage: dict[str, Any] | None) -> tuple[int, float]:
     return tokens, _non_negative_float(amount)
 
 
-def _safe_json_value(val: Any) -> Any:
+def _safe_json_value(val: object) -> JsonValue:
     """Recursively convert arbitrary objects into JSON-serializable primitives."""
     if val is None or isinstance(val, (bool, int, float, str)):
         return val
@@ -84,10 +86,11 @@ def _safe_json_value(val: Any) -> Any:
         return {str(k): _safe_json_value(v) for k, v in val.items()}
     if hasattr(val, "__fspath__"):
         return str(val)
-    if hasattr(val, "model_dump") and callable(val.model_dump):
-        return _safe_json_value(val.model_dump())
+    model_dump = getattr(val, "model_dump", None)
+    if callable(model_dump):
+        return _safe_json_value(model_dump())
     if hasattr(val, "__dict__"):
-        return _safe_json_value(val.__dict__)
+        return _safe_json_value(vars(val))
     return str(val)
 
 
@@ -99,7 +102,7 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return text[:max_chars] + f"\n... [truncated {omitted} chars]"
 
 
-def _condense_value(val: Any, max_chars: int) -> Any:
+def _condense_value(val: object, max_chars: int) -> JsonValue:
     """Recursively condense structured data by truncating long strings or deep arrays."""
     safe_val = _safe_json_value(val)
     if isinstance(safe_val, str):

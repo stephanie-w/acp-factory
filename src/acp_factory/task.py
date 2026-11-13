@@ -245,7 +245,7 @@ class TaskContext(BaseModel):
     worktree_path: Path | None = None
     pr_url: str | None = None
 
-    def model_post_init(self, __context: Any) -> None:
+    def model_post_init(self, __context: object) -> None:
         if not self.branch:
             self.branch = f"factory/issue-{self.issue_number}"
 

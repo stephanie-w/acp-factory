@@ -215,8 +215,11 @@ def test_helpers_safe_json_and_condense() -> None:
     # Test list truncation
     long_list = list(range(50))
     condensed_list = _condense_value(long_list, 100)
+    assert isinstance(condensed_list, list)
     assert len(condensed_list) == 26  # 25 items + 1 omitted notice
-    assert "omitted" in condensed_list[-1]
+    last = condensed_list[-1]
+    assert isinstance(last, str)
+    assert "omitted" in last
 
     # Test text truncation
     short = _truncate_text("hello", 10)

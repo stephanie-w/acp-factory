@@ -11,7 +11,8 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+
+from ..ui.display import FactoryDisplay
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,7 @@ async def ensure_workspace_git_sync(
     repo_root: Path,
     *,
     offline: bool = False,
-    display: Any = None,
+    display: FactoryDisplay | None = None,
 ) -> int:
     """Ensure the local repository is in sync with its upstream remote tracking branch.
 
