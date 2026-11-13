@@ -192,15 +192,24 @@ Each execution stores structured artifacts under `.factory/runs/<run-id>/`:
 - **`attempt-<N>/transcript.md`**: Full raw Markdown transcript for human deep dives.
 - **`attempt-<N>/check-<N>-<slug>.log`**: Raw stdout/stderr execution output from verification checks.
 - **`report.md`**: Standalone clean Markdown review report (verdict, acceptance-criteria verification, findings, and security audit) written when the `review` stage completes. Non-review stages do not produce it.
+- **`implementation-notes.md`**: Standalone clean Markdown implementation summary (acceptance-criteria test mapping, Before/After evidence, Door & Blast Radius, and tested edge cases) extracted from the builder's response when the `build` stage completes. Non-build stages, or build responses without an `### Implementation Summary`, do not produce it.
 
 For review runs, two pointer artifacts make the newest report easy to find without scanning run IDs:
 - **`.factory/runs/latest`**: Symlink to the newest run directory.
 - **`.factory/latest-report.md`**: Symlink to `runs/<run-id>/report.md` (or a direct copy when the platform refuses symlinks).
 
+For build runs, equivalent pointers surface the newest implementation notes:
+- **`.factory/runs/latest`**: Symlink to the newest run directory.
+- **`.factory/latest-build-notes.md`**: Symlink to `runs/<run-id>/implementation-notes.md` (or a direct copy when the platform refuses symlinks).
+
 ```bash
 cat .factory/runs/latest/report.md
 # or
 cat .factory/latest-report.md
+
+cat .factory/runs/latest/implementation-notes.md
+# or
+cat .factory/latest-build-notes.md
 ```
 
 You can easily query and analyze transcripts using `jq`:

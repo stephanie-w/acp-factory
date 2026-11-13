@@ -664,6 +664,8 @@ def issue_cmd(
         )
     if outcome.report_path:
         console.print(f"[bold cyan]Review Report:[/bold cyan] {outcome.report_path}")
+    if outcome.build_notes_path:
+        console.print(f"[bold cyan]Build Notes:[/bold cyan] {outcome.build_notes_path}")
     raise typer.Exit(code=outcome.exit_code)
 
 
@@ -926,6 +928,10 @@ def next_cmd(
             if outcome.report_path:
                 console.print(
                     f"[bold cyan]Review Report:[/bold cyan] {outcome.report_path}"
+                )
+            if outcome.build_notes_path:
+                console.print(
+                    f"[bold cyan]Build Notes:[/bold cyan] {outcome.build_notes_path}"
                 )
             if outcome.exit_code != 0:
                 exit_code = outcome.exit_code
