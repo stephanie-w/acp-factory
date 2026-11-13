@@ -119,7 +119,6 @@ def test_history_cmd_table_renders(tmp_path: Path) -> None:
         "2026-11-13T16:00:00+00:00",
         issue_number=7,
         repo_slug="acme/core",
-        agent="opencode",
     )
 
     out = StringIO()
@@ -134,4 +133,3 @@ def test_history_cmd_table_renders(tmp_path: Path) -> None:
     assert "run-a" in text
     assert "#7" in text
     assert "acme/core" in text
-    assert "opencode" in text

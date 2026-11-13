@@ -118,7 +118,7 @@ Or automatically process the next actionable issue in the repository queue:
 acp-factory next
 ```
 
-View a chronological history of local runs (from `.factory/runs/*/run.json`, linking each run to its issue, repo, branch, and ACP session):
+View a chronological history of local runs (from `.factory/runs/*/run.json`, linking each run to its issue, repo, and branch; `--json` exposes full metadata including agent, model, and session id):
 
 ```bash
 acp-factory history

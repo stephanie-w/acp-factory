@@ -1256,8 +1256,6 @@ def history_cmd(
     table.add_column("Issue", justify="right", style="bold cyan")
     table.add_column("Repo")
     table.add_column("Branch", style="yellow")
-    table.add_column("Agent", style="green")
-    table.add_column("Session", style="magenta")
     table.add_column("Dur")
     table.add_column("Turns", justify="right")
     table.add_column("Tokens", justify="right")
@@ -1294,8 +1292,6 @@ def history_cmd(
             f"#{issue}" if issue is not None else "-",
             str(rec.get("repo_slug") or "-"),
             str(rec.get("branch") or "-"),
-            str(rec.get("agent") or "-"),
-            str(rec.get("session_id") or "-"),
             f"{dur:.0f}s" if isinstance(dur, (int, float)) else "-",
             turns_cell,
             tokens_cell,
