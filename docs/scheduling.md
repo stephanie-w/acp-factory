@@ -72,9 +72,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=stephanie
-EnvironmentFile=-/home/stephanie/.config/acp-factory/scheduler.env
-ExecStart=/home/stephanie/.local/bin/acp-factory next --fleet
+User=<your-user>
+EnvironmentFile=-/home/<your-user>/.config/acp-factory/scheduler.env
+ExecStart=/home/<your-user>/.local/bin/acp-factory next --fleet
 TimeoutStartSec=45min
 
 # Optional: notify on failure (requires a working mail or notify setup)
@@ -113,7 +113,8 @@ Notes:
   # OPENAI_API_KEY=...
   ```
 
-- Single-repo variant: set `WorkingDirectory=/home/stephanie/DEV/core-lib` and `ExecStart=/home/stephanie/.local/bin/acp-factory next`.
+- Single-repo variant: set `WorkingDirectory=/home/<your-user>/DEV/<repo>` and `ExecStart=/home/<your-user>/.local/bin/acp-factory next`.
+- Replace `<your-user>` and the absolute `ExecStart` path with your own before enabling (systemd does not expand `~`).
 - Inspect logs with `journalctl -u acp-factory.service` and `systemctl list-timers acp-factory.timer`.
 
 ## Verifying Before Going Live
