@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -1217,18 +1216,6 @@ def init_cmd(
     console.print(f"[bold green]✓ Created[/bold green] {target}")
 
 
-def _format_run_time(record: dict[str, object]) -> str:
-    """Render a run's timestamp compactly for the history table (UTC)."""
-    raw = record.get("timestamp")
-    if isinstance(raw, str):
-        try:
-            return datetime.fromisoformat(raw).strftime("%m-%d %H:%M")
-        except ValueError:
-            return raw[:16]
-    run_id = record.get("run_id")
-    return str(run_id) if run_id else "-"
-
-
 @app.command("history")
 def history_cmd(
     workspace: Annotated[
@@ -1264,11 +1251,12 @@ def history_cmd(
         return
 
     table = Table(title="acp-factory Run History")
-    table.add_column("Time", style="dim")
+    table.add_column("Run ID", style="dim")
     table.add_column("Stage", style="cyan")
     table.add_column("Issue", justify="right", style="bold cyan")
     table.add_column("Repo")
     table.add_column("Branch", style="yellow")
+    table.add_column("Agent", style="green")
     table.add_column("Session", style="magenta")
     table.add_column("Dur")
     table.add_column("Turns", justify="right")
@@ -1301,11 +1289,12 @@ def history_cmd(
             f"${cost:.4f}" if telemetry and isinstance(cost, (int, float)) else "-"
         )
         table.add_row(
-            _format_run_time(rec),
+            str(rec.get("run_id") or "-"),
             str(rec.get("stage") or "-"),
             f"#{issue}" if issue is not None else "-",
             str(rec.get("repo_slug") or "-"),
             str(rec.get("branch") or "-"),
+            str(rec.get("agent") or "-"),
             str(rec.get("session_name") or "-"),
             f"{dur:.0f}s" if isinstance(dur, (int, float)) else "-",
             turns_cell,
