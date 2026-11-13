@@ -37,6 +37,7 @@ from ..task import (
     StageVerdict,
     TaskContext,
     _clean_markdown_stage_body,
+    _find_terminal_status_or_verdict,
     budget_usage_from_meta,
     extract_factory_findings,
     format_cost_usd,
@@ -81,6 +82,7 @@ class FactoryRunOutcome:
     dry_run_plan: DryRunPlan | None = None
     usage: UsageTotals = field(default_factory=UsageTotals)
     budget_breached: bool = False
+    report_path: Path | None = None
 
 
 def check_turn_cap(turns_used: int, budget: BudgetConfig) -> str | None:
@@ -278,6 +280,49 @@ def _slugify(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip().lower()).strip("-") or "check"
 
 
+def _build_review_report(response_text: str) -> str:
+    """Return a standalone review report that retains the terminal verdict/status token."""
+    cleaned = _clean_markdown_stage_body(response_text) or response_text.strip()
+    terminal_match, _ = _find_terminal_status_or_verdict(response_text)
+    if terminal_match is not None:
+        terminal_line = response_text[
+            terminal_match.start() : terminal_match.end()
+        ].strip()
+        if terminal_line and terminal_line not in cleaned:
+            cleaned = f"{cleaned}\n\n{terminal_line}".strip()
+    return cleaned
+
+
+def _update_latest_report_pointers(
+    factory_dir: Path, run_id: str, report_text: str
+) -> None:
+    """Point `.factory/runs/latest` and `.factory/latest-report.md` at the newest report.
+
+    Symlinks are preferred; when the platform forbids them, the report is copied to
+    `.factory/latest-report.md` so callers always have a discoverable artifact.
+    """
+    latest_run = factory_dir / "runs" / "latest"
+    latest_report = factory_dir / "latest-report.md"
+
+    try:
+        if latest_run.is_symlink() or latest_run.exists():
+            latest_run.unlink()
+        latest_run.symlink_to(run_id, target_is_directory=True)
+    except OSError as exc:
+        logger.debug("Could not update latest run symlink: %s", exc)
+
+    try:
+        if latest_report.is_symlink() or latest_report.exists():
+            latest_report.unlink()
+        latest_report.symlink_to(Path("runs") / run_id / "report.md")
+    except OSError as exc:
+        logger.debug("Could not symlink latest report, writing a copy instead: %s", exc)
+        try:
+            latest_report.write_text(report_text, encoding="utf-8")
+        except OSError as write_exc:
+            logger.warning("Could not write latest report pointer: %s", write_exc)
+
+
 def _persist_run_artifacts(
     workspace: Path,
     run_id: str,
@@ -293,6 +338,7 @@ def _persist_run_artifacts(
     usage: UsageTotals | None = None,
     turn_summaries: list[dict[str, Any]] | None = None,
     turn_condensed: list[dict[str, Any]] | None = None,
+    last_response_text: str = "",
 ) -> Path | None:
     """Write structured run logs into `.factory/runs/<run-id>/` if `.factory/` is present."""
     factory_dir = workspace / ".factory"
@@ -363,6 +409,13 @@ def _persist_run_artifacts(
         },
     }
     (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
+
+    if config.active_stage == "review" and last_response_text.strip():
+        report_text = _build_review_report(last_response_text)
+        if report_text:
+            (run_dir / "report.md").write_text(report_text, encoding="utf-8")
+            _update_latest_report_pointers(factory_dir, run_id, report_text)
+
     return run_dir
 
 
@@ -642,6 +695,12 @@ async def run_factory(
         usage=usage,
         turn_summaries=turn_summaries,
         turn_condensed=turn_condensed,
+        last_response_text=last_response_text,
+    )
+    report_path = (
+        run_dir / "report.md"
+        if run_dir is not None and (run_dir / "report.md").is_file()
+        else None
     )
     ui.show_final_summary(
         succeeded=succeeded,
@@ -650,6 +709,7 @@ async def run_factory(
         total_duration=total_duration,
         kept_worktree_path=preserved_wt,
         failure_reason=None if succeeded else failure_reason,
+        report_path=report_path,
     )
     return FactoryRunOutcome(
         succeeded=succeeded,
@@ -663,6 +723,7 @@ async def run_factory(
         failure_reason=None if succeeded else failure_reason,
         usage=usage,
         budget_breached=budget_breached,
+        report_path=report_path,
     )
 
 
