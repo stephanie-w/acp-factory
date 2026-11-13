@@ -662,6 +662,8 @@ def issue_cmd(
         console.print(
             f"[bold red]Issue #{issue_number} stage failed:[/bold red] {outcome.failure_reason}"
         )
+    if outcome.report_path:
+        console.print(f"[bold cyan]Review Report:[/bold cyan] {outcome.report_path}")
     raise typer.Exit(code=outcome.exit_code)
 
 
@@ -749,6 +751,8 @@ def review_cmd(
         )
     elif outcome.failure_reason:
         console.print(f"[bold red]Review failed:[/bold red] {outcome.failure_reason}")
+    if outcome.report_path:
+        console.print(f"[bold cyan]Review Report:[/bold cyan] {outcome.report_path}")
     raise typer.Exit(code=outcome.exit_code)
 
 
@@ -918,6 +922,10 @@ def next_cmd(
                 console.print(
                     f"[bold green]✓ Issue #{t.issue_number}[/bold green] "
                     f"-> [bold yellow]{v.target_label}[/bold yellow] ({v.summary})"
+                )
+            if outcome.report_path:
+                console.print(
+                    f"[bold cyan]Review Report:[/bold cyan] {outcome.report_path}"
                 )
             if outcome.exit_code != 0:
                 exit_code = outcome.exit_code

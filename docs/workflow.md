@@ -191,6 +191,17 @@ Each execution stores structured artifacts under `.factory/runs/<run-id>/`:
 - **`attempt-<N>/transcript.json`**: Complete structured JSON event tree containing all tool invocations, inputs, file operations, permissions, and duration.
 - **`attempt-<N>/transcript.md`**: Full raw Markdown transcript for human deep dives.
 - **`attempt-<N>/check-<N>-<slug>.log`**: Raw stdout/stderr execution output from verification checks.
+- **`report.md`**: Standalone clean Markdown review report (verdict, acceptance-criteria verification, findings, and security audit) written when the `review` stage completes. Non-review stages do not produce it.
+
+For review runs, two pointer artifacts make the newest report easy to find without scanning run IDs:
+- **`.factory/runs/latest`**: Symlink to the newest run directory.
+- **`.factory/latest-report.md`**: Symlink to `runs/<run-id>/report.md` (or a direct copy when the platform refuses symlinks).
+
+```bash
+cat .factory/runs/latest/report.md
+# or
+cat .factory/latest-report.md
+```
 
 You can easily query and analyze transcripts using `jq`:
 

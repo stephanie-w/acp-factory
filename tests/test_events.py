@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+from io import StringIO
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+from rich.console import Console
 
 from acp_factory.acp.events import (
     TurnEventTracker,
@@ -13,7 +18,13 @@ from acp_factory.acp.events import (
     _truncate_text,
 )
 from acp_factory.config import FactoryConfig
-from acp_factory.runner.loop import _persist_run_artifacts
+from acp_factory.runner.loop import (
+    FactoryRunOutcome,
+    _persist_run_artifacts,
+    run_factory,
+)
+from acp_factory.task import StageVerdict, TaskContext
+from acp_factory.ui.display import FactoryDisplay
 
 
 def test_turn_summary_to_dict_basic() -> None:
@@ -210,3 +221,264 @@ def test_helpers_safe_json_and_condense() -> None:
     assert short == "hello"
     long_txt = _truncate_text("hello world long text", 5)
     assert long_txt.startswith("hello\n... [truncated 16 chars]")
+
+
+def _persist(
+    workspace: Path,
+    *,
+    config: FactoryConfig,
+    run_id: str,
+    response_text: str = "",
+    succeeded: bool = True,
+) -> Path | None:
+    return _persist_run_artifacts(
+        workspace,
+        run_id,
+        config,
+        succeeded=succeeded,
+        attempts_used=1,
+        total_duration=0.5,
+        setup_logs=[],
+        turn_transcripts=[],
+        check_history=[],
+        failure_reason=None,
+        last_response_text=response_text,
+    )
+
+
+def test_persist_run_artifacts_review_report(tmp_path: Path) -> None:
+    """AC-1: review responses are persisted as a clean standalone report with the verdict."""
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Review changes", active_stage="review")
+    response = (
+        "Sure, let me walk you through it.\n\n"
+        "# Review Report\n\n"
+        "## Acceptance Criteria\n- AC-1: pass\n\n"
+        "## Findings\n- None.\n\n"
+        "VERDICT: ACCEPTED\n"
+    )
+
+    run_dir = _persist(
+        tmp_path, config=config, run_id="run-review", response_text=response
+    )
+
+    assert run_dir is not None
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert report.startswith("# Review Report")
+    assert "## Acceptance Criteria" in report
+    assert "## Findings" in report
+    assert "VERDICT: ACCEPTED" in report
+    assert "Sure, let me walk you through it." not in report
+
+    # A verdict-only response still produces a non-empty report retaining the token.
+    verdict_only_dir = _persist(
+        tmp_path,
+        config=config,
+        run_id="run-verdict-only",
+        response_text="VERDICT: REVISION_NEEDED",
+    )
+    assert verdict_only_dir is not None
+    verdict_report = (verdict_only_dir / "report.md").read_text(encoding="utf-8")
+    assert verdict_report.strip() == "VERDICT: REVISION_NEEDED"
+
+    # Whitespace-only review output must not create a report.
+    blank_dir = _persist(
+        tmp_path, config=config, run_id="run-blank", response_text="  \n\t "
+    )
+    assert blank_dir is not None
+    assert not (blank_dir / "report.md").exists()
+
+
+def test_latest_report_pointer_symlink_and_fallback(tmp_path: Path) -> None:
+    """AC-2: latest pointers are relative symlinks that fall back to a copy on OSError."""
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Review changes", active_stage="review")
+    response = "# Review Report\n\n## Findings\n- None.\n\nVERDICT: ACCEPTED\n"
+
+    run_dir = _persist(
+        tmp_path, config=config, run_id="run-abc", response_text=response
+    )
+    assert run_dir is not None
+
+    latest_run = tmp_path / ".factory" / "runs" / "latest"
+    latest_report = tmp_path / ".factory" / "latest-report.md"
+    assert latest_run.is_symlink()
+    assert os.readlink(latest_run) == "run-abc"
+    assert latest_report.is_symlink()
+    assert os.readlink(latest_report) == str(Path("runs") / "run-abc" / "report.md")
+    assert latest_report.read_text(encoding="utf-8") == (
+        run_dir / "report.md"
+    ).read_text(encoding="utf-8")
+
+    # When the platform/filesystem refuses symlinks, the pointer gracefully becomes a copy.
+    with patch.object(Path, "symlink_to", side_effect=OSError("symlinks disabled")):
+        fallback_dir = _persist(
+            tmp_path, config=config, run_id="run-def", response_text=response
+        )
+    assert fallback_dir is not None
+    assert latest_report.exists()
+    assert not latest_report.is_symlink()
+    assert latest_report.read_text(encoding="utf-8") == (
+        fallback_dir / "report.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_persist_run_artifacts_non_review_stage(tmp_path: Path) -> None:
+    """AC-3: non-review stages and missing `.factory/` never write a report or raise."""
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Build it", active_stage="build")
+
+    run_dir = _persist(
+        tmp_path,
+        config=config,
+        run_id="run-build",
+        response_text="# Build report\nSTATUS: DONE",
+    )
+    assert run_dir is not None
+    assert not (run_dir / "report.md").exists()
+    assert not (tmp_path / ".factory" / "latest-report.md").exists()
+    assert not (tmp_path / ".factory" / "runs" / "latest").exists()
+
+    # A workspace without `.factory/` is a no-op, not an error.
+    bare_workspace = tmp_path / "bare"
+    bare_workspace.mkdir()
+    assert (
+        _persist(
+            bare_workspace,
+            config=FactoryConfig(task="Review", active_stage="review"),
+            run_id="run-bare",
+            response_text="# Review\nVERDICT: ACCEPTED",
+        )
+        is None
+    )
+
+
+async def test_factory_run_outcome_report_path(tmp_path: Path) -> None:
+    """AC-4: `run_factory` exposes the persisted review report path on the outcome."""
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Review changes", active_stage="review")
+
+    class FakeReviewClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.tracker = AsyncMock()
+            self.tracker.history = []
+
+        async def __aenter__(self) -> FakeReviewClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def send_prompt(self, prompt: str, **kwargs: object) -> object:
+            from acp_factory.acp.events import TurnSummary
+
+            return type(
+                "TurnResult",
+                (),
+                {
+                    "stop_reason": "end_turn",
+                    "summary": TurnSummary(
+                        prompt=prompt,
+                        response_text="# Review Report\n\nAll good.\n\nVERDICT: ACCEPTED",
+                        thought_text="",
+                        stop_reason="end_turn",
+                        duration_seconds=0.01,
+                        tool_call_count=0,
+                    ),
+                },
+            )()
+
+    with patch("acp_factory.runner.loop.FactoryACPClient", FakeReviewClient):
+        outcome = await run_factory(config, tmp_path)
+
+    assert outcome.succeeded is True
+    run_dir = outcome.run_dir
+    assert run_dir is not None
+    assert outcome.report_path is not None
+    assert outcome.report_path == run_dir / "report.md"
+    assert outcome.report_path.is_file()
+    assert "VERDICT: ACCEPTED" in outcome.report_path.read_text(encoding="utf-8")
+
+    # The field defaults to None for callers that construct outcomes directly.
+    assert (
+        FactoryRunOutcome(
+            succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
+        ).report_path
+        is None
+    )
+
+
+def test_show_final_summary_displays_report_path(tmp_path: Path) -> None:
+    """AC-5: the final summary grid surfaces the report path."""
+    buffer = StringIO()
+    display = FactoryDisplay(Console(file=buffer, width=200, highlight=False))
+    report_path = Path(".factory/runs/run-1/report.md")
+
+    display.show_final_summary(
+        succeeded=True,
+        attempts_used=1,
+        max_attempts=1,
+        total_duration=0.1,
+        report_path=report_path,
+    )
+
+    output = buffer.getvalue()
+    assert "Report:" in output
+    assert str(report_path) in output
+    assert "[cyan]" not in output
+
+
+def test_cli_completion_prints_report_path(tmp_path: Path) -> None:
+    """AC-6: `issue`, `review`, and `next` print the review report path when present."""
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+
+    report_path = tmp_path / ".factory" / "runs" / "run-1" / "report.md"
+    verdict = StageVerdict(
+        stage="review",
+        status="accepted",
+        target_label="factory:pr-ready",
+        updated_factory_block="",
+        summary="ok",
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.0,
+        stage_verdict=verdict,
+        report_path=report_path,
+    )
+    runner = CliRunner()
+
+    with patch("acp_factory.cli.run_issue_stage", new=AsyncMock(return_value=outcome)):
+        issue_res = runner.invoke(app, ["issue", "5", "--workspace", str(tmp_path)])
+    assert issue_res.exit_code == 0
+    assert "Review Report:" in issue_res.output
+    assert str(report_path) in issue_res.output.replace("\n", "")
+
+    with patch(
+        "acp_factory.cli.run_branch_review", new=AsyncMock(return_value=outcome)
+    ):
+        review_res = runner.invoke(app, ["review", "--workspace", str(tmp_path)])
+    assert review_res.exit_code == 0
+    assert "Review Report:" in review_res.output
+    assert str(report_path) in review_res.output.replace("\n", "")
+
+    task = TaskContext(issue_number=5, title="Review me", labels=["factory:review"])
+    with (
+        patch(
+            "acp_factory.cli.FactoryConfig.discover",
+            return_value=FactoryConfig(task="Review", active_stage="review"),
+        ),
+        patch(
+            "acp_factory.cli.list_actionable_issues",
+            new=AsyncMock(return_value=[task]),
+        ),
+        patch("acp_factory.cli.run_issue_stage", new=AsyncMock(return_value=outcome)),
+    ):
+        next_res = runner.invoke(app, ["next", "--workspace", str(tmp_path)])
+    assert next_res.exit_code == 0
+    assert "Review Report:" in next_res.output
+    assert str(report_path) in next_res.output.replace("\n", "")
