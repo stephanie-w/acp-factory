@@ -21,7 +21,9 @@ from acp_factory.config import FactoryConfig
 from acp_factory.runner.loop import (
     FactoryRunOutcome,
     _persist_run_artifacts,
+    run_branch_review,
     run_factory,
+    run_issue_stage,
 )
 from acp_factory.task import StageVerdict, TaskContext
 from acp_factory.ui.display import FactoryDisplay
@@ -482,3 +484,316 @@ def test_cli_completion_prints_report_path(tmp_path: Path) -> None:
     assert next_res.exit_code == 0
     assert "Review Report:" in next_res.output
     assert str(report_path) in next_res.output.replace("\n", "")
+
+
+def _build_summary_response() -> str:
+    return (
+        "Sure, here is a walkthrough of my work.\n\n"
+        "### Implementation Summary\n"
+        "- **Files Modified**: `src/app.py`\n"
+        "- **Door & Blast Radius**: Two-way — Isolated\n"
+        "- **Evidence**:\n"
+        "  - **Before**: `1 failed`\n"
+        "  - **After**: `1 passed`\n\n"
+        "STATUS: DONE\n"
+    )
+
+
+def _factory_workspace(root: Path, name: str) -> Path:
+    workspace = root / name
+    (workspace / ".factory").mkdir(parents=True)
+    return workspace
+
+
+def test_persist_run_artifacts_build_notes(tmp_path: Path) -> None:
+    """AC-1: build summaries persist cleanly and other stages/responses stay silent."""
+    build_ws = _factory_workspace(tmp_path, "build")
+    build_config = FactoryConfig(task="Build it", active_stage="build")
+    run_dir = _persist(
+        build_ws,
+        config=build_config,
+        run_id="run-build-notes",
+        response_text=_build_summary_response(),
+    )
+
+    assert run_dir is not None
+    notes = (run_dir / "implementation-notes.md").read_text(encoding="utf-8")
+    assert notes.startswith("### Implementation Summary")
+    assert "- **Files Modified**: `src/app.py`" in notes
+    assert "- **After**: `1 passed`" in notes
+    assert "Sure, here is a walkthrough" not in notes
+    assert "STATUS: DONE" not in notes
+
+    review_ws = _factory_workspace(tmp_path, "review")
+    review_dir = _persist(
+        review_ws,
+        config=FactoryConfig(task="Review it", active_stage="review"),
+        run_id="run-review-notes",
+        response_text=_build_summary_response(),
+    )
+    assert review_dir is not None
+    assert not (review_dir / "implementation-notes.md").exists()
+    assert not (review_ws / ".factory" / "latest-build-notes.md").exists()
+
+    plain_ws = _factory_workspace(tmp_path, "plain")
+    plain_dir = _persist(
+        plain_ws,
+        config=FactoryConfig(task="Build it", active_stage="build"),
+        run_id="run-build-plain",
+        response_text="# Build complete\n\nSTATUS: DONE",
+    )
+    assert plain_dir is not None
+    assert not (plain_dir / "implementation-notes.md").exists()
+    assert not (plain_ws / ".factory" / "latest-build-notes.md").exists()
+    assert not (plain_ws / ".factory" / "runs" / "latest").exists()
+
+
+def test_latest_build_notes_symlink_and_fallback(tmp_path: Path) -> None:
+    """AC-2: build-note pointers are relative symlinks that fall back to a copy."""
+    workspace = _factory_workspace(tmp_path, "ws")
+    config = FactoryConfig(task="Build it", active_stage="build")
+
+    run_dir = _persist(
+        workspace,
+        config=config,
+        run_id="run-build",
+        response_text=_build_summary_response(),
+    )
+    assert run_dir is not None
+
+    latest_run = workspace / ".factory" / "runs" / "latest"
+    latest_notes = workspace / ".factory" / "latest-build-notes.md"
+    assert latest_run.is_symlink()
+    assert os.readlink(latest_run) == "run-build"
+    assert latest_notes.is_symlink()
+    assert os.readlink(latest_notes) == str(
+        Path("runs") / "run-build" / "implementation-notes.md"
+    )
+    assert latest_notes.read_text(encoding="utf-8") == (
+        run_dir / "implementation-notes.md"
+    ).read_text(encoding="utf-8")
+
+    with patch.object(Path, "symlink_to", side_effect=OSError("symlinks disabled")):
+        fallback_dir = _persist(
+            workspace,
+            config=config,
+            run_id="run-build-fallback",
+            response_text=_build_summary_response(),
+        )
+    assert fallback_dir is not None
+    assert latest_notes.exists()
+    assert not latest_notes.is_symlink()
+    assert latest_notes.read_text(encoding="utf-8") == (
+        fallback_dir / "implementation-notes.md"
+    ).read_text(encoding="utf-8")
+
+
+async def test_factory_run_outcome_build_notes_path(tmp_path: Path) -> None:
+    """AC-3: `run_factory` exposes the persisted build notes path on the outcome."""
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Build it", active_stage="build")
+
+    class FakeBuildClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.tracker = AsyncMock()
+            self.tracker.history = []
+
+        async def __aenter__(self) -> FakeBuildClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def send_prompt(self, prompt: str, **kwargs: object) -> object:
+            from acp_factory.acp.events import TurnSummary
+
+            return type(
+                "TurnResult",
+                (),
+                {
+                    "stop_reason": "end_turn",
+                    "summary": TurnSummary(
+                        prompt=prompt,
+                        response_text=_build_summary_response(),
+                        thought_text="",
+                        stop_reason="end_turn",
+                        duration_seconds=0.01,
+                        tool_call_count=0,
+                    ),
+                },
+            )()
+
+    with patch("acp_factory.runner.loop.FactoryACPClient", FakeBuildClient):
+        outcome = await run_factory(config, tmp_path)
+
+    assert outcome.succeeded is True
+    run_dir = outcome.run_dir
+    assert run_dir is not None
+    assert outcome.build_notes_path is not None
+    assert outcome.build_notes_path == run_dir / "implementation-notes.md"
+    assert outcome.build_notes_path.is_file()
+    assert "### Implementation Summary" in outcome.build_notes_path.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        FactoryRunOutcome(
+            succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
+        ).build_notes_path
+        is None
+    )
+
+
+def test_show_final_summary_displays_build_notes_path(tmp_path: Path) -> None:
+    """AC-4: the final summary grid surfaces the build notes path."""
+    buffer = StringIO()
+    display = FactoryDisplay(Console(file=buffer, width=200, highlight=False))
+    build_notes_path = Path(".factory/runs/run-1/implementation-notes.md")
+
+    display.show_final_summary(
+        succeeded=True,
+        attempts_used=1,
+        max_attempts=1,
+        total_duration=0.1,
+        build_notes_path=build_notes_path,
+    )
+
+    output = buffer.getvalue()
+    assert "Build Notes:" in output
+    assert str(build_notes_path) in output
+    assert "[cyan]" not in output
+
+
+def test_cli_completion_prints_build_notes_path(tmp_path: Path) -> None:
+    """AC-5: `issue` and `next` print the build notes path when present."""
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+
+    build_notes_path = (
+        tmp_path / ".factory" / "runs" / "run-1" / "implementation-notes.md"
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.0,
+        build_notes_path=build_notes_path,
+    )
+    runner = CliRunner()
+
+    with patch("acp_factory.cli.run_issue_stage", new=AsyncMock(return_value=outcome)):
+        issue_res = runner.invoke(app, ["issue", "5", "--workspace", str(tmp_path)])
+    assert issue_res.exit_code == 0
+    assert "Build Notes:" in issue_res.output
+    assert str(build_notes_path) in issue_res.output.replace("\n", "")
+
+    task = TaskContext(issue_number=5, title="Build me", labels=["factory:build"])
+    with (
+        patch(
+            "acp_factory.cli.FactoryConfig.discover",
+            return_value=FactoryConfig(task="Build", active_stage="build"),
+        ),
+        patch(
+            "acp_factory.cli.list_actionable_issues",
+            new=AsyncMock(return_value=[task]),
+        ),
+        patch("acp_factory.cli.run_issue_stage", new=AsyncMock(return_value=outcome)),
+    ):
+        next_res = runner.invoke(app, ["next", "--workspace", str(tmp_path)])
+    assert next_res.exit_code == 0
+    assert "Build Notes:" in next_res.output
+    assert str(build_notes_path) in next_res.output.replace("\n", "")
+
+
+async def test_review_stage_injects_prior_build_notes(tmp_path: Path) -> None:
+    """AC-6: `run_issue_stage` feeds latest build notes into the review context."""
+    (tmp_path / ".factory").mkdir()
+    (tmp_path / ".factory" / "latest-build-notes.md").write_text(
+        "### Implementation Summary\n- **Files Modified**: `src/app.py`\n",
+        encoding="utf-8",
+    )
+    task = TaskContext(issue_number=7, title="Review me", labels=["factory:review"])
+    captured: list[FactoryConfig] = []
+
+    async def fake_run_factory(
+        config: FactoryConfig, workspace: Path, **kwargs: object
+    ) -> FactoryRunOutcome:
+        captured.append(config)
+        return FactoryRunOutcome(
+            succeeded=False,
+            exit_code=1,
+            attempts_used=1,
+            total_duration_seconds=0.0,
+            failure_reason="stop",
+        )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.FactoryConfig.discover",
+            return_value=FactoryConfig(task="base"),
+        ),
+        patch("acp_factory.runner.loop.run_factory", new=fake_run_factory),
+        patch("acp_factory.runner.loop.transition_issue_label", new=AsyncMock()),
+    ):
+        outcome = await run_issue_stage(tmp_path, 7, stage_override="review")
+
+    assert outcome.succeeded is False
+    assert captured
+    injected = captured[0].task
+    assert "## Builder Implementation Notes" in injected
+    assert "Treat claimed tests" in injected
+    assert "- **Files Modified**: `src/app.py`" in injected
+
+
+async def test_branch_review_injects_prior_build_notes(tmp_path: Path) -> None:
+    """AC-6: `run_branch_review` resolves build notes via `runs/latest` fallback."""
+    run_dir = tmp_path / ".factory" / "runs" / "run-x"
+    run_dir.mkdir(parents=True)
+    (run_dir / "implementation-notes.md").write_text(
+        "### Implementation Summary\n- **Evidence**: `1 passed`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".factory" / "runs" / "latest").symlink_to(
+        "run-x", target_is_directory=True
+    )
+    captured: list[FactoryConfig] = []
+
+    async def fake_run_factory(
+        config: FactoryConfig, workspace: Path, **kwargs: object
+    ) -> FactoryRunOutcome:
+        captured.append(config)
+        return FactoryRunOutcome(
+            succeeded=False,
+            exit_code=1,
+            attempts_used=1,
+            total_duration_seconds=0.0,
+        )
+
+    with (
+        patch(
+            "acp_factory.runner.loop.FactoryConfig.discover",
+            return_value=FactoryConfig(task="base"),
+        ),
+        patch("acp_factory.runner.loop.run_factory", new=fake_run_factory),
+        patch(
+            "acp_factory.runner.loop.get_head_sha",
+            new=AsyncMock(return_value="abc1234"),
+        ),
+        patch(
+            "acp_factory.runner.loop.is_worktree_clean",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "acp_factory.runner.worktree._run_git",
+            new=AsyncMock(return_value=(0, "subject", "")),
+        ),
+    ):
+        outcome = await run_branch_review(tmp_path, branch="feature", description="fix")
+
+    assert outcome.succeeded is False
+    assert captured
+    injected = captured[0].task
+    assert "## Builder Implementation Notes" in injected
+    assert "- **Evidence**: `1 passed`" in injected

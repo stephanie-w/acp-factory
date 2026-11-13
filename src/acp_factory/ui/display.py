@@ -177,6 +177,7 @@ class FactoryDisplay:
         kept_worktree_path: Path | None = None,
         failure_reason: str | None = None,
         report_path: Path | None = None,
+        build_notes_path: Path | None = None,
     ) -> None:
         """Display the final outcome panel at the end of the factory run."""
         self.console.print()
@@ -198,6 +199,8 @@ class FactoryDisplay:
             grid.add_row("Worktree Saved:", f"[yellow]{kept_worktree_path}[/yellow]")
         if report_path:
             grid.add_row("Report:", f"[cyan]{report_path}[/cyan]")
+        if build_notes_path:
+            grid.add_row("Build Notes:", f"[cyan]{build_notes_path}[/cyan]")
 
         border = "green" if succeeded else "red"
         title = (
