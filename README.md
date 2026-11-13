@@ -23,6 +23,7 @@ flowchart TD
     Done --> Completed(["completed"])
 ```
 
+📖 **New to the team? Check out the [Team Onboarding Guide](docs/team-onboarding.md) to get set up in 5 minutes.**  
 📖 **See [docs/workflow.md](docs/workflow.md) for the complete architecture, GitHub label state machine, and core concepts.**
 
 ---
