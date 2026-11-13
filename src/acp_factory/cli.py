@@ -1273,11 +1273,19 @@ def history_cmd(
     table.add_column("Branch", style="yellow")
     table.add_column("Session", style="magenta")
     table.add_column("Dur")
+    table.add_column("Turns", justify="right")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Cost", justify="right")
     table.add_column("Result")
 
     for rec in records[: limit or 50]:
         issue = rec.get("issue_number")
         dur = rec.get("duration_seconds")
+        usage = rec.get("usage") or {}
+        telemetry = usage.get("telemetry_available") is True
+        turns = usage.get("total_turns")
+        tokens = usage.get("total_tokens")
+        cost = usage.get("total_cost_usd")
         result = rec.get("succeeded")
         if result is True:
             result_cell = "[green]✓[/green]"
@@ -1285,6 +1293,15 @@ def history_cmd(
             result_cell = "[red]✗[/red]"
         else:
             result_cell = "-"
+        turns_cell = str(turns) if isinstance(turns, int) else "-"
+        tokens_cell = (
+            f"{int(tokens):,}"
+            if telemetry and isinstance(tokens, (int, float))
+            else "-"
+        )
+        cost_cell = (
+            f"${cost:.4f}" if telemetry and isinstance(cost, (int, float)) else "-"
+        )
         table.add_row(
             _format_run_time(rec),
             str(rec.get("stage") or "-"),
@@ -1293,6 +1310,9 @@ def history_cmd(
             str(rec.get("branch") or "-"),
             str(rec.get("session_name") or "-"),
             f"{dur:.0f}s" if isinstance(dur, (int, float)) else "-",
+            turns_cell,
+            tokens_cell,
+            cost_cell,
             result_cell,
         )
     console.print(table)
