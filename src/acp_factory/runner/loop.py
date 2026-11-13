@@ -598,6 +598,7 @@ async def run_factory(
             agent_config=config.agent,
             config_dir=config.config_dir,
             resources_dir=resolved_res_dir,
+            guardrails=config.guardrails,
             verbose=verbose,
             extra_env=config.env or None,
             strip_env=config.strip_env or None,

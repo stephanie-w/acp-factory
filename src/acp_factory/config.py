@@ -228,6 +228,23 @@ class RetryConfig(BaseModel):
     )
 
 
+class GuardrailsConfig(BaseModel):
+    """Guardrails policy configuration to contain agent file access and block dangerous commands."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether workspace path containment and command guardrails are enforced",
+    )
+    denied_commands: list[str] = Field(
+        default_factory=list,
+        description="Additional custom command substrings or regex patterns to deny",
+    )
+    allowed_paths: list[str] = Field(
+        default_factory=list,
+        description="Additional external host directory paths permitted for agent access",
+    )
+
+
 class FleetConfig(BaseModel):
     """Fleet orchestration configuration (multi-repo runs)."""
 
@@ -318,6 +335,7 @@ class FactoryConfig(BaseModel):
     active_stage: str | None = Field(default=None)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     fleet: FleetConfig | None = Field(
         default=None,
         description="Optional [fleet] multi-repo/organization orchestration section.",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,12 @@ import acpterm.acp_agent as acpterm_agent_mod
 from acpterm.acp_agent import ACPAgent
 from acpterm.config import Config as AcptermConfig
 
-from ..config import AgentConfig, _load_markdown_or_inline, resolve_resources_dir
+from ..config import (
+    AgentConfig,
+    GuardrailsConfig,
+    _load_markdown_or_inline,
+    resolve_resources_dir,
+)
 from .events import TurnEventTracker, TurnSummary
 
 
@@ -170,6 +176,7 @@ class FactoryACPClient:
         read_only: bool | None = None,
         extra_env: dict[str, str] | None = None,
         strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
+        guardrails: GuardrailsConfig | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.config_dir = config_dir.resolve() if config_dir else self.workspace
@@ -183,6 +190,7 @@ class FactoryACPClient:
         self.read_only = agent_config.read_only if read_only is None else read_only
         self.extra_env = extra_env
         self.strip_env = strip_env
+        self.guardrails = guardrails or GuardrailsConfig()
 
         self.persona_text: str | None = resolve_persona_text(
             agent_config.persona,
@@ -210,6 +218,27 @@ class FactoryACPClient:
         cmd = resolve_factory_agent_command(self.agent_config)
         acpterm_cfg = AcptermConfig.load()
 
+        hooks: list[Any] = []
+        if self.guardrails and self.guardrails.enabled:
+            from acpterm.hooks import HookDefinition
+
+            hook_cmd = f'"{sys.executable}" -m acp_factory.runner.guardrails'
+            if self.resources_dir:
+                hook_cmd += f' --resources-dir "{self.resources_dir}"'
+            for p in self.guardrails.allowed_paths:
+                hook_cmd += f' --allow-path "{p}"'
+            for d in self.guardrails.denied_commands:
+                hook_cmd += f' --deny-cmd "{d}"'
+
+            hooks.append(
+                HookDefinition(
+                    name="factory-guardrails",
+                    on="permission",
+                    run=hook_cmd,
+                )
+            )
+        hooks.extend(acpterm_cfg.hooks)
+
         self._agent = ACPAgent(
             project_root=self.workspace,
             agent_binary=self.agent_config.name,
@@ -219,7 +248,7 @@ class FactoryACPClient:
             read_only=self.read_only,
             silent=self.silent,
             transcript_recorder=self.tracker.recorder,
-            permission_hooks=acpterm_cfg.hooks,
+            permission_hooks=hooks,
         )
 
         orig_spawn = acpterm_agent_mod.spawn_stdio_transport
