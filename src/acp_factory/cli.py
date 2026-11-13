@@ -1256,9 +1256,7 @@ def history_cmd(
     records = list_run_history(workspace.resolve())
 
     if json_output:
-        console.print(
-            json.dumps(records if limit is None else records[:limit], indent=2)
-        )
+        console.print(json.dumps(records[: limit or 50], indent=2))
         return
 
     if not records:
