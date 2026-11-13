@@ -82,7 +82,7 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
         repo_slug="acme/core",
         branch="factory/issue-42",
         base_ref="origin/main",
-        session_name="factory-deadbeef",
+        session_id="ses_deadbeef",
     )
 
     assert run_dir is not None
@@ -92,7 +92,7 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
     assert data["repo_slug"] == "acme/core"
     assert data["branch"] == "factory/issue-42"
     assert data["base_ref"] == "origin/main"
-    assert data["session_name"] == "factory-deadbeef"
+    assert data["session_id"] == "ses_deadbeef"
 
 
 def test_history_cmd_json_respects_limit(tmp_path: Path) -> None:

@@ -389,7 +389,7 @@ def _persist_run_artifacts(
     repo_slug: str | None = None,
     branch: str | None = None,
     base_ref: str | None = None,
-    session_name: str | None = None,
+    session_id: str | None = None,
 ) -> Path | None:
     """Write structured run logs into `.factory/runs/<run-id>/` if `.factory/` is present."""
     factory_dir = workspace / ".factory"
@@ -447,7 +447,7 @@ def _persist_run_artifacts(
         "repo_slug": repo_slug,
         "branch": branch,
         "base_ref": base_ref,
-        "session_name": session_name,
+        "session_id": session_id,
         "succeeded": succeeded,
         "attempts_used": attempts_used,
         "max_attempts": config.retry.max_attempts,
@@ -541,7 +541,7 @@ async def run_factory(
     turn_summaries: list[dict[str, Any]] = []
     turn_condensed: list[dict[str, Any]] = []
     preserved_wt: Path | None = None
-    session_name: str | None = None
+    session_id: str | None = None
 
     active_cwd = await wt_manager.create(base_ref=base_ref)
     ui.show_run_header(
@@ -591,7 +591,7 @@ async def run_factory(
                         repo_slug=repo_slug,
                         branch=branch or wt_manager.branch_name,
                         base_ref=base_ref,
-                        session_name=session_name,
+                        session_id=session_id,
                     )
                     ui.show_final_summary(
                         succeeded=False,
@@ -624,7 +624,7 @@ async def run_factory(
             extra_env=config.env or None,
             strip_env=config.strip_env or None,
         ) as acp_client:
-            session_name = getattr(acp_client, "session_name", None)
+            session_id = getattr(acp_client, "session_id", None)
             prompt = build_initial_prompt(
                 config.task, config.checks, read_only=config.agent.read_only
             )
@@ -788,7 +788,7 @@ async def run_factory(
         repo_slug=repo_slug,
         branch=branch or wt_manager.branch_name,
         base_ref=base_ref,
-        session_name=session_name,
+        session_id=session_id,
     )
     report_path = (
         run_dir / "report.md"

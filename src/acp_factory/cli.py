@@ -1295,7 +1295,7 @@ def history_cmd(
             str(rec.get("repo_slug") or "-"),
             str(rec.get("branch") or "-"),
             str(rec.get("agent") or "-"),
-            str(rec.get("session_name") or "-"),
+            str(rec.get("session_id") or "-"),
             f"{dur:.0f}s" if isinstance(dur, (int, float)) else "-",
             turns_cell,
             tokens_cell,
