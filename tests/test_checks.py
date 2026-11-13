@@ -279,6 +279,7 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "Execution Mode: Autonomous & Non-Interactive" in ro_prompt
     assert "AGENTS.md" in ro_prompt
     assert "strictly superseded" in ro_prompt
+    assert "GUARDRAIL DENIED" in ro_prompt
 
     mutating_prompt = build_initial_prompt(
         "Build feature",
@@ -287,6 +288,7 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     )
     assert "Complete all necessary research, file modifications" in mutating_prompt
     assert "Do NOT pause to ask clarifying questions" in mutating_prompt
+    assert "GUARDRAIL DENIED" in mutating_prompt
 
     results = [
         CheckResult(

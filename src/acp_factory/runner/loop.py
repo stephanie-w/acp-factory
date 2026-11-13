@@ -130,6 +130,7 @@ def build_initial_prompt(
         "- You are executing autonomously in an automated orchestrator with NO human in the loop to answer questions, approve plans, or confirm decisions.",
         "- Do NOT pause to ask clarifying questions, request approval, or propose a strategy and wait for confirmation.",
         "- If repository instructions (such as `AGENTS.md` or `CLAUDE.md`) specify an interactive confirmation workflow (e.g. 'wait for user approval before proceeding'), that waiting requirement is strictly superseded: proceed directly to execute and verify the task to completion.",
+        "- Security policy strictly blocks dangerous commands (e.g. sudo, rm -rf, git push) and paths outside this workspace. If an action is blocked by a guardrail (`[GUARDRAIL DENIED]`), do not loop trying alternative ways to bypass it; adapt your strategy using workspace-local tools or document the blocker in your final summary.",
     ]
     if read_only:
         lines.append(

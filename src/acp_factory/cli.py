@@ -311,9 +311,10 @@ DEFAULT_STAGE_PROMPTS: dict[str, str] = {
     "RETRO.md": (
         "Execute the `retro` skill against this repository's recent `.factory/runs/` artifacts (`run.json`, "
         "`attempt-*/check-*.log`, `attempt-*/transcript.summary.json` / `transcript.json`), `AGENTS.md`, and `.factory/config.toml`. Do not modify any files:\n"
-        "1. Evaluate across the 7 retrospective categories (Navigation, Automated Checks, Coding Standards & Reviewer Rubric, "
-        "`AGENTS.md` Diet, Tool Economy, No-ops, and Information Access).\n"
-        "2. Output a ranked Markdown retrospective report (`HIGH`, `MEDIUM`, `LOW`) with concrete evidence citations and unified `diff` proposals."
+        "1. Inspect recent run directories under `.factory/runs/` (sorted by newest first: read `run.json`, `attempt-*/check-*.log`, and `attempt-*/transcript.summary.json` for runs with `attempts_used > 1`, failed checks, or high tool/turn counts). Tip: Use `jq` to quickly parse tool frequencies, failed actions, or denied guardrail permissions without overloading context (e.g. `jq '.permissions[] | select(.status == \"denied\")' attempt-*/transcript.summary.json`). Fall back to `attempt-*-transcript.md` only when deep turn-level debugging context is strictly required.\n"
+        "2. Evaluate across the 7 retrospective categories (Navigation, Automated Checks, Coding Standards & Reviewer Rubric, "
+        "`AGENTS.md` Diet, Tool Economy, No-ops, and Information Access — including any denied permissions requiring `[guardrails.allowed_paths]` adjustments in `.factory/config.toml`).\n"
+        "3. Output a ranked Markdown retrospective report (`HIGH`, `MEDIUM`, `LOW`) with concrete evidence citations and unified `diff` proposals."
     ),
 }
 
