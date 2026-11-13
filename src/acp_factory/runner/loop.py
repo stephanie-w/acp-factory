@@ -384,6 +384,12 @@ def _persist_run_artifacts(
     turn_summaries: list[dict[str, Any]] | None = None,
     turn_condensed: list[dict[str, Any]] | None = None,
     last_response_text: str = "",
+    issue_number: int | None = None,
+    issue_title: str | None = None,
+    repo_slug: str | None = None,
+    branch: str | None = None,
+    base_ref: str | None = None,
+    session_name: str | None = None,
 ) -> Path | None:
     """Write structured run logs into `.factory/runs/<run-id>/` if `.factory/` is present."""
     factory_dir = workspace / ".factory"
@@ -436,6 +442,12 @@ def _persist_run_artifacts(
         "read_only": config.agent.read_only,
         "persona": config.agent.persona,
         "skills": config.agent.skills,
+        "issue_number": issue_number,
+        "issue_title": issue_title,
+        "repo_slug": repo_slug,
+        "branch": branch,
+        "base_ref": base_ref,
+        "session_name": session_name,
         "succeeded": succeeded,
         "attempts_used": attempts_used,
         "max_attempts": config.retry.max_attempts,
@@ -491,6 +503,7 @@ async def run_factory(
     issue_number: int | None = None,
     issue_title: str | None = None,
     repo_slug: str | None = None,
+    branch: str | None = None,
     display: FactoryDisplay | None = None,
     verbose: bool = False,
     export_transcript: Path | None = None,
@@ -528,6 +541,7 @@ async def run_factory(
     turn_summaries: list[dict[str, Any]] = []
     turn_condensed: list[dict[str, Any]] = []
     preserved_wt: Path | None = None
+    session_name: str | None = None
 
     active_cwd = await wt_manager.create(base_ref=base_ref)
     ui.show_run_header(
@@ -572,6 +586,12 @@ async def run_factory(
                         check_history=[],
                         failure_reason=failure_reason,
                         usage=usage,
+                        issue_number=issue_number,
+                        issue_title=issue_title,
+                        repo_slug=repo_slug,
+                        branch=branch or wt_manager.branch_name,
+                        base_ref=base_ref,
+                        session_name=session_name,
                     )
                     ui.show_final_summary(
                         succeeded=False,
@@ -604,6 +624,7 @@ async def run_factory(
             extra_env=config.env or None,
             strip_env=config.strip_env or None,
         ) as acp_client:
+            session_name = getattr(acp_client, "session_name", None)
             prompt = build_initial_prompt(
                 config.task, config.checks, read_only=config.agent.read_only
             )
@@ -762,6 +783,12 @@ async def run_factory(
         turn_summaries=turn_summaries,
         turn_condensed=turn_condensed,
         last_response_text=last_response_text,
+        issue_number=issue_number,
+        issue_title=issue_title,
+        repo_slug=repo_slug,
+        branch=branch or wt_manager.branch_name,
+        base_ref=base_ref,
+        session_name=session_name,
     )
     report_path = (
         run_dir / "report.md"
@@ -1284,6 +1311,7 @@ async def run_branch_review(
         resolved_workspace,
         repo_slug=resolved_workspace.name,
         issue_title=f"Branch review: {effective_branch}",
+        branch=effective_branch,
         display=ui,
         verbose=verbose,
     )

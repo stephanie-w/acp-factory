@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -11,6 +13,7 @@ from rich.table import Table
 
 from .config import FactoryConfig
 from .github import list_actionable_issues, list_all_factory_issues
+from .history import list_run_history
 from .runner.loop import run_branch_review, run_factory, run_issue_stage
 from .runner.worktree import (
     GitSyncError,
@@ -1212,6 +1215,87 @@ def init_cmd(
 
     target.write_text(STARTER_CONFIG_YAML, encoding="utf-8")
     console.print(f"[bold green]✓ Created[/bold green] {target}")
+
+
+def _format_run_time(record: dict[str, object]) -> str:
+    """Render a run's timestamp compactly for the history table (UTC)."""
+    raw = record.get("timestamp")
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw).strftime("%m-%d %H:%M")
+        except ValueError:
+            return raw[:16]
+    run_id = record.get("run_id")
+    return str(run_id) if run_id else "-"
+
+
+@app.command("history")
+def history_cmd(
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", "-w", help="Target workspace directory."),
+    ] = Path("."),
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            "-n",
+            min=1,
+            help="Maximum number of runs to display (defaults to 50).",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print run metadata as JSON instead of a table.",
+        ),
+    ] = False,
+) -> None:
+    """Show a chronological history of local factory runs (`.factory/runs/*/run.json`)."""
+    records = list_run_history(workspace.resolve())
+
+    if json_output:
+        console.print(
+            json.dumps(records if limit is None else records[:limit], indent=2)
+        )
+        return
+
+    if not records:
+        console.print("[dim]No factory runs found under `.factory/runs/`.[/dim]")
+        return
+
+    table = Table(title="acp-factory Run History")
+    table.add_column("Time", style="dim")
+    table.add_column("Stage", style="cyan")
+    table.add_column("Issue", justify="right", style="bold cyan")
+    table.add_column("Repo")
+    table.add_column("Branch", style="yellow")
+    table.add_column("Session", style="magenta")
+    table.add_column("Dur")
+    table.add_column("Result")
+
+    for rec in records[: limit or 50]:
+        issue = rec.get("issue_number")
+        dur = rec.get("duration_seconds")
+        result = rec.get("succeeded")
+        if result is True:
+            result_cell = "[green]✓[/green]"
+        elif result is False:
+            result_cell = "[red]✗[/red]"
+        else:
+            result_cell = "-"
+        table.add_row(
+            _format_run_time(rec),
+            str(rec.get("stage") or "-"),
+            f"#{issue}" if issue is not None else "-",
+            str(rec.get("repo_slug") or "-"),
+            str(rec.get("branch") or "-"),
+            str(rec.get("session_name") or "-"),
+            f"{dur:.0f}s" if isinstance(dur, (int, float)) else "-",
+            result_cell,
+        )
+    console.print(table)
 
 
 def main() -> None:

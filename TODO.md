@@ -37,7 +37,7 @@
   - [x] `parse_stage_verdict`, `_clean_markdown_stage_body`, and `parse_review_verdict_status` (supporting JSON `{"status": "pass"|"retry"|"stop"}` and `STATUS:` / `VERDICT:` lines while stripping conversational intros/outros).
   - [x] Issue-keyed persistent worktrees (`.worktrees/issue-<id>` on `factory/issue-<id>`) preserved across `build` and `review` and automatically cleaned up on `done` or when the GitHub Issue is `CLOSED` by a PR merge.
   - [x] Structured run artifacts saved under `.factory/runs/<run-id>/`.
-  - [x] CLI commands: `acp-factory init --multi-stage`, `acp-factory issue <id>`, `acp-factory next`, `acp-factory status`.
+  - [x] CLI commands: `acp-factory init --multi-stage`, `acp-factory issue <id>`, `acp-factory next`, `acp-factory status`, `acp-factory history`.
   - [x] **`--dry-run` Mode & Read-Only Agent `gh` Guardrail**:
     - [x] Read-only `gh` PATH shim (`_ensure_readonly_gh_shim_dir`) blocking agents from directly running mutating `gh` subcommands (`edit`, `create`, `comment`, `close`, `merge`).
     - [x] `--dry-run` (`dry_run = true`) saving proposed Issue/PR bodies locally under `.factory/runs/<run-id>/` and printing copy-pasteable `gh` commands (including `-R <owner>/<repo>` when invoked outside the target workspace).

@@ -118,6 +118,13 @@ Or automatically process the next actionable issue in the repository queue:
 acp-factory next
 ```
 
+View a chronological history of local runs (from `.factory/runs/*/run.json`, linking each run to its issue, repo, branch, and ACP session):
+
+```bash
+acp-factory history
+acp-factory history --json
+```
+
 ### Fleet Orchestration (Multi-Repo)
 
 Run the same 5-stage workflow across many repositories. Each `owner/repo` maps to an explicit local checkout path (no on-demand cloning).
