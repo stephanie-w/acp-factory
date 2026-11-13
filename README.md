@@ -246,4 +246,5 @@ acp-factory issue 42 --max-turns 5
 - **[Model Selection & Reasoning Strategy (`docs/model-selection.md`)](docs/model-selection.md)**: Guide to choosing models across stages, cognitive postures, turn timeout prevention on builds, and cross-model skeptical verification.
 - **[Tracking & Daily Routine Guide (`docs/github-project-setup.md`)](docs/github-project-setup.md)**: Operator cheat sheet, daily morning routine, worktree management, and GitHub search bookmark filters.
 - **[Stateless Fleet Orchestration & Review Hardening (`docs/fleet-orchestration.md`)](docs/fleet-orchestration.md)**: Architecture and invariants for multi-repo admission control, delta-focused review rounds, 3-round circuit breakers, and `REVIEWED_AT == HEAD` publish guards.
+- **[Unattended Scheduling (`docs/scheduling.md`)](docs/scheduling.md)**: Running `acp-factory next` on a cron or systemd timer, with environment requirements, overlap protection, and ready-to-use recipes.
 - **[Implementation Roadmap (`TODO.md`)](TODO.md)**: Current status and upcoming milestones.
