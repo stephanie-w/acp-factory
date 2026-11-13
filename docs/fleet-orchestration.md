@@ -42,15 +42,33 @@ Instead of maintaining a local database that can drift out of sync with GitHub, 
 1. **Duplicate Checkouts vs. Dirty Working Trees**: Developers already have active checkouts under `~/DEV/` for core projects, while secondary or org-wide repositories may not be cloned locally.
 2. **Stale Default Branches**: Creating a worktree from a stale local `main` causes immediate divergence from `origin/main`.
 
+#### Operator-Level Fleet Files
+
+`[fleet.repositories]` maps operator-specific, machine-local checkouts (e.g. `"owner/repo" = "~/DEV/repo"`). Committing that registry into a project's `.factory/config.toml` would leak personal paths and force each repository to list its siblings. Fleet discovery therefore supports a separate, uncommitted operator-level file:
+
+1. `~/.acp-factory/fleet.toml` (primary)
+2. `~/.config/acp-factory/fleet.toml` (XDG fallback)
+
+When the active configuration has no `[fleet]` section, `acp-factory next --fleet` and `acp-factory status --fleet` (and the programmatic `run_fleet_next` / `collect_fleet_status` entrypoints) overlay the first discoverable operator-level file. An explicit `--fleet-config <path>` overrides both repo-local and operator-level definitions; a repo-local `[fleet]` is otherwise preserved. `fleet.toml` accepts either a `[fleet]` wrapper or flat root-level keys (`repositories`, `max_active_branches_per_repo`, `max_review_rounds`).
+
 #### Design
 ```toml
-# Central .factory/config.toml
+# ~/.acp-factory/fleet.toml (operator-level, not committed)
+max_active_branches_per_repo = 1
+max_review_rounds = 3
+
+[repositories]
+"owner/core-lib" = "~/DEV/core-lib"        # Existing local checkout
+"owner/service-api" = "~/DEV/service-api"  # Existing local checkout
+```
+```toml
+# Central .factory/config.toml (still supported; omit [fleet] to inherit the operator file)
 [fleet]
 max_active_branches_per_repo = 1
 
 [fleet.repositories]
-"owner/core-lib" = "~/DEV/core-lib"        # Existing local checkout
-"owner/service-api" = "~/DEV/service-api"  # Existing local checkout
+"owner/core-lib" = "~/DEV/core-lib"
+"owner/service-api" = "~/DEV/service-api"
 ```
 - **Zero Impact on Active Working Trees**: Because `triage` and `spec` are strictly read-only and `build`/`review` execute inside `.worktrees/issue-<id>`, pointing `[fleet.repositories]` to an existing `~/DEV/<repo>` checkout never switches branches or modifies uncommitted work in the developer's main working directory.
 - **Fresh Baseline Guarantee**: Before creating a new `.worktrees/issue-<id>` worktree, `WorktreeManager` runs `git fetch --prune origin` and branches `factory/issue-<id>` from `origin/<default-branch>` (rather than a potentially lagging local `HEAD`).
@@ -178,7 +196,7 @@ flowchart TD
 | **2. Stateless `factory:meta` & Findings Replacement / 3-Round Cap** | [`src/acp_factory/task.py`](../src/acp_factory/task.py) | Parse/render `<!-- factory:meta ... -->` and `<!-- factory:findings:start/end -->`; replace instead of stacking `## Latest Review Findings (Round N/3)`; strip findings on `ACCEPTED`; enforce 3-round `factory:needs-human` circuit breaker. |
 | **3. Repo Checkout Sync & Cross-Repo Issue Queries** | [`src/acp_factory/github.py`](../src/acp_factory/github.py), [`src/acp_factory/runner/worktree.py`](../src/acp_factory/runner/worktree.py) | `ensure_fleet_repo_checkout` (explicit local `~` path resolution + `git fetch --prune origin`); branch new issue worktrees from `origin/<default-branch>`; Git SHA & clean-tree helpers (`get_head_sha`, `is_worktree_clean`). |
 | **4. `REVIEWED_AT == HEAD` Guard, Delta Review Brief & Fleet Runner** | [`src/acp_factory/runner/loop.py`](../src/acp_factory/runner/loop.py) | Pre-review clean-tree & SHA snapshot + pre-publish SHA guard in `run_issue_stage` and `run_branch_review`; Round 2+ delta review context builder; `run_fleet_next` and `collect_fleet_status` with stage-aware per-repo admission and error isolation. |
-| **5. CLI Surface (`status --fleet`, `next --fleet`)** | [`src/acp_factory/cli.py`](../src/acp_factory/cli.py) | `--fleet` flag (auto-enabled when `[fleet]` is configured in the active config) on `acp-factory status` (adds `Repository` column) and `acp-factory next`. |
+| **5. CLI Surface (`status --fleet`, `next --fleet`)** | [`src/acp_factory/cli.py`](../src/acp_factory/cli.py) | `--fleet` flag (auto-enabled when `[fleet]` is configured in the active config) and `--fleet-config <path>` on `acp-factory status` (adds `Repository` column) and `acp-factory next`. Operator-level files live at `~/.acp-factory/fleet.toml` (XDG fallback `~/.config/acp-factory/fleet.toml`). |
 | **6. Automated Test Suite** | `tests/test_fleet.py`, [`tests/test_github_task.py`](../tests/test_github_task.py) | Unit tests covering `factory:meta` round tracking, findings replacement/stripping, 3-round circuit breaker, SHA mismatch publish abort, stage-aware per-repo busy guard, and cross-repo error isolation. |
 
 ---
@@ -188,12 +206,13 @@ flowchart TD
 Follow these steps to deterministically verify fleet orchestration behavior:
 
 1. **Minimal Test Configuration**:
-   Ensure `.factory/config.toml` contains at least one mapped local repository:
+   Ensure an operator-level `~/.acp-factory/fleet.toml` (or `--fleet-config <path>`) contains
+   at least one mapped local repository. A repo-local `.factory/config.toml` may omit `[fleet]`
+   entirely, or define its own `[fleet]` to take precedence over the operator default:
    ```toml
-   [fleet]
    max_active_branches_per_repo = 1
 
-   [fleet.repositories]
+   [repositories]
    "owner/repo" = "~/DEV/repo"
    ```
 

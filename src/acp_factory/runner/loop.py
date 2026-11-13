@@ -1338,6 +1338,7 @@ async def run_fleet_next(
     display: FactoryDisplay | None = None,
 ) -> list[FleetRepoResult]:
     """Run one fleet pass across all configured repositories with per-repo error isolation."""
+    config = config.with_fleet_overlay()
     ui = display or FactoryDisplay()
     repos = _fleet_repos(config)
     if not repos:
@@ -1376,6 +1377,7 @@ async def collect_fleet_status(
     Lists issues via `gh --repo` without cloning/fetching; only scans `.worktrees/` when
     a local checkout already exists (read-only command).
     """
+    config = config.with_fleet_overlay()
     repos = _fleet_repos(config)
     out: list[tuple[str, list[TaskContext], str | None]] = []
     for repo_slug, repo_value in repos.items():

@@ -891,3 +891,273 @@ def test_cli_next_fleet_effective_limit_defaults(tmp_path: Path) -> None:
         res = runner.invoke(app, ["next", "--fleet", "-n", "5"])
         assert res.exit_code == 0
         assert mock_fleet_next.call_args.kwargs["limit"] == 5
+
+
+def _write_fleet_toml(path: Path, repos: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["[repositories]"]
+    lines.extend(f'"{slug}" = "{checkout}"' for slug, checkout in repos.items())
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_fleet_config_from_file(tmp_path: Path) -> None:
+    """AC-5: both nested `[fleet]` and flat root-level keys parse into a FleetConfig."""
+    from acp_factory.config import FleetConfig
+
+    nested = tmp_path / "nested.toml"
+    nested.write_text(
+        "[fleet]\n"
+        "max_active_branches_per_repo = 2\n"
+        "max_review_rounds = 4\n"
+        "[fleet.repositories]\n"
+        '"acme/core" = "~/DEV/core"\n',
+        encoding="utf-8",
+    )
+    nested_cfg = FleetConfig.from_file(nested)
+    assert nested_cfg.repositories == {"acme/core": "~/DEV/core"}
+    assert nested_cfg.max_active_branches_per_repo == 2
+    assert nested_cfg.max_review_rounds == 4
+
+    flat = tmp_path / "flat.toml"
+    flat.write_text(
+        "max_active_branches_per_repo = 3\n"
+        "max_review_rounds = 5\n"
+        "[repositories]\n"
+        '"acme/api" = "~/DEV/api"\n',
+        encoding="utf-8",
+    )
+    flat_cfg = FleetConfig.from_file(flat)
+    assert flat_cfg.repositories == {"acme/api": "~/DEV/api"}
+    assert flat_cfg.max_active_branches_per_repo == 3
+    assert flat_cfg.max_review_rounds == 5
+
+
+def test_fleet_config_from_file_rejects_bad_inputs(tmp_path: Path) -> None:
+    """Malformed paths, extensions, TOML syntax, and invalid schemas are rejected explicitly."""
+    from acp_factory.config import FleetConfig
+
+    with pytest.raises(FileNotFoundError):
+        FleetConfig.from_file(tmp_path / "missing.toml")
+
+    wrong_ext = tmp_path / "fleet.yaml"
+    wrong_ext.write_text("[repositories]\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        FleetConfig.from_file(wrong_ext)
+
+    malformed = tmp_path / "malformed.toml"
+    malformed.write_text("[repositories\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        FleetConfig.from_file(malformed)
+
+    # Out-of-range concurrency cap must not be silently coerced.
+    invalid = tmp_path / "invalid.toml"
+    invalid.write_text("max_active_branches_per_repo = 0\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        FleetConfig.from_file(invalid)
+
+
+def test_discover_fleet_config_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`~/.acp-factory/fleet.toml` wins over the XDG fallback, and None when neither exists."""
+    from acp_factory.config import discover_fleet_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    assert discover_fleet_config() is None
+
+    _write_fleet_toml(
+        home / ".config/acp-factory/fleet.toml", {"acme/xdg": "~/DEV/xdg"}
+    )
+    xdg_only = discover_fleet_config()
+    assert xdg_only is not None
+    assert xdg_only.repositories == {"acme/xdg": "~/DEV/xdg"}
+
+    _write_fleet_toml(
+        home / ".acp-factory/fleet.toml", {"acme/primary": "~/DEV/primary"}
+    )
+    primary = discover_fleet_config()
+    assert primary is not None
+    assert primary.repositories == {"acme/primary": "~/DEV/primary"}
+
+
+def test_fleet_config_overlay_repo_local_no_fleet_auto_loads_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: `next --fleet` overlays ~/.acp-factory/fleet.toml when repo config has no [fleet]."""
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    _write_fleet_toml(home / ".acp-factory/fleet.toml", {"acme/core": "~/DEV/core"})
+
+    workspace = tmp_path / "repo"
+    (workspace / ".factory").mkdir(parents=True)
+    (workspace / ".factory" / "config.toml").write_text(
+        'version = "1"\n', encoding="utf-8"
+    )
+    repo_cfg = FactoryConfig.discover(workspace)
+    assert repo_cfg.fleet is None
+
+    captured: dict[str, FactoryConfig] = {}
+
+    async def fake_fleet_next(config: FactoryConfig, **kwargs: object):
+        captured["config"] = config
+        return []
+
+    runner = CliRunner()
+    with (
+        patch("acp_factory.config.FactoryConfig.discover", return_value=repo_cfg),
+        patch("acp_factory.runner.loop.run_fleet_next", new=fake_fleet_next),
+    ):
+        result = runner.invoke(app, ["next", "--fleet", "--workspace", str(workspace)])
+
+    assert result.exit_code == 0, result.output
+    overlaid = captured["config"].fleet
+    assert overlaid is not None
+    assert overlaid.repositories == {"acme/core": "~/DEV/core"}
+
+
+def test_fleet_config_overlay_repo_local_no_fleet_falls_back_to_xdg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: discovery falls back to ~/.config/acp-factory/fleet.toml when the primary is absent."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    _write_fleet_toml(
+        home / ".config/acp-factory/fleet.toml", {"acme/api": "~/DEV/api"}
+    )
+
+    cfg = FactoryConfig.model_validate({"version": "1"})
+    overlaid = cfg.with_fleet_overlay()
+
+    assert overlaid.fleet is not None
+    assert overlaid.fleet.repositories == {"acme/api": "~/DEV/api"}
+    assert cfg.fleet is None
+
+
+def test_fleet_config_overlay_repo_local_with_fleet_preserves_repo_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a repo-local [fleet] wins over the operator-level default overlay."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    _write_fleet_toml(home / ".acp-factory/fleet.toml", {"acme/user": "~/DEV/user"})
+
+    workspace = tmp_path / "repo"
+    (workspace / ".factory").mkdir(parents=True)
+    (workspace / ".factory" / "config.toml").write_text(
+        'version = "1"\n[fleet.repositories]\n"acme/repo" = "~/DEV/repo"\n',
+        encoding="utf-8",
+    )
+    cfg = FactoryConfig.discover(workspace)
+    assert cfg.fleet is not None
+
+    overlaid = cfg.with_fleet_overlay()
+    assert overlaid.fleet is not None
+    assert overlaid.fleet.repositories == {"acme/repo": "~/DEV/repo"}
+
+
+def test_fleet_config_overlay_explicit_cli_option_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: `--fleet-config <path>` overrides repo-local and user-level fleet definitions."""
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    _write_fleet_toml(home / ".acp-factory/fleet.toml", {"acme/user": "~/DEV/user"})
+
+    explicit = tmp_path / "custom-fleet.toml"
+    _write_fleet_toml(explicit, {"acme/explicit": "~/DEV/explicit"})
+
+    repo_cfg = FactoryConfig.model_validate(
+        {"fleet": {"repositories": {"acme/repo": "~/DEV/repo"}}}
+    )
+    captured: dict[str, FactoryConfig] = {}
+
+    async def fake_fleet_next(config: FactoryConfig, **kwargs: object):
+        captured["config"] = config
+        return []
+
+    runner = CliRunner()
+    with (
+        patch("acp_factory.config.FactoryConfig.discover", return_value=repo_cfg),
+        patch("acp_factory.runner.loop.run_fleet_next", new=fake_fleet_next),
+    ):
+        result = runner.invoke(app, ["next", "--fleet-config", str(explicit)])
+
+    assert result.exit_code == 0, result.output
+    overlaid = captured["config"].fleet
+    assert overlaid is not None
+    assert overlaid.repositories == {"acme/explicit": "~/DEV/explicit"}
+
+    with pytest.raises(FileNotFoundError):
+        repo_cfg.with_fleet_overlay(tmp_path / "does-not-exist.toml")
+
+
+def test_cli_next_and_status_fleet_config_help() -> None:
+    """AC-6: `next --help` and `status --help` document the --fleet-config option."""
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+
+    runner = CliRunner()
+    for command in ("next", "status"):
+        result = runner.invoke(app, [command, "--help"])
+        assert result.exit_code == 0
+        assert "--fleet-config" in result.output
+
+
+async def test_runner_loop_overlays_fleet_when_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: runner entrypoints inherit the operator-level fleet config when `fleet is None`."""
+    from acp_factory.runner.loop import collect_fleet_status, run_fleet_next
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    _write_fleet_toml(home / ".acp-factory/fleet.toml", {"acme/core": str(tmp_path)})
+
+    spec_task = TaskContext(issue_number=1, title="x", labels=[LABEL_SPEC])
+
+    with (
+        patch(
+            "acp_factory.runner.loop.ensure_fleet_repo_checkout",
+            new=AsyncMock(return_value=tmp_path),
+        ),
+        patch(
+            "acp_factory.runner.loop.detect_default_branch",
+            new=AsyncMock(return_value="main"),
+        ),
+        patch(
+            "acp_factory.runner.loop.list_actionable_issues",
+            new=AsyncMock(return_value=[spec_task]),
+        ),
+        patch(
+            "acp_factory.runner.loop.run_issue_stage",
+            new=AsyncMock(
+                return_value=FactoryRunOutcome(
+                    succeeded=True,
+                    exit_code=0,
+                    attempts_used=1,
+                    total_duration_seconds=0.0,
+                )
+            ),
+        ),
+    ):
+        results = await run_fleet_next(FactoryConfig())
+
+    assert [r.repo_slug for r in results] == ["acme/core"]
+
+    with patch(
+        "acp_factory.runner.loop.list_all_factory_issues",
+        new=AsyncMock(return_value=[]),
+    ):
+        status = await collect_fleet_status(FactoryConfig())
+
+    assert status == [("acme/core", [], None)]

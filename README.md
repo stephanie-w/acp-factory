@@ -119,15 +119,32 @@ acp-factory next
 
 ### Fleet Orchestration (Multi-Repo)
 
-Add a `[fleet]` section to `.factory/config.toml` to run the same 5-stage workflow across many repositories. Each `owner/repo` maps to an explicit local checkout path (no on-demand cloning):
+Run the same 5-stage workflow across many repositories. Each `owner/repo` maps to an explicit local checkout path (no on-demand cloning).
+
+Fleet registries are operator-specific and should **not** be committed to project repositories. Keep them in an operator-level file instead:
+
+1. `~/.acp-factory/fleet.toml` (primary)
+2. `~/.config/acp-factory/fleet.toml` (XDG fallback, used when the primary is absent)
 
 ```toml
-[fleet]
+# ~/.acp-factory/fleet.toml
 max_active_branches_per_repo = 1   # default
 max_review_rounds = 3              # optional; overrides top-level
 
-[fleet.repositories]
+[repositories]
 "acme/core-lib" = "~/DEV/core-lib"    # existing local checkout
+"acme/service-api" = "~/DEV/service-api"
+```
+
+The `[fleet]` table wrapper is optional: both `[repositories]` at the root and `[fleet.repositories]` are accepted. When the active config (e.g. a repo-local `.factory/config.toml`) has no `[fleet]` section, `--fleet` automatically overlays the operator-level file. A repo-local `[fleet]` section is preserved; pass `--fleet-config <path>` to override it explicitly:
+
+```toml
+# Any project's .factory/config.toml (still supported)
+[fleet]
+max_active_branches_per_repo = 1
+
+[fleet.repositories]
+"acme/core-lib" = "~/DEV/core-lib"
 "acme/service-api" = "~/DEV/service-api"
 ```
 
@@ -136,18 +153,16 @@ Advance one step per repo (with stage-aware admission control so each repo has a
 ```bash
 acp-factory next --fleet
 acp-factory status --fleet
+acp-factory next --fleet-config /path/to/custom-fleet.toml
 ```
 
-`--fleet` is auto-enabled whenever a `[fleet]` section is present in the active config.
+`--fleet` is auto-enabled whenever a `[fleet]` section is present in the active config, or when `--fleet-config` is supplied (unless `--no-fleet` is also given). `--fleet-config <path>` must point to an existing TOML file.
 
 #### How to Test Fleet Mode
 
-1. **Configure local checkouts** in `.factory/config.toml`:
+1. **Configure local checkouts** in `~/.acp-factory/fleet.toml` (or pass a custom file with `--fleet-config`):
    ```toml
-   [fleet]
-   max_active_branches_per_repo = 1
-
-   [fleet.repositories]
+   [repositories]
    "owner/repo-a" = "~/DEV/repo-a"
    "owner/repo-b" = "~/DEV/repo-b"
    ```

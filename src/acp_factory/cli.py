@@ -770,6 +770,13 @@ def next_cmd(
             help="Run one fleet pass across all 'fleet.repositories' entries (auto-enabled when a fleet section is configured).",
         ),
     ] = None,
+    fleet_config_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--fleet-config",
+            help="Path to an operator-level fleet TOML file (overrides repo-local and user-level fleet definitions).",
+        ),
+    ] = None,
     limit: Annotated[
         int | None,
         typer.Option(
@@ -833,12 +840,16 @@ def next_cmd(
         eff_max_cost = max_cost if max_cost is not None else budget.get("max_cost")
         eff_max_turns = max_turns if max_turns is not None else budget.get("max_turns")
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-        use_fleet = fleet if fleet is not None else (base_cfg.fleet is not None)
+        use_fleet = (
+            fleet is not False
+            if fleet_config_file is not None
+            else (fleet if fleet is not None else (base_cfg.fleet is not None))
+        )
 
         if use_fleet:
             from .runner.loop import run_fleet_next
 
-            base_cfg = base_cfg.with_overrides(
+            base_cfg = base_cfg.with_fleet_overlay(fleet_config_file).with_overrides(
                 max_tokens=eff_max_tokens,
                 max_cost=eff_max_cost,
                 max_turns=eff_max_turns,
@@ -956,6 +967,13 @@ def status_cmd(
             help="Show a per-repository fleet status table (auto-enabled when a fleet section is configured).",
         ),
     ] = None,
+    fleet_config_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--fleet-config",
+            help="Path to an operator-level fleet TOML file (overrides repo-local and user-level fleet definitions).",
+        ),
+    ] = None,
     limit: Annotated[
         int | None,
         typer.Option(
@@ -971,11 +989,16 @@ def status_cmd(
 
     async def _show_status() -> None:
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-        use_fleet = fleet if fleet is not None else (base_cfg.fleet is not None)
+        use_fleet = (
+            fleet is not False
+            if fleet_config_file is not None
+            else (fleet if fleet is not None else (base_cfg.fleet is not None))
+        )
 
         if use_fleet:
             from .runner.loop import collect_fleet_status
 
+            base_cfg = base_cfg.with_fleet_overlay(fleet_config_file)
             table = Table(title="acp-factory Fleet Status")
             table.add_column("Repository", style="bold cyan")
             table.add_column("Issue", justify="right", style="cyan")
