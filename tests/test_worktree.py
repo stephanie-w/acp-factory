@@ -7,11 +7,14 @@ import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from rich.console import Console
 
 from acp_factory.runner import worktree as worktree_module
 from acp_factory.runner.worktree import (
+    GitSyncError,
     WorktreeManager,
+    ensure_workspace_git_sync,
     resolve_main_repo_root,
 )
 from acp_factory.task import TaskContext
@@ -178,3 +181,97 @@ def test_status_worktree_detection_from_subdirectory(tmp_path: Path) -> None:
         cli.status_cmd(workspace=sub_dir, fleet=False)
 
     assert str(wt_path.relative_to(main_root)) in buffer.getvalue()
+
+
+def _setup_remote_and_local(tmp_path: Path) -> tuple[Path, Path]:
+    bare = tmp_path / "origin.git"
+    bare.mkdir()
+    _git("init", "--bare", "-q", cwd=bare)
+
+    local = tmp_path / "local"
+    _git("clone", "-q", str(bare), str(local), cwd=tmp_path)
+    _git("config", "user.email", "factory@example.com", cwd=local)
+    _git("config", "user.name", "Factory Tests", cwd=local)
+    (local / "README.md").write_text("initial\n", encoding="utf-8")
+    _git("add", "README.md", cwd=local)
+    _git("commit", "-qm", "initial", cwd=local)
+    _git("push", "-q", "-u", "origin", "HEAD", cwd=local)
+    return bare, local
+
+
+async def test_ensure_workspace_git_sync_offline(tmp_path: Path) -> None:
+    assert await ensure_workspace_git_sync(tmp_path, offline=True) == 0
+
+
+async def test_ensure_workspace_git_sync_not_git_repo(tmp_path: Path) -> None:
+    non_git = tmp_path / "non_git"
+    non_git.mkdir()
+    assert await ensure_workspace_git_sync(non_git) == 0
+
+
+async def test_ensure_workspace_git_sync_no_remote(tmp_path: Path) -> None:
+    local = _init_repo(tmp_path / "local_no_remote")
+    assert await ensure_workspace_git_sync(local) == 0
+
+
+async def test_ensure_workspace_git_sync_up_to_date(tmp_path: Path) -> None:
+    _, local = _setup_remote_and_local(tmp_path)
+    assert await ensure_workspace_git_sync(local) == 0
+
+
+async def test_ensure_workspace_git_sync_auto_fast_forwards(tmp_path: Path) -> None:
+    bare, local = _setup_remote_and_local(tmp_path)
+
+    # Make a commit from another checkout and push to bare origin
+    other = tmp_path / "other"
+    _git("clone", "-q", str(bare), str(other), cwd=tmp_path)
+    _git("config", "user.email", "other@example.com", cwd=other)
+    _git("config", "user.name", "Other Dev", cwd=other)
+    (other / "feature.txt").write_text("upstream feature\n", encoding="utf-8")
+    _git("add", "feature.txt", cwd=other)
+    _git("commit", "-qm", "feat: new upstream feature", cwd=other)
+    _git("push", "-q", "origin", "HEAD", cwd=other)
+
+    # local is clean and behind
+    synced = await ensure_workspace_git_sync(local)
+    assert synced == 1
+    assert (local / "feature.txt").read_text(encoding="utf-8") == "upstream feature\n"
+
+
+async def test_ensure_workspace_git_sync_dirty_aborts(tmp_path: Path) -> None:
+    bare, local = _setup_remote_and_local(tmp_path)
+
+    other = tmp_path / "other"
+    _git("clone", "-q", str(bare), str(other), cwd=tmp_path)
+    _git("config", "user.email", "other@example.com", cwd=other)
+    _git("config", "user.name", "Other Dev", cwd=other)
+    (other / "feature.txt").write_text("upstream feature\n", encoding="utf-8")
+    _git("add", "feature.txt", cwd=other)
+    _git("commit", "-qm", "feat: new upstream feature", cwd=other)
+    _git("push", "-q", "origin", "HEAD", cwd=other)
+
+    # local is dirty and behind
+    (local / "README.md").write_text("dirty uncommitted change\n", encoding="utf-8")
+    with pytest.raises(GitSyncError, match="uncommitted changes"):
+        await ensure_workspace_git_sync(local)
+
+
+async def test_ensure_workspace_git_sync_diverged_aborts(tmp_path: Path) -> None:
+    bare, local = _setup_remote_and_local(tmp_path)
+
+    other = tmp_path / "other"
+    _git("clone", "-q", str(bare), str(other), cwd=tmp_path)
+    _git("config", "user.email", "other@example.com", cwd=other)
+    _git("config", "user.name", "Other Dev", cwd=other)
+    (other / "remote.txt").write_text("remote\n", encoding="utf-8")
+    _git("add", "remote.txt", cwd=other)
+    _git("commit", "-qm", "remote commit", cwd=other)
+    _git("push", "-q", "origin", "HEAD", cwd=other)
+
+    # local committed a different change -> diverged
+    (local / "local.txt").write_text("local\n", encoding="utf-8")
+    _git("add", "local.txt", cwd=local)
+    _git("commit", "-qm", "local commit", cwd=local)
+
+    with pytest.raises(GitSyncError, match="diverged"):
+        await ensure_workspace_git_sync(local)

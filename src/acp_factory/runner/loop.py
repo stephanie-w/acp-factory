@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -55,6 +56,7 @@ from .worktree import (
     WorktreeManager,
     detect_default_branch,
     ensure_fleet_repo_checkout,
+    ensure_workspace_git_sync,
     get_head_sha,
     is_worktree_clean,
     resolve_fleet_repo_path,
@@ -811,6 +813,7 @@ async def run_issue_stage(
     max_tokens: int | None = None,
     max_cost: float | None = None,
     max_turns: int | None = None,
+    offline: bool = False,
 ) -> FactoryRunOutcome:
     """Execute the active GitHub label stage for a specific issue and transition its label.
 
@@ -820,6 +823,7 @@ async def run_issue_stage(
     """
     ui = display or FactoryDisplay()
     resolved_workspace = workspace.resolve()
+    await ensure_workspace_git_sync(resolved_workspace, offline=offline, display=ui)
     base_cfg = base_config or FactoryConfig.discover(resolved_workspace, config_file)
     effective_dry_run = base_cfg.dry_run if dry_run is None else dry_run
 
@@ -997,6 +1001,12 @@ async def run_issue_stage(
     # token/cost/turn totals accumulate across stage transitions.
     initial_usage = budget_usage_from_meta(task.factory_block)
 
+    effective_base_ref = base_ref
+    if stage == "build" and effective_base_ref is None:
+        with contextlib.suppress(Exception):
+            default_branch = await detect_default_branch(resolved_workspace)
+            effective_base_ref = f"origin/{default_branch}"
+
     outcome = await run_factory(
         cfg,
         resolved_workspace,
@@ -1005,7 +1015,7 @@ async def run_issue_stage(
         repo_slug=effective_repo_slug,
         display=ui,
         verbose=verbose,
-        base_ref=base_ref if use_issue_worktree else None,
+        base_ref=effective_base_ref if use_issue_worktree else None,
         initial_usage=initial_usage,
     )
 
@@ -1168,6 +1178,7 @@ async def run_branch_review(
     dry_run: bool | None = None,
     display: FactoryDisplay | None = None,
     verbose: bool = False,
+    offline: bool = False,
 ) -> FactoryRunOutcome:
     """Review a local working branch against a base branch and optionally open a standalone PR."""
     from ..cli import DEFAULT_PERSONAS, DEFAULT_STAGE_PROMPTS
@@ -1175,6 +1186,7 @@ async def run_branch_review(
 
     ui = display or FactoryDisplay()
     resolved_workspace = workspace.resolve()
+    await ensure_workspace_git_sync(resolved_workspace, offline=offline, display=ui)
     base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
     effective_dry_run = base_cfg.dry_run if dry_run is None else dry_run
 

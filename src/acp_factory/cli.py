@@ -12,7 +12,12 @@ from rich.table import Table
 from .config import FactoryConfig
 from .github import list_actionable_issues, list_all_factory_issues
 from .runner.loop import run_branch_review, run_factory, run_issue_stage
-from .runner.worktree import WorktreeManager, resolve_main_repo_root
+from .runner.worktree import (
+    GitSyncError,
+    WorktreeManager,
+    ensure_workspace_git_sync,
+    resolve_main_repo_root,
+)
 from .task import TaskContext
 from .ui.display import console
 
@@ -503,9 +508,23 @@ def run_cmd(
             help="Maximum number of agent turns allowed in a run (overrides the budget configuration section).",
         ),
     ] = None,
+    offline: Annotated[
+        bool,
+        typer.Option(
+            "--offline",
+            help="Skip pre-flight git fetch and upstream branch sync.",
+        ),
+    ] = False,
 ) -> None:
     """Execute the [Setup -> Worker Agent -> Checks -> Feedback Loop] workflow."""
     resolved_workspace = workspace.resolve()
+    if not offline:
+        try:
+            asyncio.run(ensure_workspace_git_sync(resolved_workspace, offline=offline))
+        except GitSyncError as exc:
+            console.print(f"[bold red]Git Sync Error:[/bold red] {exc}")
+            raise typer.Exit(code=1) from exc
+
     try:
         cfg = FactoryConfig.discover(resolved_workspace, config_file)
         effective_task = task_opt or task_arg
@@ -626,6 +645,13 @@ def issue_cmd(
             help="Maximum number of agent turns allowed in a run (overrides the budget configuration section).",
         ),
     ] = None,
+    offline: Annotated[
+        bool,
+        typer.Option(
+            "--offline",
+            help="Skip pre-flight git fetch and upstream branch sync.",
+        ),
+    ] = False,
 ) -> None:
     """Inspect a GitHub Issue's `factory:*` label, run its stage, update its body in-place, and transition its label."""
     try:
@@ -646,8 +672,12 @@ def issue_cmd(
                 max_tokens=eff_max_tokens,
                 max_cost=eff_max_cost,
                 max_turns=eff_max_turns,
+                offline=offline,
             )
         )
+    except GitSyncError as exc:
+        console.print(f"[bold red]Git Sync Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
     except Exception as exc:
         console.print(f"[bold red]Issue Stage Error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -725,6 +755,13 @@ def review_cmd(
         bool,
         typer.Option("--verbose", "-v", help="Log raw ACP JSON-RPC messages."),
     ] = False,
+    offline: Annotated[
+        bool,
+        typer.Option(
+            "--offline",
+            help="Skip pre-flight git fetch and upstream branch sync.",
+        ),
+    ] = False,
 ) -> None:
     """Review a working branch without a GitHub Issue and optionally open a standalone Pull Request."""
     try:
@@ -739,8 +776,12 @@ def review_cmd(
                 config_file=config_file,
                 dry_run=dry_run,
                 verbose=verbose,
+                offline=offline,
             )
         )
+    except GitSyncError as exc:
+        console.print(f"[bold red]Git Sync Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
     except Exception as exc:
         console.print(f"[bold red]Branch Review Error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -834,6 +875,13 @@ def next_cmd(
             help="Maximum number of agent turns allowed in a run (overrides the budget configuration section).",
         ),
     ] = None,
+    offline: Annotated[
+        bool,
+        typer.Option(
+            "--offline",
+            help="Skip pre-flight git fetch and upstream branch sync.",
+        ),
+    ] = False,
 ) -> None:
     """Find open GitHub Issues with actionable `factory:*` labels and run their current stage."""
     resolved_workspace = workspace.resolve()
@@ -918,6 +966,7 @@ def next_cmd(
                 max_tokens=eff_max_tokens,
                 max_cost=eff_max_cost,
                 max_turns=eff_max_turns,
+                offline=offline,
             )
             if outcome.stage_verdict:
                 v = outcome.stage_verdict
@@ -941,6 +990,9 @@ def next_cmd(
 
     try:
         rc = asyncio.run(_run_next())
+    except GitSyncError as exc:
+        console.print(f"[bold red]Git Sync Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(code=1) from exc

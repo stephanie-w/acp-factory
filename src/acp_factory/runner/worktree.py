@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 import shutil
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class WorktreeError(RuntimeError):
     """Raised when git worktree creation or cleanup fails."""
+
+
+class GitSyncError(RuntimeError):
+    """Raised when the local workspace cannot be cleanly synced with upstream origin."""
 
 
 _REPO_SLUG_RE = re.compile(
@@ -133,6 +141,113 @@ async def detect_default_branch(repo: Path) -> str:
         if line.startswith("ref: refs/heads/"):
             return line.split("refs/heads/", 1)[1].split("\t", 1)[0].strip()
     raise WorktreeError(f"Cannot parse default branch from ls-remote in {repo}: {out}")
+
+
+async def ensure_workspace_git_sync(
+    repo_root: Path,
+    *,
+    offline: bool = False,
+    display: Any = None,
+) -> int:
+    """Ensure the local repository is in sync with its upstream remote tracking branch.
+
+    If the repository has a tracking branch and local HEAD is clean and behind, it
+    automatically fast-forwards to match upstream (`git merge --ff-only @{u}`).
+    If the working tree is dirty and behind, or if local HEAD has diverged from
+    upstream, `GitSyncError` is raised to abort immediately before launching an agent.
+
+    Returns the number of commits fast-forwarded (0 if already up to date).
+    """
+    if offline:
+        return 0
+
+    main_root = resolve_main_repo_root(repo_root)
+
+    # 1. Verify this is a git repository
+    rc, top_level, _ = await _run_git(main_root, "rev-parse", "--show-toplevel")
+    if rc != 0 or not top_level:
+        return 0
+
+    # 2. Check if remote 'origin' exists
+    rc, remotes, _ = await _run_git(main_root, "remote")
+    if rc != 0 or "origin" not in remotes.split():
+        return 0
+
+    # 3. Fetch origin with prune
+    rc_fetch, _, fetch_err = await _run_git(main_root, "fetch", "--prune", "origin")
+    if rc_fetch != 0:
+        raise GitSyncError(
+            f"Pre-flight sync failed: unable to fetch from 'origin' in {main_root}: {fetch_err}"
+        )
+
+    # 4. Check current branch in main_root
+    rc_branch, current_branch, _ = await _run_git(
+        main_root, "rev-parse", "--abbrev-ref", "HEAD"
+    )
+    if rc_branch != 0 or not current_branch or current_branch == "HEAD":
+        # Detached HEAD - skip branch syncing, but fetch already happened
+        return 0
+
+    # 5. Check upstream tracking branch
+    rc_up, upstream, _ = await _run_git(main_root, "rev-parse", "--abbrev-ref", "@{u}")
+    if rc_up != 0 or not upstream:
+        # Branch has no upstream tracking branch
+        return 0
+
+    # 6. Check commit delta between local HEAD and upstream
+    rc_behind, behind_str, _ = await _run_git(
+        main_root, "rev-list", "--count", f"HEAD..{upstream}"
+    )
+    rc_ahead, ahead_str, _ = await _run_git(
+        main_root, "rev-list", "--count", f"{upstream}..HEAD"
+    )
+
+    behind = int(behind_str) if rc_behind == 0 and behind_str.isdigit() else 0
+    ahead = int(ahead_str) if rc_ahead == 0 and ahead_str.isdigit() else 0
+
+    if behind == 0:
+        return 0
+
+    # Local is behind upstream
+    clean = await is_worktree_clean(main_root)
+    if not clean:
+        raise GitSyncError(
+            f"Pre-flight sync aborted: local branch '{current_branch}' is {behind} commit(s) "
+            f"behind '{upstream}' and has uncommitted changes. "
+            "Please stash or commit your changes and run 'git pull' before running acp-factory."
+        )
+
+    if ahead > 0:
+        raise GitSyncError(
+            f"Pre-flight sync aborted: local branch '{current_branch}' has diverged from "
+            f"'{upstream}' ({ahead} commit(s) ahead, {behind} commit(s) behind). "
+            "Please reconcile your git branches manually before running acp-factory."
+        )
+
+    # Clean and strictly behind -> auto fast-forward
+    rc_merge, merge_out, merge_err = await _run_git(
+        main_root, "merge", "--ff-only", upstream
+    )
+    if rc_merge != 0:
+        raise GitSyncError(
+            f"Pre-flight auto-sync failed: could not fast-forward '{current_branch}' to '{upstream}': "
+            f"{merge_err or merge_out}"
+        )
+
+    logger.info(
+        "Pre-flight git sync: fast-forwarded %s to match %s (%d new commit%s)",
+        current_branch,
+        upstream,
+        behind,
+        "s" if behind > 1 else "",
+    )
+    if display and hasattr(display, "console"):
+        display.console.print(
+            f"[bold green]✓ Pre-flight sync:[/bold green] Fast-forwarded [cyan]{current_branch}[/cyan] "
+            f"to match [cyan]{upstream}[/cyan] ({behind} new commit{'s' if behind > 1 else ''})."
+        )
+
+    return behind
 
 
 def _expand_path(raw: str) -> Path:
