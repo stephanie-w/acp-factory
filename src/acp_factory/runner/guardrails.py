@@ -194,6 +194,28 @@ def is_command_safe(
     return True, None
 
 
+def _parse_env_json_list(env_var: str) -> list[str]:
+    """Parse a JSON list from *env_var*, warning to stderr if invalid."""
+    raw = os.environ.get(env_var, "")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(
+            f"guardrails: ignoring invalid JSON in {env_var}: {exc}",
+            file=sys.stderr,
+        )
+        return []
+    if not isinstance(parsed, list):
+        print(
+            f"guardrails: ignoring non-list value in {env_var}",
+            file=sys.stderr,
+        )
+        return []
+    return [str(item) for item in parsed]
+
+
 def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint invoked by acpterm permission hook."""
     parser = argparse.ArgumentParser(
@@ -226,21 +248,14 @@ def main(argv: list[str] | None = None) -> None:
         or None
     )
 
-    allowed_paths = list(args.allow_path)
-    allowed_raw = os.environ.get("FACTORY_GUARDRAILS_ALLOWED_PATHS", "")
-    if allowed_raw:
-        try:
-            allowed_paths.extend(json.loads(allowed_raw))
-        except Exception:
-            pass
-
-    custom_denied = list(args.deny_cmd)
-    denied_raw = os.environ.get("FACTORY_GUARDRAILS_DENIED_COMMANDS", "")
-    if denied_raw:
-        try:
-            custom_denied.extend(json.loads(denied_raw))
-        except Exception:
-            pass
+    allowed_paths = [
+        *args.allow_path,
+        *_parse_env_json_list("FACTORY_GUARDRAILS_ALLOWED_PATHS"),
+    ]
+    custom_denied = [
+        *args.deny_cmd,
+        *_parse_env_json_list("FACTORY_GUARDRAILS_DENIED_COMMANDS"),
+    ]
 
     is_read = kind in ("read", "view")
 

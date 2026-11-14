@@ -320,3 +320,26 @@ def test_guardrails_main_deny_runs_cli_flag(tmp_path: Path) -> None:
     with patch.dict("os.environ", env, clear=True), pytest.raises(SystemExit) as exc:
         guardrails_main([])
     assert exc.value.code == 0
+
+
+def test_guardrails_main_warns_on_invalid_env_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    inside = ws / "file.py"
+    inside.touch()
+
+    env = {
+        "ACPTERM_PERMISSION_KIND": "read",
+        "ACPTERM_PERMISSION_PATH": str(inside),
+        "ACPTERM_CWD": str(ws),
+        "FACTORY_GUARDRAILS_ALLOWED_PATHS": "{bad json",
+        "FACTORY_GUARDRAILS_DENIED_COMMANDS": '"not-a-list"',
+    }
+    with patch.dict("os.environ", env, clear=True), pytest.raises(SystemExit) as exc:
+        guardrails_main([])
+    assert exc.value.code == 0
+    err = capsys.readouterr().err
+    assert "FACTORY_GUARDRAILS_ALLOWED_PATHS" in err
+    assert "FACTORY_GUARDRAILS_DENIED_COMMANDS" in err

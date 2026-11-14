@@ -475,7 +475,7 @@ def parse_stage_verdict(
             _OPEN_QUESTIONS_RE.search(_mask_code_blocks(cleaned_body))
         )
         if raw_token in ("NEEDS_HUMAN", "NEEDS_INPUT", "OPEN_QUESTIONS") or (
-            has_open_questions and raw_token != "SPEC_READY"
+            has_open_questions and raw_token != "SPEC_READY"  # noqa: S105
         ):
             return StageVerdict(
                 stage="spec",

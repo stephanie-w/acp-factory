@@ -90,7 +90,7 @@ def resolve_main_repo_root(path: Path) -> Path:
     resolved = path.resolve()
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],  # noqa: S607
             cwd=resolved,
             capture_output=True,
             text=True,
