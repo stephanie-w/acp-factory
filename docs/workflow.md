@@ -186,7 +186,7 @@ acp-factory run \
 ### B. Structured Run Artifacts & Fast Querying with `jq`
 
 Each execution stores structured artifacts under `.factory/runs/<run-id>/`:
-- **`run.json`**: Top-level run metadata (attempts used, total duration, budget token/cost consumption, stage outcome, and failure reason).
+- **`run.json`**: Top-level run metadata (attempts used, total duration, stage outcome, and failure reason). Its `usage` block records only the token, cost, and turn consumption of this single run; cumulative issue totals across stages are tracked separately in the issue's `<!-- factory:meta -->` block.
 - **`attempt-<N>/transcript.summary.json`**: Condensed event snapshot with truncated tool output previews and omitted raw scratchpads. Tailored for token efficiency during `retro`.
 - **`attempt-<N>/transcript.json`**: Complete structured JSON event tree containing all tool invocations, inputs, file operations, permissions, and duration.
 - **`attempt-<N>/transcript.md`**: Full raw Markdown transcript for human deep dives.
