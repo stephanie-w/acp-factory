@@ -343,3 +343,26 @@ def test_guardrails_main_warns_on_invalid_env_json(
     err = capsys.readouterr().err
     assert "FACTORY_GUARDRAILS_ALLOWED_PATHS" in err
     assert "FACTORY_GUARDRAILS_DENIED_COMMANDS" in err
+
+
+def test_guardrails_blocks_dotenv_files_and_commands(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    for blocked in (".env", ".env.local", ".env.production"):
+        ok, reason = is_path_contained(ws / blocked, ws, is_read=True)
+        assert ok is False
+        assert ".env" in (reason or "")
+
+    for allowed in (".env.example", ".env.sample", ".env.template", ".venv/pyvenv.cfg"):
+        ok, reason = is_path_contained(ws / allowed, ws, is_read=True)
+        assert ok is True, reason
+
+    for cmd in ("cat .env", "grep SECRET .env.local", "source config/.env.prod"):
+        ok, reason = is_command_safe(cmd)
+        assert ok is False
+        assert ".env" in (reason or "")
+
+    for safe_cmd in ("cat .env.example", "ls .venv/bin"):
+        ok, reason = is_command_safe(safe_cmd)
+        assert ok is True, reason

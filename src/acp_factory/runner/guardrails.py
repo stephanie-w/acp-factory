@@ -88,6 +88,20 @@ _RUN_ARTIFACTS_CMD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SAFE_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
+
+_ENV_FILE_CMD_RE = re.compile(
+    r"(?:^|[\s/'\"=])\.env(?:\.(?!example\b|sample\b|template\b)[a-zA-Z0-9_.-]+)?(?=$|[\s'\";|&>])"
+)
+
+
+def _is_env_secret_path(target_resolved: Path) -> bool:
+    """Return True if target_resolved is a .env secret file (excluding safe templates)."""
+    name = target_resolved.name
+    if name in _SAFE_ENV_TEMPLATES:
+        return False
+    return name == ".env" or name.startswith(".env.")
+
 
 def _is_run_artifact_path(target_resolved: Path, ws_resolved: Path) -> bool:
     """Return True if target_resolved points inside .factory/runs or .factory/latest-* pointers."""
@@ -127,6 +141,12 @@ def is_path_contained(
         target_resolved = target.resolve()
     except (OSError, RuntimeError) as exc:
         return False, f"Invalid target path '{target_path}': {exc}"
+
+    if _is_env_secret_path(target_resolved):
+        return (
+            False,
+            f"Target path '{target_path}' references a '.env' file, which is blocked by guardrails",
+        )
 
     # 1. Target is inside current workspace
     if target_resolved == ws_resolved or target_resolved.is_relative_to(ws_resolved):
@@ -172,6 +192,12 @@ def is_command_safe(
         return (
             False,
             f"Command references '.factory/runs' or run artifacts, which are restricted for this stage: '{cmd_str}'",
+        )
+
+    if _ENV_FILE_CMD_RE.search(cmd_str):
+        return (
+            False,
+            f"Command targets a '.env' file, which is blocked by guardrails: '{cmd_str}'",
         )
 
     for pattern, reason in DANGEROUS_COMMAND_PATTERNS:
