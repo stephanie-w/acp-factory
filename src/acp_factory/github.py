@@ -79,7 +79,55 @@ async def fetch_issue(
         cmd.extend(["--repo", repo_slug])
     out = await run_gh(cmd, cwd=cwd)
     data = json.loads(out)
-    return TaskContext.from_gh_json(data)
+    task = TaskContext.from_gh_json(data)
+    try:
+        await _merge_open_pr_feedback(task, cwd, repo_slug=repo_slug)
+    except (GitHubError, json.JSONDecodeError):
+        # PR feedback is best-effort: issues without a pushed branch or PR must still load.
+        pass
+    return task
+
+
+async def _merge_open_pr_feedback(
+    task: TaskContext, cwd: Path, *, repo_slug: str | None = None
+) -> None:
+    """Fetch comments and reviews from the open PR for `task.branch`, if one exists."""
+    list_cmd = [
+        "pr",
+        "list",
+        "--head",
+        task.branch,
+        "--state",
+        "open",
+        "--json",
+        "number,url",
+    ]
+    if repo_slug:
+        list_cmd.extend(["--repo", repo_slug])
+    list_out = await run_gh(list_cmd, cwd=cwd)
+    open_prs = json.loads(list_out) if list_out else []
+    if not open_prs or not isinstance(open_prs[0], dict) or "number" not in open_prs[0]:
+        return
+
+    open_pr = open_prs[0]
+    task.pr_url = str(open_pr.get("url") or "") or None
+    view_cmd = [
+        "pr",
+        "view",
+        str(open_pr["number"]),
+        "--json",
+        "comments,reviews",
+    ]
+    if repo_slug:
+        view_cmd.extend(["--repo", repo_slug])
+    view_out = await run_gh(view_cmd, cwd=cwd)
+    feedback = json.loads(view_out) if view_out else {}
+    if not isinstance(feedback, dict):
+        return
+    task.merge_pr_feedback(
+        feedback.get("comments") or [],
+        feedback.get("reviews") or [],
+    )
 
 
 async def list_actionable_issues(

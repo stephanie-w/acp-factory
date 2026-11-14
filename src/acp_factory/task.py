@@ -223,11 +223,35 @@ def parse_review_round(meta: dict[str, str]) -> int:
 
 
 class IssueComment(BaseModel):
-    """A human comment on a GitHub Issue."""
+    """A human comment, PR conversation comment, or PR review submission."""
 
     author: str = Field(default="unknown")
     body: str = Field(default="")
     created_at: str = Field(default="")
+    kind: str = Field(default="issue_comment")
+    review_state: str | None = Field(default=None)
+
+
+def _gh_author_login(raw_author: object) -> str:
+    """Extract a login from a `gh` author object, tolerating malformed payloads."""
+    if isinstance(raw_author, dict):
+        return str(raw_author.get("login") or "unknown")
+    return str(raw_author) if raw_author else "unknown"
+
+
+def _parse_feedback_comment(
+    raw: object, *, kind: str, review_state: str | None = None
+) -> IssueComment | None:
+    """Parse one `gh pr view` comment/review entry, returning None when malformed."""
+    if not isinstance(raw, dict):
+        return None
+    return IssueComment(
+        author=_gh_author_login(raw.get("author")),
+        body=str(raw.get("body") or ""),
+        created_at=str(raw.get("createdAt") or ""),
+        kind=kind,
+        review_state=review_state,
+    )
 
 
 class TaskContext(BaseModel):
@@ -301,6 +325,27 @@ class TaskContext(BaseModel):
             comments=comments,
         )
 
+    def merge_pr_feedback(
+        self,
+        comments_data: list[object],
+        reviews_data: list[object],
+    ) -> None:
+        """Append PR comments and reviews, then sort all feedback chronologically."""
+        for raw in comments_data:
+            comment = _parse_feedback_comment(raw, kind="pr_comment")
+            if comment is not None:
+                self.comments.append(comment)
+        for raw in reviews_data:
+            state = raw.get("state") if isinstance(raw, dict) else None
+            review = _parse_feedback_comment(
+                raw,
+                kind="pr_review",
+                review_state=str(state) if state else None,
+            )
+            if review is not None:
+                self.comments.append(review)
+        self.comments.sort(key=lambda comment: comment.created_at)
+
 
 def split_issue_body(full_body: str) -> tuple[str, str]:
     """Split a GitHub Issue body into `(original_body, factory_block)`.
@@ -352,6 +397,8 @@ def format_task_prompt_context(task: TaskContext) -> str:
     ]
     if task.url:
         lines.append(f"- **URL:** {task.url}")
+    if task.pr_url:
+        lines.append(f"- **PR URL:** {task.pr_url}")
     if task.labels:
         lines.append(f"- **Labels:** {', '.join(task.labels)}")
     lines.append(f"- **Target Branch:** `{task.branch}`")
@@ -367,12 +414,23 @@ def format_task_prompt_context(task: TaskContext) -> str:
 
     if task.comments:
         lines.append("## Human Comments (Chronological)")
-        for idx, comment in enumerate(task.comments, start=1):
-            header = f"### Comment #{idx} by @{comment.author}"
+        issue_idx = 0
+        for comment in task.comments:
+            if comment.kind == "pr_review":
+                state = comment.review_state or "UNKNOWN"
+                header = f"### PR Review by @{comment.author} ({state})"
+                body = comment.body.strip() or "*(no review body provided)*"
+            elif comment.kind == "pr_comment":
+                header = f"### PR Comment by @{comment.author}"
+                body = comment.body.strip()
+            else:
+                issue_idx += 1
+                header = f"### Comment #{issue_idx} by @{comment.author}"
+                body = comment.body.strip()
             if comment.created_at:
                 header += f" ({comment.created_at})"
             lines.append(header)
-            lines.append(comment.body.strip())
+            lines.append(body)
             lines.append("")
 
     return "\n".join(lines).strip()
