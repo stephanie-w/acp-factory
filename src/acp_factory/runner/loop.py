@@ -47,6 +47,7 @@ from ..task import (
     parse_review_round,
     parse_stage_verdict,
     render_budget_escalation,
+    set_attribution_banner,
     set_factory_meta,
     strip_factory_findings,
 )
@@ -1078,6 +1079,9 @@ async def run_issue_stage(
                 cost=format_cost_usd(outcome.usage.cost_usd),
                 turns=str(outcome.usage.turns),
             )
+            escalated_block = set_attribution_banner(
+                escalated_block, stage=stage, agent=cfg.agent.name
+            )
             if effective_dry_run:
                 fail_verdict = StageVerdict(
                     stage=stage,
@@ -1166,6 +1170,11 @@ async def run_issue_stage(
         tokens=str(outcome.usage.tokens),
         cost=format_cost_usd(outcome.usage.cost_usd),
         turns=str(outcome.usage.turns),
+    )
+    verdict.updated_factory_block = set_attribution_banner(
+        verdict.updated_factory_block,
+        stage=stage,
+        agent=cfg.agent.name,
     )
     outcome.stage_verdict = verdict
 

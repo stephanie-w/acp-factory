@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
+from ..task import FACTORY_BOT_EMAIL, FACTORY_BOT_NAME
+
 if TYPE_CHECKING:
     from ..acp.client import FactoryACPClient
     from ..config import CheckConfig
@@ -70,8 +72,11 @@ path_parts = [
     p for p in os.environ.get("PATH", "").split(os.pathsep)
     if p and os.path.abspath(p) != shim_dir
 ]
+factory_token = os.environ.get("FACTORY_GH_TOKEN")
 clean_env = dict(os.environ)
 clean_env["PATH"] = os.pathsep.join(path_parts)
+if factory_token:
+    clean_env["GH_TOKEN"] = factory_token
 real_gh = shutil.which("gh", path=clean_env["PATH"])
 if not real_gh:
     sys.stderr.write("gh: command not found\\n")
@@ -167,6 +172,18 @@ def build_workspace_env(
 
     for k in keys_to_strip:
         env.pop(k, None)
+
+    # Attribute every subprocess commit to the factory bot, never the host developer.
+    env["GIT_AUTHOR_NAME"] = FACTORY_BOT_NAME
+    env["GIT_AUTHOR_EMAIL"] = FACTORY_BOT_EMAIL
+    env["GIT_COMMITTER_NAME"] = FACTORY_BOT_NAME
+    env["GIT_COMMITTER_EMAIL"] = FACTORY_BOT_EMAIL
+
+    # Route `gh` subprocesses through the bot token when the orchestrator provides one,
+    # leaving interactive `gh auth` credentials untouched otherwise.
+    factory_token = env.get("FACTORY_GH_TOKEN")
+    if factory_token:
+        env["GH_TOKEN"] = factory_token
 
     bundled_repo_root = Path(__file__).resolve().parents[3]
     resolved_res = resources_dir or resolve_resources_dir()

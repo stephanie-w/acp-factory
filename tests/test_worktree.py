@@ -144,6 +144,38 @@ async def test_create_from_different_worktree_anchors_to_main(tmp_path: Path) ->
     assert manager.branch_name == "factory/issue-6"
 
 
+async def test_worktree_git_identity_isolation(tmp_path: Path) -> None:
+    main_root = _init_repo(tmp_path / "main")
+
+    wt_path = await WorktreeManager(main_root, enabled=True, issue_number=5).create()
+
+    assert _git("config", "user.name", cwd=wt_path).stdout.strip() == "acp-factory[bot]"
+    assert (
+        _git("config", "user.email", cwd=wt_path).stdout.strip()
+        == "acp-factory[bot]@users.noreply.github.com"
+    )
+    # The parent repository must keep the developer's interactive identity untouched.
+    assert _git("config", "user.name", cwd=main_root).stdout.strip() == "Factory Tests"
+    assert (
+        _git("config", "user.email", cwd=main_root).stdout.strip()
+        == "factory@example.com"
+    )
+
+    (wt_path / "bot.txt").write_text("bot\n", encoding="utf-8")
+    _git("add", "bot.txt", cwd=wt_path)
+    _git("commit", "-qm", "feat: bot commit", cwd=wt_path)
+    assert (
+        _git("log", "-1", "--pretty=%an <%ae>", cwd=wt_path).stdout.strip()
+        == "acp-factory[bot] <acp-factory[bot]@users.noreply.github.com>"
+    )
+
+    # Reusing an existing worktree re-applies the bot identity and stays isolated.
+    reused = await WorktreeManager(main_root, enabled=True, issue_number=5).create()
+    assert reused == wt_path
+    assert _git("config", "user.name", cwd=reused).stdout.strip() == "acp-factory[bot]"
+    assert _git("config", "user.name", cwd=main_root).stdout.strip() == "Factory Tests"
+
+
 async def test_remove_issue_worktree_from_subdirectory(tmp_path: Path) -> None:
     main_root = _init_repo(tmp_path / "main")
     wt_path = _add_issue_worktree(main_root, 5)

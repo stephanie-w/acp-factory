@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,14 @@ class GitHubError(RuntimeError):
     """Raised when a `gh` CLI command fails."""
 
 
+def _gh_subprocess_env() -> dict[str, str] | None:
+    """Return an env overriding `GH_TOKEN` with `FACTORY_GH_TOKEN`, or None to inherit."""
+    factory_token = os.environ.get("FACTORY_GH_TOKEN")
+    if not factory_token:
+        return None
+    return {**os.environ, "GH_TOKEN": factory_token}
+
+
 async def run_gh(
     args: list[str],
     cwd: Path,
@@ -48,6 +57,7 @@ async def run_gh(
         "gh",
         *args,
         cwd=str(cwd),
+        env=_gh_subprocess_env(),
         stdin=asyncio.subprocess.PIPE if input_text is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
