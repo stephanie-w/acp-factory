@@ -133,3 +133,90 @@ def test_history_cmd_table_renders(tmp_path: Path) -> None:
     assert "run-a" in text
     assert "#7" in text
     assert "acme/core" in text
+
+
+def test_history_cmd_table_renders_model_and_attempts(tmp_path: Path) -> None:
+    runs_dir = tmp_path / ".factory" / "runs"
+    _write_run(
+        runs_dir,
+        "run-a",
+        "2026-11-13T16:00:00+00:00",
+        model="claude-3-5-sonnet",
+        attempts_used=2,
+        max_attempts=3,
+    )
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(workspace=tmp_path, limit=10, json_output=False)
+
+    text = out.getvalue()
+    assert "Model" in text
+    assert "Attempts" in text
+    assert "claude-3-5-sonnet" in text
+    assert "2/3" in text
+
+
+def test_history_cmd_table_renders_legacy_missing_fields(tmp_path: Path) -> None:
+    runs_dir = tmp_path / ".factory" / "runs"
+    _write_run(runs_dir, "legacy", "2026-11-13T16:00:00+00:00")
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(workspace=tmp_path, limit=10, json_output=False)
+
+    text = out.getvalue()
+    assert "Model" in text
+    assert "Attempts" in text
+    assert "legacy" in text
+    assert "-" in text
+
+
+def test_history_cmd_table_attempts_without_max_attempts(tmp_path: Path) -> None:
+    runs_dir = tmp_path / ".factory" / "runs"
+    _write_run(
+        runs_dir,
+        "partial",
+        "2026-11-13T16:00:00+00:00",
+        attempts_used=9,
+    )
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(workspace=tmp_path, limit=10, json_output=False)
+
+    assert "9" in out.getvalue()
+
+
+def test_history_cmd_table_rejects_boolean_attempts(tmp_path: Path) -> None:
+    runs_dir = tmp_path / ".factory" / "runs"
+    _write_run(
+        runs_dir,
+        "booly",
+        "2026-11-13T16:00:00+00:00",
+        model="",
+        attempts_used=True,
+        max_attempts=False,
+    )
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(workspace=tmp_path, limit=10, json_output=False)
+
+    text = out.getvalue()
+    assert "booly" in text
+    assert "-" in text
+    assert "True" not in text
+    assert "False" not in text

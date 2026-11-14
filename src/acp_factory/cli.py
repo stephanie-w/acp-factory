@@ -1253,9 +1253,11 @@ def history_cmd(
     table = Table(title="acp-factory Run History")
     table.add_column("Run ID", style="dim")
     table.add_column("Stage", style="cyan")
+    table.add_column("Model")
     table.add_column("Issue", justify="right", style="bold cyan")
     table.add_column("Repo")
     table.add_column("Branch", style="yellow")
+    table.add_column("Attempts", justify="right", no_wrap=True)
     table.add_column("Dur")
     table.add_column("Turns", justify="right")
     table.add_column("Tokens", justify="right")
@@ -1286,12 +1288,29 @@ def history_cmd(
         cost_cell = (
             f"${cost:.4f}" if telemetry and isinstance(cost, (int, float)) else "-"
         )
+        model_cell = str(rec.get("model") or "-")
+        attempts_used = rec.get("attempts_used")
+        max_attempts = rec.get("max_attempts")
+        attempts_used_is_int = isinstance(attempts_used, int) and not isinstance(
+            attempts_used, bool
+        )
+        max_attempts_is_int = isinstance(max_attempts, int) and not isinstance(
+            max_attempts, bool
+        )
+        if attempts_used_is_int and max_attempts_is_int:
+            attempts_cell = f"{attempts_used}/{max_attempts}"
+        elif attempts_used_is_int:
+            attempts_cell = str(attempts_used)
+        else:
+            attempts_cell = "-"
         table.add_row(
             str(rec.get("run_id") or "-"),
             str(rec.get("stage") or "-"),
+            model_cell,
             f"#{issue}" if issue is not None else "-",
             str(rec.get("repo_slug") or "-"),
             str(rec.get("branch") or "-"),
+            attempts_cell,
             f"{dur:.0f}s" if isinstance(dur, (int, float)) else "-",
             turns_cell,
             tokens_cell,
