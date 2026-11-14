@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +27,17 @@ def _write_run(runs_dir: Path, run_id: str, timestamp: str, **extra: object) -> 
     }
     payload.update(extra)
     (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _history_columns(text: str) -> dict[str, list[str]]:
+    """Map each rendered column header to its ordered cell values."""
+    rows = [
+        line.strip().strip("│┃")
+        for line in text.splitlines()
+        if "│" in line or "┃" in line
+    ]
+    header, *data = ([cell.strip() for cell in re.split("[│┃]", row)] for row in rows)
+    return {name: [row[index] for row in data] for index, name in enumerate(header)}
 
 
 def test_list_run_history_sorts_newest_first(tmp_path: Path) -> None:
@@ -154,10 +166,9 @@ def test_history_cmd_table_renders_model_and_attempts(tmp_path: Path) -> None:
         history_cmd(workspace=tmp_path, limit=10, json_output=False)
 
     text = out.getvalue()
-    assert "Model" in text
-    assert "Attempts" in text
-    assert "claude-3-5-sonnet" in text
-    assert "2/3" in text
+    columns = _history_columns(text)
+    assert columns["Model"] == ["claude-3-5-sonnet"]
+    assert columns["Attempts"] == ["2/3"]
 
 
 def test_history_cmd_table_renders_legacy_missing_fields(tmp_path: Path) -> None:
@@ -171,11 +182,9 @@ def test_history_cmd_table_renders_legacy_missing_fields(tmp_path: Path) -> None
     ):
         history_cmd(workspace=tmp_path, limit=10, json_output=False)
 
-    text = out.getvalue()
-    assert "Model" in text
-    assert "Attempts" in text
-    assert "legacy" in text
-    assert "-" in text
+    columns = _history_columns(out.getvalue())
+    assert columns["Model"] == ["-"]
+    assert columns["Attempts"] == ["-"]
 
 
 def test_history_cmd_table_attempts_without_max_attempts(tmp_path: Path) -> None:
@@ -194,7 +203,9 @@ def test_history_cmd_table_attempts_without_max_attempts(tmp_path: Path) -> None
     ):
         history_cmd(workspace=tmp_path, limit=10, json_output=False)
 
-    assert "9" in out.getvalue()
+    columns = _history_columns(out.getvalue())
+    assert columns["Attempts"] == ["9"]
+    assert columns["Model"] == ["-"]
 
 
 def test_history_cmd_table_rejects_boolean_attempts(tmp_path: Path) -> None:
@@ -215,8 +226,6 @@ def test_history_cmd_table_rejects_boolean_attempts(tmp_path: Path) -> None:
     ):
         history_cmd(workspace=tmp_path, limit=10, json_output=False)
 
-    text = out.getvalue()
-    assert "booly" in text
-    assert "-" in text
-    assert "True" not in text
-    assert "False" not in text
+    columns = _history_columns(out.getvalue())
+    assert columns["Model"] == ["-"]
+    assert columns["Attempts"] == ["-"]
