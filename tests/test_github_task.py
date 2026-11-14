@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from acp_factory.github import GitHubError, fetch_issue
+import pytest
+
+from acp_factory.github import GitHubError, fetch_issue, run_gh
 from acp_factory.runner.checks import parse_review_verdict_status
 from acp_factory.runner.loop import (
     FactoryRunOutcome,
@@ -32,10 +35,13 @@ from acp_factory.task import (
     format_task_prompt_context,
     parse_factory_meta,
     parse_stage_verdict,
+    render_attribution_banner,
     render_issue_body,
     replace_factory_findings,
+    set_attribution_banner,
     set_factory_meta,
     split_issue_body,
+    strip_attribution_banner,
     strip_factory_findings,
     strip_factory_meta,
 )
@@ -1237,3 +1243,86 @@ def test_clean_markdown_and_verdict_preserve_status_inside_code_blocks() -> None
     assert verdict.target_label == LABEL_SPEC_READY
     assert "Status: FAILED" in verdict.updated_factory_block
     assert "## Out of Scope" in verdict.updated_factory_block
+
+
+def test_attribution_banner_render_place_and_strip() -> None:
+    spec = "## Specification\n- Add pagination."
+
+    block = set_attribution_banner(spec, stage="spec", agent="opencode")
+    assert block.startswith("> 🤖 **acp-factory** | Stage: spec | Agent: opencode")
+
+    rendered = render_issue_body("Original issue body.", block)
+    assert (
+        "<!-- factory:start -->\n> 🤖 **acp-factory** | Stage: spec | Agent: opencode"
+    ) in rendered
+
+    # When metadata is present the banner sits immediately after the machine-parseable line.
+    meta_block = set_factory_meta(spec, tokens="10", cost="0.01", turns="1")
+    with_meta = set_attribution_banner(meta_block, stage="build", agent="opencode")
+    lines = with_meta.splitlines()
+    assert lines[0].startswith("<!-- factory:meta ")
+    assert lines[1] == "> 🤖 **acp-factory** | Stage: build | Agent: opencode"
+
+    # Re-rendering replaces the stale banner instead of stacking a second one.
+    updated = set_attribution_banner(with_meta, stage="review", agent="claude")
+    assert updated.count("> 🤖 **acp-factory**") == 1
+    assert "Stage: review" in updated
+    assert "Stage: build" not in updated
+
+    # Clean specs (used in PR bodies and downstream prompts) drop the banner.
+    assert clean_spec_block(with_meta) == spec
+    assert "🤖" not in clean_spec_block(with_meta)
+    assert strip_attribution_banner(with_meta) == meta_block
+
+    assert render_attribution_banner("triage", "opencode") == (
+        "> 🤖 **acp-factory** | Stage: triage | Agent: opencode"
+    )
+
+
+def test_attribution_banner_rejects_malformed_fields() -> None:
+    with pytest.raises(ValueError, match="stage"):
+        render_attribution_banner("", "opencode")
+    with pytest.raises(ValueError, match="agent"):
+        render_attribution_banner("spec", "   ")
+
+    # Newlines and separators in adapter-provided names cannot break the banner line.
+    banner = render_attribution_banner("spec\nInjected", "agent|name")
+    assert banner == "> 🤖 **acp-factory** | Stage: spec Injected | Agent: agent/name"
+    assert len(banner.splitlines()) == 1
+
+
+async def test_run_gh_factory_token_override(tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            return b"ok", b""
+
+    async def fake_exec(*args: object, **kwargs: Any) -> _FakeProc:
+        captured.clear()
+        captured.update(kwargs)
+        return _FakeProc()
+
+    with (
+        patch.dict(
+            "os.environ",
+            {"GH_TOKEN": "human-token", "FACTORY_GH_TOKEN": "bot-token"},
+            clear=True,
+        ),
+        patch("acp_factory.github.asyncio.create_subprocess_exec", new=fake_exec),
+    ):
+        out = await run_gh(["issue", "view", "1"], cwd=tmp_path)
+
+    assert out == "ok"
+    assert captured["env"]["GH_TOKEN"] == "bot-token"
+
+    # Without a factory token the environment is left untouched (interactive `gh auth`).
+    with (
+        patch.dict("os.environ", {"GH_TOKEN": "human-token"}, clear=True),
+        patch("acp_factory.github.asyncio.create_subprocess_exec", new=fake_exec),
+    ):
+        await run_gh(["issue", "view", "1"], cwd=tmp_path)
+
+    assert captured.get("env") is None

@@ -12,6 +12,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from ..task import FACTORY_BOT_EMAIL, FACTORY_BOT_NAME
 from ..ui.display import FactoryDisplay
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,37 @@ async def _run_git(cwd: Path, *args: str) -> tuple[int, str, str]:
         stdout.decode("utf-8", errors="replace").strip(),
         stderr.decode("utf-8", errors="replace").strip(),
     )
+
+
+async def _configure_worktree_git_identity(
+    repo_root: Path, worktree_path: Path
+) -> None:
+    """Apply the factory bot identity to one worktree without touching the parent repo.
+
+    Uses worktree-local config so the developer's interactive `user.name`/`user.email`
+    in the main repository remain unchanged. Failures are logged rather than fatal
+    because `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars provide attribution fallback.
+    """
+    rc, _out, err = await _run_git(
+        repo_root, "config", "extensions.worktreeConfig", "true"
+    )
+    if rc != 0:
+        logger.warning(
+            "Could not enable extensions.worktreeConfig in %s: %s", repo_root, err
+        )
+        return
+
+    for key, value in (
+        ("user.name", FACTORY_BOT_NAME),
+        ("user.email", FACTORY_BOT_EMAIL),
+    ):
+        rc, _out, err = await _run_git(
+            worktree_path, "config", "--worktree", key, value
+        )
+        if rc != 0:
+            logger.warning(
+                "Could not set worktree %s in %s: %s", key, worktree_path, err
+            )
 
 
 _GITDIR_RE = re.compile(r"^gitdir:\s*(.+?)\s*$")
@@ -359,10 +391,12 @@ class WorktreeManager:
             # Invoked from inside the target issue's own worktree: reuse it in place.
             if self.invocation_root.is_relative_to(wt_path):
                 self.worktree_path = wt_path
+                await _configure_worktree_git_identity(self.repo_root, wt_path)
                 return wt_path
             # Reuse existing worktree if already created in a prior build/review round
             if wt_path.exists() and (wt_path / ".git").exists():
                 self.worktree_path = wt_path
+                await _configure_worktree_git_identity(self.repo_root, wt_path)
                 return wt_path
 
             wt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,6 +427,7 @@ class WorktreeManager:
                 raise WorktreeError(
                     f"Failed to create issue worktree at {wt_path}: {err}"
                 )
+            await _configure_worktree_git_identity(self.repo_root, wt_path)
             self.worktree_path = wt_path
             return wt_path
 

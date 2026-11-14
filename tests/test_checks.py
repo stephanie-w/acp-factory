@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -652,6 +654,51 @@ def test_build_workspace_env_strips_node_and_npm_leak_vars(tmp_path: Path) -> No
         assert key not in env
 
 
+def test_workspace_env_git_identity(tmp_path: Path) -> None:
+    mock_env = {
+        "GIT_AUTHOR_NAME": "Human Dev",
+        "GIT_AUTHOR_EMAIL": "human@example.com",
+        "GIT_COMMITTER_NAME": "Human Dev",
+        "GIT_COMMITTER_EMAIL": "human@example.com",
+        "PATH": "/usr/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path)
+
+    assert env["GIT_AUTHOR_NAME"] == "acp-factory[bot]"
+    assert env["GIT_AUTHOR_EMAIL"] == "acp-factory[bot]@users.noreply.github.com"
+    assert env["GIT_COMMITTER_NAME"] == "acp-factory[bot]"
+    assert env["GIT_COMMITTER_EMAIL"] == "acp-factory[bot]@users.noreply.github.com"
+
+
+def test_workspace_env_token_override(tmp_path: Path) -> None:
+    with patch.dict(
+        "os.environ", {"GH_TOKEN": "human-token", "PATH": "/usr/bin"}, clear=True
+    ):
+        inherited = build_workspace_env(tmp_path)
+    assert inherited["GH_TOKEN"] == "human-token"
+
+    with patch.dict(
+        "os.environ",
+        {
+            "GH_TOKEN": "human-token",
+            "FACTORY_GH_TOKEN": "bot-token",
+            "PATH": "/usr/bin",
+        },
+        clear=True,
+    ):
+        overridden = build_workspace_env(tmp_path)
+    assert overridden["GH_TOKEN"] == "bot-token"
+
+    # An empty FACTORY_GH_TOKEN must not clobber an intentional empty/inherited value.
+    with patch.dict(
+        "os.environ", {"FACTORY_GH_TOKEN": "", "PATH": "/usr/bin"}, clear=True
+    ):
+        blank = build_workspace_env(tmp_path)
+    assert "GH_TOKEN" not in blank
+
+
 def test_build_workspace_env_custom_strip_and_extra_env(tmp_path: Path) -> None:
     mock_env = {
         "MY_SECRET_HOST_VAR": "secret",
@@ -673,3 +720,33 @@ def test_build_workspace_env_custom_strip_and_extra_env(tmp_path: Path) -> None:
     assert env.get("TARGET_ENV") == "production"
     # Explicit extra_env applied after default strip
     assert env.get("NODE_OPTIONS") == "--max-old-space-size=4096"
+
+
+async def test_readonly_gh_shim_passes_factory_token(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text("#!/bin/sh\nprintf '%s' \"$GH_TOKEN\"\n", encoding="utf-8")
+    fake_gh.chmod(0o755)
+
+    mock_env = {
+        "PATH": f"{fake_bin}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "GH_TOKEN": "human-token",
+        "FACTORY_GH_TOKEN": "bot-token",
+    }
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path, restrict_gh_writes=True)
+
+    proc = await asyncio.create_subprocess_exec(
+        "gh",
+        "issue",
+        "view",
+        "1",
+        cwd=str(tmp_path),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    assert proc.returncode == 0, stderr.decode("utf-8", errors="replace")
+    assert stdout.decode("utf-8", errors="replace") == "bot-token"

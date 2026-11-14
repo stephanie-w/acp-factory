@@ -14,6 +14,14 @@ from .acp.events import UsageTotals
 FACTORY_BLOCK_START = "<!-- factory:start -->"
 FACTORY_BLOCK_END = "<!-- factory:end -->"
 
+FACTORY_BOT_NAME = "acp-factory[bot]"
+FACTORY_BOT_EMAIL = "acp-factory[bot]@users.noreply.github.com"
+
+_ATTRIBUTION_BANNER_RE = re.compile(
+    r"^[ \t]*>\s*🤖\s*\*\*acp-factory\*\*\s*\|[^\n]*\n*",
+    re.MULTILINE,
+)
+
 FACTORY_META_RE = re.compile(
     r"<!--\s*factory:meta\s+(.*?)-->",
     re.DOTALL,
@@ -117,6 +125,42 @@ def strip_factory_meta(factory_block: str) -> str:
     return _remove_unfenced_matches(FACTORY_META_RE, factory_block).strip()
 
 
+def _banner_field(value: str, *, label: str) -> str:
+    """Normalize a banner field, rejecting empty values and neutralizing separators."""
+    cleaned = " ".join(value.split())
+    if not cleaned:
+        raise ValueError(f"Attribution banner requires a non-empty {label}")
+    return cleaned.replace("|", "/")
+
+
+def render_attribution_banner(stage: str, agent: str) -> str:
+    """Render the bot attribution banner for a factory stage and agent."""
+    stage_field = _banner_field(stage, label="stage")
+    agent_field = _banner_field(agent, label="agent")
+    return f"> 🤖 **acp-factory** | Stage: {stage_field} | Agent: {agent_field}"
+
+
+def strip_attribution_banner(factory_block: str) -> str:
+    """Remove the bot attribution banner from a factory block."""
+    return _remove_unfenced_matches(_ATTRIBUTION_BANNER_RE, factory_block).strip()
+
+
+def set_attribution_banner(factory_block: str, *, stage: str, agent: str) -> str:
+    """Replace the attribution banner, placing it after factory meta or at block start."""
+    banner = render_attribution_banner(stage, agent)
+    body = strip_attribution_banner(factory_block)
+
+    meta_match = FACTORY_META_RE.search(_mask_code_blocks(body))
+    if meta_match is None:
+        return f"{banner}\n\n{body}".strip() if body else banner
+
+    before = body[: meta_match.end()].rstrip()
+    after = body[meta_match.end() :].lstrip("\n").strip()
+    if after:
+        return f"{before}\n{banner}\n\n{after}"
+    return f"{before}\n{banner}"
+
+
 def _parse_non_negative_int(value: str | None) -> int:
     """Parse a non-negative int from meta text, returning 0 on missing/bad input."""
     if value is None:
@@ -209,8 +253,10 @@ def extract_factory_findings(factory_block: str) -> str:
 
 
 def clean_spec_block(factory_block: str) -> str:
-    """Return the specification content with internal meta and findings comments removed."""
-    return strip_factory_meta(strip_factory_findings(factory_block)).strip()
+    """Return the specification content with internal meta, findings, and banner removed."""
+    return strip_attribution_banner(
+        strip_factory_meta(strip_factory_findings(factory_block))
+    ).strip()
 
 
 def parse_review_round(meta: dict[str, str]) -> int:

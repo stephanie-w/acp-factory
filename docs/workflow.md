@@ -30,6 +30,26 @@ To keep issues clean and readable, `acp-factory` enforces a strict separation be
 | **Issue Labels (`factory:*`)** | **Orchestrator** (on stage pass/halt) & **Human** (at Gates 1 & 2) | Drives the 5-stage workflow state machine. Agents cannot mutate labels directly. |
 | **Pull Request** | **Orchestrator** (opens/updates PR after `review` passes) | Delivers the reviewed branch and PR description for **Human Gate 2**. Never auto-merged. |
 
+### C. Bot Identity & Credential Isolation
+
+Automated runs must never masquerade as the human developer or borrow their interactive credentials:
+
+- **Git attribution**: Issue worktrees (`.worktrees/issue-<id>`) enable `extensions.worktreeConfig` and set worktree-local `user.name = "acp-factory[bot]"` and `user.email = "acp-factory[bot]@users.noreply.github.com"`. The parent repository's interactive identity is left untouched. Every subprocess, agent, and check also receives `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` set to the same bot identity as an environment fallback.
+- **GitHub CLI token isolation**: Set `FACTORY_GH_TOKEN` to a dedicated bot token. Internal `gh` calls (`run_gh`), workspace subprocesses, and the read-only `gh` shim export it as `GH_TOKEN`, overriding any inherited `GH_TOKEN` for that subprocess only. Interactive `gh auth` state in `~/.config/gh/` is never read or modified. When `FACTORY_GH_TOKEN` is unset, `gh` inherits the environment unchanged (personal login fallback for interactive development).
+- **Issue body attribution banner**: The managed `<!-- factory:start --> ... <!-- factory:end -->` block displays the bot attribution immediately after the `<!-- factory:meta ... -->` line (or at the top of the block when no metadata is present):
+
+  ```markdown
+  <!-- factory:start -->
+  <!-- factory:meta stage=spec tokens=1200 cost=0.02 turns=2 -->
+  > 🤖 **acp-factory** | Stage: spec | Agent: opencode
+
+  ## Specification
+  ...
+  <!-- factory:end -->
+  ```
+
+  `clean_spec_block()` strips the banner from the clean specification markdown used in PR bodies and downstream task prompts.
+
 ---
 
 ## 2. The 5-Stage GitHub Label State Machine
