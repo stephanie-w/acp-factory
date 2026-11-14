@@ -9,7 +9,7 @@ import re
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -537,13 +537,7 @@ async def run_factory(
     budget_breached = False
     run_usage = UsageTotals()
     cumulative_usage = (
-        UsageTotals(
-            tokens=initial_usage.tokens,
-            cost_usd=initial_usage.cost_usd,
-            turns=initial_usage.turns,
-        )
-        if initial_usage is not None
-        else UsageTotals()
+        replace(initial_usage) if initial_usage is not None else UsageTotals()
     )
     check_history: list[list[CheckResult]] = []
     setup_logs: list[str] = []

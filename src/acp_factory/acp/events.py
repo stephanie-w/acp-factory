@@ -15,7 +15,7 @@ type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValu
 
 @dataclass
 class UsageTotals:
-    """Cumulative token, cost, and turn totals accumulated across turns and stages."""
+    """Token, cost, and turn totals for a run or an issue."""
 
     tokens: int = 0
     cost_usd: float = 0.0
