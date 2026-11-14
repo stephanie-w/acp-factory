@@ -137,13 +137,13 @@ def test_merge_pr_feedback_orders_comments_chronologically() -> None:
                 "author": {"login": "bob"},
                 "body": "Please add tests.",
                 "state": "CHANGES_REQUESTED",
-                "createdAt": "2026-11-03T09:00:00Z",
+                "submittedAt": "2026-11-03T09:00:00Z",
             },
             {
                 "author": {"login": "carol"},
                 "body": "",
                 "state": "APPROVED",
-                "createdAt": "2026-11-02T10:00:00Z",
+                "submittedAt": "2026-11-02T10:00:00Z",
             },
         ],
     )
@@ -156,8 +156,44 @@ def test_merge_pr_feedback_orders_comments_chronologically() -> None:
         "pr_review",
     ]
     assert task.comments[2].review_state == "APPROVED"
+    assert task.comments[2].created_at == "2026-11-02T10:00:00Z"
     assert task.comments[3].review_state == "CHANGES_REQUESTED"
     assert task.comments[3].body == "Please add tests."
+    assert task.comments[3].created_at == "2026-11-03T09:00:00Z"
+
+
+def test_merge_pr_feedback_renders_review_submitted_at_timestamp() -> None:
+    task = TaskContext(
+        issue_number=42,
+        title="Add category filter",
+        comments=[
+            IssueComment(
+                author="original",
+                body="Issue comment",
+                created_at="2026-11-01T12:00:00Z",
+            )
+        ],
+    )
+
+    task.merge_pr_feedback(
+        [],
+        [
+            {
+                "author": {"login": "bob"},
+                "body": "Please add tests.",
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-11-03T09:00:00Z",
+            }
+        ],
+    )
+
+    prompt_ctx = format_task_prompt_context(task)
+    assert (
+        "### PR Review by @bob (CHANGES_REQUESTED) (2026-11-03T09:00:00Z)" in prompt_ctx
+    )
+    assert prompt_ctx.index("### Comment #1 by @original") < prompt_ctx.index(
+        "### PR Review by @bob"
+    )
 
 
 def test_merge_pr_feedback_skips_non_dict_and_tolerates_missing_fields() -> None:
@@ -264,7 +300,7 @@ async def test_fetch_issue_merges_pr_feedback(tmp_path: Path) -> None:
                 "author": {"login": "bob"},
                 "body": "Please add tests.",
                 "state": "CHANGES_REQUESTED",
-                "createdAt": "2026-11-03T09:00:00Z",
+                "submittedAt": "2026-11-03T09:00:00Z",
             }
         ],
     }
@@ -292,6 +328,7 @@ async def test_fetch_issue_merges_pr_feedback(tmp_path: Path) -> None:
         "pr_review",
     ]
     assert [c.author for c in task.comments] == ["stephanie", "alice", "bob"]
+    assert task.comments[2].created_at == "2026-11-03T09:00:00Z"
     assert calls[1] == [
         "pr",
         "list",
@@ -356,6 +393,26 @@ async def test_fetch_issue_no_pr_or_error(tmp_path: Path) -> None:
     with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=failing_pr_view)):
         task = await fetch_issue(42, tmp_path)
 
+    assert [c.kind for c in task.comments] == ["issue_comment"]
+    assert [c.body for c in task.comments] == ["Issue-side context."]
+
+
+async def test_fetch_issue_handles_malformed_pr_list_payload(tmp_path: Path) -> None:
+    async def malformed_pr_list(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        if args[:2] == ["issue", "view"]:
+            return json.dumps(_issue_payload())
+        if args[:2] == ["pr", "list"]:
+            return json.dumps({"number": 88})
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with patch(
+        "acp_factory.github.run_gh", new=AsyncMock(side_effect=malformed_pr_list)
+    ):
+        task = await fetch_issue(42, tmp_path)
+
+    assert task.pr_url is None
     assert [c.kind for c in task.comments] == ["issue_comment"]
     assert [c.body for c in task.comments] == ["Issue-side context."]
 

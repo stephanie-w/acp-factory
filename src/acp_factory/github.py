@@ -106,10 +106,12 @@ async def _merge_open_pr_feedback(
         list_cmd.extend(["--repo", repo_slug])
     list_out = await run_gh(list_cmd, cwd=cwd)
     open_prs = json.loads(list_out) if list_out else []
-    if not open_prs or not isinstance(open_prs[0], dict) or "number" not in open_prs[0]:
+    if not isinstance(open_prs, list) or not open_prs:
+        return
+    open_pr = open_prs[0]
+    if not isinstance(open_pr, dict) or "number" not in open_pr:
         return
 
-    open_pr = open_prs[0]
     task.pr_url = str(open_pr.get("url") or "") or None
     view_cmd = [
         "pr",

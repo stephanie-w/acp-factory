@@ -240,15 +240,22 @@ def _gh_author_login(raw_author: object) -> str:
 
 
 def _parse_feedback_comment(
-    raw: object, *, kind: str, review_state: str | None = None
+    raw: object,
+    *,
+    kind: str,
+    review_state: str | None = None,
+    timestamp_field: str = "createdAt",
 ) -> IssueComment | None:
-    """Parse one `gh pr view` comment/review entry, returning None when malformed."""
+    """Parse one `gh pr view` comment/review entry, returning None when malformed.
+
+    PR comments expose their time as `createdAt`; PR reviews use `submittedAt`.
+    """
     if not isinstance(raw, dict):
         return None
     return IssueComment(
         author=_gh_author_login(raw.get("author")),
         body=str(raw.get("body") or ""),
-        created_at=str(raw.get("createdAt") or ""),
+        created_at=str(raw.get(timestamp_field) or raw.get("createdAt") or ""),
         kind=kind,
         review_state=review_state,
     )
@@ -341,6 +348,7 @@ class TaskContext(BaseModel):
                 raw,
                 kind="pr_review",
                 review_state=str(state) if state else None,
+                timestamp_field="submittedAt",
             )
             if review is not None:
                 self.comments.append(review)
