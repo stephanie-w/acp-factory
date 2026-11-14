@@ -83,6 +83,7 @@ class FactoryRunOutcome:
     stage_verdict: StageVerdict | None = None
     dry_run_plan: DryRunPlan | None = None
     usage: UsageTotals = field(default_factory=UsageTotals)
+    run_usage: UsageTotals = field(default_factory=UsageTotals)
     budget_breached: bool = False
     report_path: Path | None = None
     build_notes_path: Path | None = None
@@ -534,7 +535,16 @@ async def run_factory(
     last_response_text = ""
     failure_reason: str | None = None
     budget_breached = False
-    usage = initial_usage if initial_usage is not None else UsageTotals()
+    run_usage = UsageTotals()
+    cumulative_usage = (
+        UsageTotals(
+            tokens=initial_usage.tokens,
+            cost_usd=initial_usage.cost_usd,
+            turns=initial_usage.turns,
+        )
+        if initial_usage is not None
+        else UsageTotals()
+    )
     check_history: list[list[CheckResult]] = []
     setup_logs: list[str] = []
     turn_transcripts: list[str] = []
@@ -585,7 +595,7 @@ async def run_factory(
                         turn_transcripts=[],
                         check_history=[],
                         failure_reason=failure_reason,
-                        usage=usage,
+                        usage=run_usage,
                         issue_number=issue_number,
                         issue_title=issue_title,
                         repo_slug=repo_slug,
@@ -609,7 +619,8 @@ async def run_factory(
                         run_dir=run_dir,
                         preserved_worktree=preserved_wt,
                         failure_reason=failure_reason,
-                        usage=usage,
+                        usage=cumulative_usage,
+                        run_usage=run_usage,
                     )
 
         # 2. Agent Worker & Check Feedback Loop
@@ -657,14 +668,19 @@ async def run_factory(
                 )
                 last_response_text = turn_res.summary.response_text
 
-                # Post-turn accumulation: fold this turn's usage into the run totals.
+                # Post-turn accumulation: fold this turn's usage into both the
+                # per-run totals (persisted in run.json) and the cumulative issue
+                # totals (budget enforcement + factory meta persistence).
                 run_turns_used += 1
-                usage.turns += 1
-                usage.tokens += turn_res.summary.tokens
-                usage.cost_usd += turn_res.summary.cost_usd
+                run_usage.turns += 1
+                run_usage.tokens += turn_res.summary.tokens
+                run_usage.cost_usd += turn_res.summary.cost_usd
+                cumulative_usage.turns += 1
+                cumulative_usage.tokens += turn_res.summary.tokens
+                cumulative_usage.cost_usd += turn_res.summary.cost_usd
 
                 usage_breach = check_usage_cap(
-                    usage.tokens, usage.cost_usd, config.budget
+                    cumulative_usage.tokens, cumulative_usage.cost_usd, config.budget
                 )
                 if usage_breach is not None:
                     failure_reason = usage_breach
@@ -780,7 +796,7 @@ async def run_factory(
         turn_transcripts=turn_transcripts,
         check_history=check_history,
         failure_reason=None if succeeded else failure_reason,
-        usage=usage,
+        usage=run_usage,
         turn_summaries=turn_summaries,
         turn_condensed=turn_condensed,
         last_response_text=last_response_text,
@@ -821,7 +837,8 @@ async def run_factory(
         check_history=check_history,
         preserved_worktree=preserved_wt,
         failure_reason=None if succeeded else failure_reason,
-        usage=usage,
+        usage=cumulative_usage,
+        run_usage=run_usage,
         budget_breached=budget_breached,
         report_path=report_path,
         build_notes_path=build_notes_path,

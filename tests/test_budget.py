@@ -317,6 +317,83 @@ async def test_run_json_records_usage(tmp_path: Path) -> None:
     assert data["budget"]["max_turns"] == 5
 
 
+async def test_run_json_per_run_isolation_zero_usage(tmp_path: Path) -> None:
+    """AC-1: run.json records only this run's usage, not seeded cumulative totals."""
+    (tmp_path / ".factory").mkdir()
+    cfg = FactoryConfig(task="do work")
+    fake, _ = _fake_client()
+    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
+        outcome = await run_factory(
+            cfg,
+            tmp_path,
+            initial_usage=UsageTotals(tokens=59_564, cost_usd=1.25, turns=3),
+        )
+
+    assert outcome.succeeded is True
+    assert outcome.run_dir is not None
+    data = json.loads((outcome.run_dir / "run.json").read_text(encoding="utf-8"))
+    assert data["usage"]["total_tokens"] == 0
+    assert data["usage"]["total_cost_usd"] == 0.0
+    assert data["usage"]["total_turns"] == 1
+    assert data["usage"]["telemetry_available"] is False
+    # The outcome still carries cumulative totals for callers (meta persistence).
+    assert outcome.usage == UsageTotals(tokens=59_564, cost_usd=1.25, turns=4)
+    assert outcome.run_usage == UsageTotals(tokens=0, cost_usd=0.0, turns=1)
+
+
+async def test_run_json_per_run_isolation_with_usage(tmp_path: Path) -> None:
+    """AC-2: run.json records only this run's consumed tokens/cost/turns."""
+    (tmp_path / ".factory").mkdir()
+    cfg = FactoryConfig(task="do work")
+    fake, _ = _fake_client(
+        {"used": 1000, "size": 20000, "cost": {"amount": 0.02, "currency": "USD"}}
+    )
+    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
+        outcome = await run_factory(
+            cfg,
+            tmp_path,
+            initial_usage=UsageTotals(tokens=50_000, cost_usd=1.0, turns=2),
+        )
+
+    assert outcome.succeeded is True
+    assert outcome.run_dir is not None
+    data = json.loads((outcome.run_dir / "run.json").read_text(encoding="utf-8"))
+    assert data["usage"]["total_tokens"] == 1000
+    assert data["usage"]["total_cost_usd"] == 0.02
+    assert data["usage"]["total_turns"] == 1
+    assert data["usage"]["telemetry_available"] is True
+    assert outcome.usage == UsageTotals(tokens=51_000, cost_usd=1.02, turns=3)
+    assert outcome.run_usage == UsageTotals(tokens=1000, cost_usd=0.02, turns=1)
+
+
+async def test_cumulative_usage_cap_enforced_with_initial_usage(
+    tmp_path: Path,
+) -> None:
+    """AC-3: budget caps trip on initial_usage + run_usage, not run usage alone."""
+    cfg = FactoryConfig(
+        task="do work",
+        budget=BudgetConfig(max_tokens_per_run=50_000),
+        checks=[CheckConfig(name="always-fail", cmd=_FAIL_CHECK)],
+        retry=RetryConfig(max_attempts=5),
+    )
+    fake, prompts = _fake_client({"used": 1000, "size": 20000, "cost": None})
+    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
+        outcome = await run_factory(
+            cfg,
+            tmp_path,
+            initial_usage=UsageTotals(tokens=50_000, cost_usd=0.0, turns=0),
+        )
+
+    assert outcome.succeeded is False
+    assert outcome.budget_breached is True
+    # 50,000 seeded + 1,000 consumed breaches the 50,000 cap after a single turn.
+    assert len(prompts) == 1
+    assert "cumulative tokens 51,000 exceeded max_tokens_per_run (50,000)" in (
+        outcome.failure_reason or ""
+    )
+    assert outcome.usage.tokens == 51_000
+
+
 async def test_multi_stage_seeds_initial_usage(tmp_path: Path) -> None:
     """run_issue_stage seeds cumulative usage from the issue's persisted factory meta."""
     task = TaskContext(
