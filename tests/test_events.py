@@ -150,6 +150,23 @@ def test_turn_event_tracker_lifecycle() -> None:
     assert tracker.cumulative_cost_usd() == 0.001
 
 
+def test_turn_event_tracker_resets_usage_between_turns() -> None:
+    tracker = TurnEventTracker(initial_prompt="Initial prompt")
+    tracker.begin_turn("Turn 1")
+    tracker.recorder.set_usage({"used": 500, "cost": {"amount": 0.001}})
+    turn1 = tracker.end_turn("end_turn")
+    assert turn1.tokens == 500
+    assert turn1.cost_usd == 0.001
+
+    tracker.begin_turn("Turn 2")
+    turn2 = tracker.end_turn("end_turn")
+    assert turn2.usage is None
+    assert turn2.tokens == 0
+    assert turn2.cost_usd == 0.0
+    assert tracker.cumulative_tokens() == 500
+    assert tracker.cumulative_cost_usd() == 0.001
+
+
 def test_persist_run_artifacts_json(tmp_path: Path) -> None:
     factory_dir = tmp_path / ".factory"
     factory_dir.mkdir(parents=True)

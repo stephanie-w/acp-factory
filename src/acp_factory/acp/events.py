@@ -257,6 +257,7 @@ class TurnEventTracker:
         self.recorder.permissions.clear()
         self.recorder.stop_reason = None
         self.recorder.duration_seconds = None
+        self.recorder.usage = None
         # Ensure acpterm's Rich markdown stream state is clean
         acpterm_output_state.end_stream()
         acpterm_output_state.flush_md()
