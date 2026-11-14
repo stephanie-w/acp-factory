@@ -44,7 +44,7 @@ dev = [
 [[package]]
 name = "acpterm"
 version = "0.1.0"
-source = { git = "https://github.com/stephanie-w/acpterm.git#3e436218962d1bb6bcfd77916ffd5ccec90b2fec" }
+source = { git = "https://github.com/stephanie-w/acpterm.git#6ce3879f8eaef733d99725c947a4bb47250d469a" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "pydantic" },
