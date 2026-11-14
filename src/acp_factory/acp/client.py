@@ -180,6 +180,7 @@ class FactoryACPClient:
         extra_env: dict[str, str] | None = None,
         strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
         guardrails: GuardrailsConfig | None = None,
+        deny_runs: bool = False,
     ) -> None:
         self.workspace = workspace.resolve()
         self.config_dir = config_dir.resolve() if config_dir else self.workspace
@@ -194,6 +195,7 @@ class FactoryACPClient:
         self.extra_env = extra_env
         self.strip_env = strip_env
         self.guardrails = guardrails or GuardrailsConfig()
+        self.deny_runs = deny_runs
 
         self.persona_text: str | None = resolve_persona_text(
             agent_config.persona,
@@ -232,6 +234,8 @@ class FactoryACPClient:
                 hook_cmd += f' --allow-path "{p}"'
             for d in self.guardrails.denied_commands:
                 hook_cmd += f' --deny-cmd "{d}"'
+            if self.deny_runs:
+                hook_cmd += " --deny-runs"
 
             hooks.append(
                 HookDefinition(
@@ -265,7 +269,9 @@ class FactoryACPClient:
             limit: int | None = None,
             shutdown_timeout: float = 2.0,
         ) -> AbstractAsyncContextManager[
-            tuple[asyncio.StreamReader, asyncio.StreamWriter, asyncio.subprocess.Process]
+            tuple[
+                asyncio.StreamReader, asyncio.StreamWriter, asyncio.subprocess.Process
+            ]
         ]:
             from ..runner.checks import build_workspace_env
 

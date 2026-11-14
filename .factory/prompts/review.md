@@ -10,3 +10,4 @@ Execute the `code-reviewer` and `security-auditor` skills against the workspace 
    - `### Security Audit Summary` (`- **Untrusted Inputs Traced**: ...` and `- **Findings Count**: ...`)
    - `### Security Findings` (security vulnerability findings or `- None.`)
    - End with `STATUS: <ACCEPTED | REVISION_NEEDED | NEEDS_HUMAN>`
+4. Do NOT read `.factory/runs/`, `.factory/latest-*`, or prior stage transcripts — you do not have access to them. Treat the supplied GitHub Issue/PR context and workspace diff as your sole source of truth.

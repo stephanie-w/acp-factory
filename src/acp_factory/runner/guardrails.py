@@ -83,6 +83,23 @@ SENSITIVE_HOST_PATHS: list[re.Pattern[str]] = [
     ),
 ]
 
+_RUN_ARTIFACTS_CMD_RE = re.compile(
+    r"(?:^|[\s/'\"=])\.factory/(?:runs(?:/|\b)|latest-(?:report|build-notes)\.md\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_run_artifact_path(target_resolved: Path, ws_resolved: Path) -> bool:
+    """Return True if target_resolved points inside .factory/runs or .factory/latest-* pointers."""
+    factory_dir = ws_resolved / ".factory"
+    runs_dir = factory_dir / "runs"
+    if target_resolved == runs_dir or target_resolved.is_relative_to(runs_dir):
+        return True
+    return target_resolved in (
+        factory_dir / "latest-report.md",
+        factory_dir / "latest-build-notes.md",
+    )
+
 
 def is_path_contained(
     target_path: str | Path,
@@ -91,6 +108,7 @@ def is_path_contained(
     allowed_paths: list[str | Path] | None = None,
     is_read: bool = False,
     resources_dir: str | Path | None = None,
+    deny_runs: bool = False,
 ) -> tuple[bool, str | None]:
     """Verify that a target file path is contained within the workspace or explicitly permitted paths."""
     if not target_path:
@@ -112,6 +130,11 @@ def is_path_contained(
 
     # 1. Target is inside current workspace
     if target_resolved == ws_resolved or target_resolved.is_relative_to(ws_resolved):
+        if deny_runs and _is_run_artifact_path(target_resolved, ws_resolved):
+            return (
+                False,
+                f"Target path '{target_path}' references '.factory/runs' or run artifacts, which are restricted for this stage",
+            )
         return True, None
 
     # 2. Reading from external resources catalog (e.g. skills or prompts)
@@ -138,11 +161,18 @@ def is_command_safe(
     command: str,
     *,
     custom_denied: list[str] | None = None,
+    deny_runs: bool = False,
 ) -> tuple[bool, str | None]:
     """Verify that a shell command does not match dangerous or unauthorized patterns."""
     cmd_str = command.strip()
     if not cmd_str:
         return True, None
+
+    if deny_runs and _RUN_ARTIFACTS_CMD_RE.search(cmd_str):
+        return (
+            False,
+            f"Command references '.factory/runs' or run artifacts, which are restricted for this stage: '{cmd_str}'",
+        )
 
     for pattern, reason in DANGEROUS_COMMAND_PATTERNS:
         if pattern.search(cmd_str):
@@ -177,6 +207,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--deny-cmd", action="append", default=[], help="Custom denied command pattern"
+    )
+    parser.add_argument(
+        "--deny-runs",
+        action="store_true",
+        default=False,
+        help="Block access to .factory/runs and .factory/latest-* run artifacts",
     )
     args = parser.parse_args(argv)
 
@@ -216,6 +252,7 @@ def main(argv: list[str] | None = None) -> None:
             allowed_paths=allowed_paths,
             is_read=is_read,
             resources_dir=res_dir,
+            deny_runs=args.deny_runs,
         )
         if not safe_path:
             print(f"[guardrails] DENIED: {path_reason}", file=sys.stderr)
@@ -227,7 +264,7 @@ def main(argv: list[str] | None = None) -> None:
             path if kind in ("execute", "command", "bash") and path else title
         )
         safe_cmd, cmd_reason = is_command_safe(
-            cmd_candidate, custom_denied=custom_denied
+            cmd_candidate, custom_denied=custom_denied, deny_runs=args.deny_runs
         )
         if not safe_cmd:
             print(f"[guardrails] DENIED: {cmd_reason}", file=sys.stderr)

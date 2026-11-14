@@ -3,3 +3,4 @@ Execute the `tdd-builder` skill to implement the approved specification:
 2. Implement the minimal root-cause change strictly within `## Files to Touch`, probing bad and borderline inputs so invalid data is explicitly rejected.
 3. Self-review `git diff` against the 7-point quality standard and commit your changes locally on the current branch without pushing.
 4. Output your final implementation summary matching `skills/tdd-builder/templates/implementation-notes.md` (including concrete Before/After test evidence).
+5. Do NOT read `.factory/runs/`, `.factory/latest-*`, or prior stage transcripts — you do not have access to them. Treat the supplied specification and codebase as your sole source of truth.

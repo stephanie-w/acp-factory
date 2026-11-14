@@ -620,6 +620,7 @@ async def run_factory(
             config_dir=config.config_dir,
             resources_dir=resolved_res_dir,
             guardrails=config.guardrails,
+            deny_runs=bool(config.active_stage and config.active_stage != "retro"),
             verbose=verbose,
             extra_env=config.env or None,
             strip_env=config.strip_env or None,

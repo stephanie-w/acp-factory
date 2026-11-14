@@ -240,3 +240,83 @@ async def test_factory_acp_client_injects_guardrail_hook(tmp_path: Path) -> None
         guardrails=GuardrailsConfig(enabled=False),
     )
     assert client_disabled.guardrails.enabled is False
+
+    # Deny runs flag
+    client_deny_runs = FactoryACPClient(
+        workspace=tmp_path,
+        agent_config=AgentConfig(name="opencode"),
+        deny_runs=True,
+    )
+    assert client_deny_runs.deny_runs is True
+
+
+def test_deny_runs_blocks_run_artifacts_paths(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    runs_file = (
+        ws / ".factory" / "runs" / "20261113-run" / "attempt-1" / "transcript.md"
+    )
+    runs_file.parent.mkdir(parents=True)
+    runs_file.touch()
+    latest_report = ws / ".factory" / "latest-report.md"
+    latest_report.touch()
+    latest_build = ws / ".factory" / "latest-build-notes.md"
+    latest_build.touch()
+    config_file = ws / ".factory" / "config.toml"
+    config_file.touch()
+
+    # Allowed when deny_runs=False (e.g. retro)
+    assert is_path_contained(runs_file, ws, is_read=True, deny_runs=False) == (
+        True,
+        None,
+    )
+    assert is_path_contained(latest_report, ws, is_read=True, deny_runs=False) == (
+        True,
+        None,
+    )
+
+    # Blocked when deny_runs=True
+    for restricted in (runs_file, latest_report, latest_build):
+        safe, reason = is_path_contained(restricted, ws, is_read=True, deny_runs=True)
+        assert safe is False
+        assert ".factory/runs" in (reason or "")
+
+    # Config/prompts under .factory/ remain accessible
+    assert is_path_contained(config_file, ws, is_read=True, deny_runs=True) == (
+        True,
+        None,
+    )
+
+
+def test_deny_runs_blocks_run_artifacts_commands() -> None:
+    for cmd in (
+        "cat .factory/runs/latest/report.md",
+        "jq '.tool_calls' .factory/runs/20261113-123/attempt-1/transcript.summary.json",
+        "cat .factory/latest-report.md",
+        "cat .factory/latest-build-notes.md",
+    ):
+        assert is_command_safe(cmd, deny_runs=False) == (True, None)
+        safe, reason = is_command_safe(cmd, deny_runs=True)
+        assert safe is False
+        assert ".factory/runs" in (reason or "")
+
+    assert is_command_safe("cat .factory/config.toml", deny_runs=True) == (True, None)
+
+
+def test_guardrails_main_deny_runs_cli_flag(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    runs_file = ws / ".factory" / "runs" / "abc" / "transcript.md"
+    runs_file.parent.mkdir(parents=True)
+    runs_file.touch()
+
+    env = {
+        "ACPTERM_PERMISSION_KIND": "read",
+        "ACPTERM_PERMISSION_PATH": str(runs_file),
+        "ACPTERM_CWD": str(ws),
+    }
+    with patch.dict("os.environ", env, clear=True), pytest.raises(SystemExit) as exc:
+        guardrails_main(["--deny-runs"])
+    assert exc.value.code == 1
+
+    with patch.dict("os.environ", env, clear=True), pytest.raises(SystemExit) as exc:
+        guardrails_main([])
+    assert exc.value.code == 0

@@ -405,6 +405,7 @@ async def run_single_check(
                 config_dir=config_dir,
                 resources_dir=resources_dir,
                 read_only=True,
+                deny_runs=True,
                 extra_env=extra_env,
                 strip_env=strip_env,
             ) as reviewer_client:
