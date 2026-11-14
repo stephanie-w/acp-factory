@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from acp_factory.github import GitHubError, fetch_issue
 from acp_factory.runner.checks import parse_review_verdict_status
 from acp_factory.runner.loop import (
     FactoryRunOutcome,
@@ -98,12 +100,321 @@ def test_task_context_from_gh_json_and_prompt_formatting() -> None:
     assert "Open Questions" in task.factory_block
     assert len(task.comments) == 1
     assert task.comments[0].author == "stephanie"
+    assert task.comments[0].kind == "issue_comment"
+    assert task.comments[0].review_state is None
 
     prompt_ctx = format_task_prompt_context(task)
     assert "GitHub Issue #42: Add category filter" in prompt_ctx
     assert "Initial issue description." in prompt_ctx
     assert "Comment #1 by @stephanie" in prompt_ctx
     assert "Yes, make it case-insensitive." in prompt_ctx
+
+
+def test_merge_pr_feedback_orders_comments_chronologically() -> None:
+    task = TaskContext(
+        issue_number=42,
+        title="Add category filter",
+        comments=[
+            IssueComment(
+                author="original",
+                body="Issue comment",
+                created_at="2026-11-01T12:00:00Z",
+            )
+        ],
+    )
+
+    task.merge_pr_feedback(
+        [
+            {
+                "author": {"login": "alice"},
+                "body": "PR conversation comment.",
+                "createdAt": "2026-11-02T09:00:00Z",
+            },
+            "not-a-dict",
+        ],
+        [
+            {
+                "author": {"login": "bob"},
+                "body": "Please add tests.",
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-11-03T09:00:00Z",
+            },
+            {
+                "author": {"login": "carol"},
+                "body": "",
+                "state": "APPROVED",
+                "submittedAt": "2026-11-02T10:00:00Z",
+            },
+        ],
+    )
+
+    assert [c.author for c in task.comments] == ["original", "alice", "carol", "bob"]
+    assert [c.kind for c in task.comments] == [
+        "issue_comment",
+        "pr_comment",
+        "pr_review",
+        "pr_review",
+    ]
+    assert task.comments[2].review_state == "APPROVED"
+    assert task.comments[2].created_at == "2026-11-02T10:00:00Z"
+    assert task.comments[3].review_state == "CHANGES_REQUESTED"
+    assert task.comments[3].body == "Please add tests."
+    assert task.comments[3].created_at == "2026-11-03T09:00:00Z"
+
+
+def test_merge_pr_feedback_renders_review_submitted_at_timestamp() -> None:
+    task = TaskContext(
+        issue_number=42,
+        title="Add category filter",
+        comments=[
+            IssueComment(
+                author="original",
+                body="Issue comment",
+                created_at="2026-11-01T12:00:00Z",
+            )
+        ],
+    )
+
+    task.merge_pr_feedback(
+        [],
+        [
+            {
+                "author": {"login": "bob"},
+                "body": "Please add tests.",
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-11-03T09:00:00Z",
+            }
+        ],
+    )
+
+    prompt_ctx = format_task_prompt_context(task)
+    assert (
+        "### PR Review by @bob (CHANGES_REQUESTED) (2026-11-03T09:00:00Z)" in prompt_ctx
+    )
+    assert prompt_ctx.index("### Comment #1 by @original") < prompt_ctx.index(
+        "### PR Review by @bob"
+    )
+
+
+def test_merge_pr_feedback_skips_non_dict_and_tolerates_missing_fields() -> None:
+    task = TaskContext(issue_number=42, title="Add category filter")
+
+    task.merge_pr_feedback(
+        [None, 42, {"body": "missing author"}],
+        [
+            {},
+            {"author": {"login": "bob"}, "body": "no state", "createdAt": ""},
+        ],
+    )
+
+    assert [c.author for c in task.comments] == ["unknown", "unknown", "bob"]
+    assert task.comments[0].body == "missing author"
+    assert task.comments[1].body == ""
+    assert task.comments[1].review_state is None
+    assert task.comments[2].review_state is None
+    assert task.comments[2].created_at == ""
+
+
+def test_format_task_prompt_context_with_pr_feedback() -> None:
+    task = TaskContext(
+        issue_number=42,
+        title="Add category filter",
+        url="https://github.com/acme/api/issues/42",
+        original_body="Initial issue description.",
+        pr_url="https://github.com/acme/api/pull/88",
+        comments=[
+            IssueComment(
+                author="original",
+                body="Issue comment",
+                created_at="2026-11-01T12:00:00Z",
+            ),
+            IssueComment(
+                author="alice",
+                body="PR conversation comment.",
+                created_at="2026-11-02T09:00:00Z",
+                kind="pr_comment",
+            ),
+            IssueComment(
+                author="bob",
+                body="",
+                created_at="2026-11-03T09:00:00Z",
+                kind="pr_review",
+                review_state="CHANGES_REQUESTED",
+            ),
+            IssueComment(
+                author="carol",
+                body="Looks good.",
+                created_at="2026-11-04T09:00:00Z",
+                kind="pr_review",
+                review_state="APPROVED",
+            ),
+        ],
+    )
+
+    prompt_ctx = format_task_prompt_context(task)
+
+    assert "- **PR URL:** https://github.com/acme/api/pull/88" in prompt_ctx
+    assert "### Comment #1 by @original (2026-11-01T12:00:00Z)" in prompt_ctx
+    assert "### PR Comment by @alice (2026-11-02T09:00:00Z)" in prompt_ctx
+    assert (
+        "### PR Review by @bob (CHANGES_REQUESTED) (2026-11-03T09:00:00Z)" in prompt_ctx
+    )
+    assert "*(no review body provided)*" in prompt_ctx
+    assert "### PR Review by @carol (APPROVED) (2026-11-04T09:00:00Z)" in prompt_ctx
+    assert "Looks good." in prompt_ctx
+    # Comments render chronologically with PR feedback interleaved by timestamp.
+    assert prompt_ctx.index("### Comment #1 by @original") < prompt_ctx.index(
+        "### PR Comment by @alice"
+    )
+
+
+def _issue_payload() -> dict[str, object]:
+    return {
+        "number": 42,
+        "title": "Add category filter",
+        "url": "https://github.com/acme/api/issues/42",
+        "body": "Initial issue description.",
+        "labels": [{"name": "factory:build"}],
+        "comments": [
+            {
+                "author": {"login": "stephanie"},
+                "body": "Issue-side context.",
+                "createdAt": "2026-11-01T09:00:00Z",
+            }
+        ],
+    }
+
+
+async def test_fetch_issue_merges_pr_feedback(tmp_path: Path) -> None:
+    pr_list = [{"number": 88, "url": "https://github.com/acme/api/pull/88"}]
+    pr_view = {
+        "comments": [
+            {
+                "author": {"login": "alice"},
+                "body": "PR conversation comment.",
+                "createdAt": "2026-11-02T09:00:00Z",
+            }
+        ],
+        "reviews": [
+            {
+                "author": {"login": "bob"},
+                "body": "Please add tests.",
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-11-03T09:00:00Z",
+            }
+        ],
+    }
+    calls: list[list[str]] = []
+
+    async def fake_run_gh(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        calls.append(args)
+        if args[:2] == ["issue", "view"]:
+            return json.dumps(_issue_payload())
+        if args[:2] == ["pr", "list"]:
+            return json.dumps(pr_list)
+        if args[:2] == ["pr", "view"]:
+            return json.dumps(pr_view)
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=fake_run_gh)):
+        task = await fetch_issue(42, tmp_path, repo_slug="acme/api")
+
+    assert task.pr_url == "https://github.com/acme/api/pull/88"
+    assert [c.kind for c in task.comments] == [
+        "issue_comment",
+        "pr_comment",
+        "pr_review",
+    ]
+    assert [c.author for c in task.comments] == ["stephanie", "alice", "bob"]
+    assert task.comments[2].created_at == "2026-11-03T09:00:00Z"
+    assert calls[1] == [
+        "pr",
+        "list",
+        "--head",
+        "factory/issue-42",
+        "--state",
+        "open",
+        "--json",
+        "number,url",
+        "--repo",
+        "acme/api",
+    ]
+    assert calls[2] == [
+        "pr",
+        "view",
+        "88",
+        "--json",
+        "comments,reviews",
+        "--repo",
+        "acme/api",
+    ]
+
+
+async def test_fetch_issue_no_pr_or_error(tmp_path: Path) -> None:
+    async def no_pr_run_gh(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        if args[:2] == ["issue", "view"]:
+            return json.dumps(_issue_payload())
+        if args[:2] == ["pr", "list"]:
+            return "[]"
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=no_pr_run_gh)):
+        task = await fetch_issue(42, tmp_path)
+
+    assert task.pr_url is None
+    assert [c.body for c in task.comments] == ["Issue-side context."]
+
+    async def failing_pr_list(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        if args[:2] == ["issue", "view"]:
+            return json.dumps(_issue_payload())
+        raise GitHubError("branch is not pushed")
+
+    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=failing_pr_list)):
+        task = await fetch_issue(42, tmp_path)
+
+    assert task.pr_url is None
+    assert [c.body for c in task.comments] == ["Issue-side context."]
+
+    async def failing_pr_view(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        if args[:2] == ["issue", "view"]:
+            return json.dumps(_issue_payload())
+        if args[:2] == ["pr", "list"]:
+            return json.dumps([{"number": 88, "url": "https://example.test/pull/88"}])
+        raise GitHubError("rate limited")
+
+    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=failing_pr_view)):
+        task = await fetch_issue(42, tmp_path)
+
+    assert [c.kind for c in task.comments] == ["issue_comment"]
+    assert [c.body for c in task.comments] == ["Issue-side context."]
+
+
+async def test_fetch_issue_handles_malformed_pr_list_payload(tmp_path: Path) -> None:
+    async def malformed_pr_list(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        if args[:2] == ["issue", "view"]:
+            return json.dumps(_issue_payload())
+        if args[:2] == ["pr", "list"]:
+            return json.dumps({"number": 88})
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with patch(
+        "acp_factory.github.run_gh", new=AsyncMock(side_effect=malformed_pr_list)
+    ):
+        task = await fetch_issue(42, tmp_path)
+
+    assert task.pr_url is None
+    assert [c.kind for c in task.comments] == ["issue_comment"]
+    assert [c.body for c in task.comments] == ["Issue-side context."]
 
 
 def test_parse_stage_verdicts_across_pipeline() -> None:

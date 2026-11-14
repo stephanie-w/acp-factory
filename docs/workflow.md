@@ -71,6 +71,8 @@ stateDiagram-v2
 
 > **Fail-fast guard:** If a stage run's agent produces no output (the session aborts or fails before emitting any messages), the run fails immediately and the Issue transitions to `factory:needs-human` instead of advancing.
 
+> **Human Gate 2 feedback ingestion:** When a human requests changes on the Pull Request and sends the issue back to `factory:build`, the orchestrator checks for an open PR on `factory/issue-<id>`. If found, it ingests the PR conversation comments (`gh pr view --json comments`) and review submissions such as `CHANGES_REQUESTED` (`gh pr view --json reviews`) into the task context. Build and review agents therefore see the reviewer's PR feedback, rendered chronologically alongside Issue comments, without relying on a separate Issue comment.
+
 ### Stage Reference
 
 1. **`triage` (`factory:triage`)**:
