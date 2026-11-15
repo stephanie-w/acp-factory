@@ -119,9 +119,11 @@ Not all stages contend on `main`. `acp-factory next --fleet` applies a **stage-a
      - Explicit delta command: `git diff <last_reviewed_sha>..HEAD` (plus full diff against base for context).
      - Strict instruction: *Verify every prior finding was resolved and audit all code touched in `<last_reviewed_sha>..HEAD` for regressions or security issues; do not invent new findings on untouched lines.*
 3. **In-Place Finding Replacement & Clean Strip on `ACCEPTED`**:
-   - Delimit review feedback inside `<!-- factory:findings:start --> ... <!-- factory:findings:end -->` (rendered under `## Latest Review Findings (Round N/3)`).
-   - Each `REVISION_NEEDED` **replaces** the previous findings section in-place instead of appending.
-   - When `review` returns `STATUS: ACCEPTED`, the temporary findings section is **stripped** from `task.factory_block` so both the Issue Body specification and the Pull Request's `## Specification` remain clean, while the accepted review report is placed in the PR description.
+   - Review reports and findings are published to the **PR body** inside `<!-- factory:review:start --> ... <!-- factory:review:end -->`, keeping the Issue Body focused on the specification and machine metadata.
+   - Each review round **replaces** the managed PR section in-place instead of appending, preserving any human-written PR description outside the markers; the PR body is re-fetched immediately before `gh pr edit` so concurrent human edits are never overwritten.
+   - Before a PR exists, findings fall back to the Issue Body's `<!-- factory:findings:start --> ... <!-- factory:findings:end -->` block (rendered under `## Latest Review Findings (Round N/3)`). Subsequent rounds that publish to the PR strip any leftover Issue findings block.
+   - When `review` returns `STATUS: ACCEPTED`, the temporary findings section is **stripped** from `task.factory_block` so both the Issue Body specification and the Pull Request's `## Specification` remain clean, while the accepted review report is placed in the PR body.
+   - `_merge_open_pr_feedback` also ingests the PR body's managed review section into `TaskContext.pr_review_body`, so the next `build` or `review` stage sees the latest findings under `## Latest PR Review Findings`.
 4. **Deterministic 3-Round Circuit Breaker**:
    - If `review_round >= 3` (configurable via `max_review_rounds = 3`) and the verdict is still `REVISION_NEEDED`, [`parse_stage_verdict`](../src/acp_factory/task.py) deterministically transitions the issue to `factory:needs-human` (instead of `factory:build`) with an escalation banner explaining the remaining findings.
 
@@ -148,6 +150,7 @@ Both `run_issue_stage` (during `review`) and standalone `acp-factory review --cr
      - If violated, **never push**; abort publication and escalate to `factory:needs-human` (or exit non-zero in standalone `review`) with the SHA mismatch diagnostic.
 3. **Immutable Provenance Stamp**:
    - Stamp `Reviewed-SHA: <pre_review_sha>` into the Pull Request body and `<!-- factory:meta -->` block so humans (and future follow-up checks) know the exact commit tree that passed independent review.
+   - The PR body is split into two factory-managed sections: the description (`<!-- factory:pr-description:start/end -->`, containing `## Summary`, `## Specification`, and `Reviewed-SHA`) and the review report (`<!-- factory:review:start/end -->`). On every re-accept or revision round the orchestrator re-fetches the PR body immediately before `gh pr edit` and refreshes only those sections, byte-preserving any human-written text outside the markers. `--dry-run` plans write the same merged body (based on the body fetched at run start) so following the plan does not clobber human text or the `Closes #<id>` line; when no body could be fetched, the plan emits an explicit overwrite warning.
 
 ---
 
@@ -193,7 +196,7 @@ flowchart TD
 | Component | Target Module(s) | Key Additions |
 | :--- | :--- | :--- |
 | **1. Fleet Config & Optional Repo Check Override** | [`src/acp_factory/config.py`](../src/acp_factory/config.py) | `FleetConfig` (`repositories`, `max_active_branches_per_repo`, `max_review_rounds`); helper to overlay target repo's `pre` and `[checks.*]` onto central stage config. |
-| **2. Stateless `factory:meta` & Findings Replacement / 3-Round Cap** | [`src/acp_factory/task.py`](../src/acp_factory/task.py) | Parse/render `<!-- factory:meta ... -->` and `<!-- factory:findings:start/end -->`; replace instead of stacking `## Latest Review Findings (Round N/3)`; strip findings on `ACCEPTED`; enforce 3-round `factory:needs-human` circuit breaker. |
+| **2. Stateless `factory:meta` & Findings Replacement / 3-Round Cap** | [`src/acp_factory/task.py`](../src/acp_factory/task.py) | Parse/render `<!-- factory:meta ... -->`, `<!-- factory:findings:start/end -->`, and the PR body's `<!-- factory:pr-description:start/end -->` + `<!-- factory:review:start/end -->`; replace instead of stacking sections; ingest PR review findings into `TaskContext`; strip findings on `ACCEPTED`; enforce 3-round `factory:needs-human` circuit breaker. |
 | **3. Repo Checkout Sync & Cross-Repo Issue Queries** | [`src/acp_factory/github.py`](../src/acp_factory/github.py), [`src/acp_factory/runner/worktree.py`](../src/acp_factory/runner/worktree.py) | `ensure_fleet_repo_checkout` (explicit local `~` path resolution + `git fetch --prune origin`); branch new issue worktrees from `origin/<default-branch>`; Git SHA & clean-tree helpers (`get_head_sha`, `is_worktree_clean`). |
 | **4. `REVIEWED_AT == HEAD` Guard, Delta Review Brief & Fleet Runner** | [`src/acp_factory/runner/loop.py`](../src/acp_factory/runner/loop.py) | Pre-review clean-tree & SHA snapshot + pre-publish SHA guard in `run_issue_stage` and `run_branch_review`; Round 2+ delta review context builder; `run_fleet_next` and `collect_fleet_status` with stage-aware per-repo admission and error isolation. |
 | **5. CLI Surface (`status --fleet`, `next --fleet`)** | [`src/acp_factory/cli.py`](../src/acp_factory/cli.py) | `--fleet` flag (auto-enabled when `[fleet]` is configured in the active config) and `--fleet-config <path>` on `acp-factory status` (adds `Repository` column) and `acp-factory next`. Operator-level files live at `~/.acp-factory/fleet.toml` (XDG fallback `~/.config/acp-factory/fleet.toml`). |

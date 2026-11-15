@@ -34,6 +34,25 @@ _FACTORY_FINDINGS_RE = re.compile(
 )
 _FACTORY_FINDINGS_START_RE = re.compile(re.escape(FACTORY_FINDINGS_START))
 
+FACTORY_REVIEW_START = "<!-- factory:review:start -->"
+FACTORY_REVIEW_END = "<!-- factory:review:end -->"
+_FACTORY_REVIEW_RE = re.compile(
+    rf"{re.escape(FACTORY_REVIEW_START)}(.*?){re.escape(FACTORY_REVIEW_END)}",
+    re.DOTALL,
+)
+_FACTORY_REVIEW_START_RE = re.compile(re.escape(FACTORY_REVIEW_START))
+_FACTORY_REVIEW_END_RE = re.compile(re.escape(FACTORY_REVIEW_END))
+_FACTORY_REVIEW_MARKER_RE = re.compile(
+    rf"({re.escape(FACTORY_REVIEW_START)}|{re.escape(FACTORY_REVIEW_END)})"
+)
+
+FACTORY_PR_DESCRIPTION_START = "<!-- factory:pr-description:start -->"
+FACTORY_PR_DESCRIPTION_END = "<!-- factory:pr-description:end -->"
+_FACTORY_PR_DESCRIPTION_RE = re.compile(
+    rf"{re.escape(FACTORY_PR_DESCRIPTION_START)}(.*?){re.escape(FACTORY_PR_DESCRIPTION_END)}",
+    re.DOTALL,
+)
+
 MAX_REVIEW_ROUNDS = 3
 
 LABEL_TRIAGE = "factory:triage"
@@ -252,6 +271,126 @@ def extract_factory_findings(factory_block: str) -> str:
     return factory_block[match.start(1) : match.end(1)].strip()
 
 
+def extract_pr_review_section(pr_body: str) -> str:
+    """Return the content between the managed PR review markers, without the markers."""
+    match = _FACTORY_REVIEW_RE.search(_mask_code_blocks(pr_body))
+    if not match:
+        return ""
+    return pr_body[match.start(1) : match.end(1)].strip()
+
+
+def _sanitize_review_report(report: str) -> str:
+    """Neutralize unfenced review markers inside a report so they cannot split the section."""
+    spans = [
+        (match.start(), match.end(), match.group(0))
+        for match in _FACTORY_REVIEW_MARKER_RE.finditer(_mask_code_blocks(report))
+    ]
+    for start, end, marker in reversed(spans):
+        escaped = (
+            "<!-- factory:review:start (escaped) -->"
+            if marker == FACTORY_REVIEW_START
+            else "<!-- factory:review:end (escaped) -->"
+        )
+        report = f"{report[:start]}{escaped}{report[end:]}"
+    return report
+
+
+def render_pr_body_with_review(pr_body: str, review_report: str) -> str:
+    """Splice `review_report` into the managed PR review section, preserving all other text.
+
+    An existing managed section is replaced in place. When the body has no complete
+    section, dangling start/end markers (and any text after a dangling start) are
+    discarded before appending a fresh managed section, so stale review text or
+    stray markers cannot linger. Any trailing dangling markers after an existing
+    complete section are also cleaned up.
+    """
+    raw_report = review_report.strip()
+    if not raw_report:
+        raise ValueError("review_report must be non-empty")
+    report = _sanitize_review_report(raw_report)
+    section = f"{FACTORY_REVIEW_START}\n{report}\n{FACTORY_REVIEW_END}"
+
+    masked = _mask_code_blocks(pr_body)
+    match = _FACTORY_REVIEW_RE.search(masked)
+    if match is not None:
+        prefix = _remove_unfenced_matches(
+            _FACTORY_REVIEW_END_RE, pr_body[: match.start()]
+        )
+        suffix = _remove_unfenced_matches(_FACTORY_REVIEW_RE, pr_body[match.end() :])
+        suffix = _remove_unfenced_matches(_FACTORY_REVIEW_END_RE, suffix)
+        dangling_suffix = _FACTORY_REVIEW_START_RE.search(_mask_code_blocks(suffix))
+        if dangling_suffix is not None:
+            suffix = suffix[: dangling_suffix.start()].rstrip()
+        return f"{prefix}{section}{suffix}"
+
+    # With no complete section every end marker is dangling; drop them so the
+    # freshly appended section is the only review block.
+    base = _remove_unfenced_matches(_FACTORY_REVIEW_END_RE, pr_body)
+    masked = _mask_code_blocks(base)
+    dangling = _FACTORY_REVIEW_START_RE.search(masked)
+    base = base[: dangling.start()].rstrip() if dangling is not None else base
+    if not base.strip():
+        return section
+    return f"{base.rstrip()}\n\n{section}\n"
+
+
+def strip_pr_review_section(pr_body: str) -> str:
+    """Remove the managed PR review section (and any dangling markers) from a PR body."""
+    cleaned = _remove_unfenced_matches(_FACTORY_REVIEW_RE, pr_body)
+    masked = _mask_code_blocks(cleaned)
+    dangling = _FACTORY_REVIEW_START_RE.search(masked)
+    if dangling is not None:
+        cleaned = cleaned[: dangling.start()]
+    cleaned = _remove_unfenced_matches(_FACTORY_REVIEW_END_RE, cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def extract_pr_description_section(pr_body: str) -> str:
+    """Return the content between the managed PR description markers, without the markers."""
+    match = _FACTORY_PR_DESCRIPTION_RE.search(_mask_code_blocks(pr_body))
+    if not match:
+        return ""
+    return pr_body[match.start(1) : match.end(1)].strip()
+
+
+def render_pr_description_section(description: str) -> str:
+    """Wrap factory-managed PR description text in its managed markers."""
+    clean = description.strip()
+    if not clean:
+        raise ValueError("description must be non-empty")
+    return f"{FACTORY_PR_DESCRIPTION_START}\n{clean}\n{FACTORY_PR_DESCRIPTION_END}"
+
+
+def render_pr_body_with_managed_sections(
+    pr_body: str,
+    *,
+    description: str,
+    review_report: str | None = None,
+) -> str:
+    """Refresh the managed PR description (and optional review) sections in-place.
+
+    Only content between the managed markers is replaced; every other byte of
+    human-written text is preserved. Legacy bodies without description markers are
+    left untouched (the review section is still spliced) to avoid duplicating the
+    description on the next publish.
+    """
+    if not description.strip():
+        raise ValueError("description must be non-empty")
+
+    updated = pr_body
+    match = _FACTORY_PR_DESCRIPTION_RE.search(_mask_code_blocks(updated))
+    if match is not None:
+        section = render_pr_description_section(description)
+        updated = f"{updated[: match.start()]}{section}{updated[match.end() :]}"
+    elif not updated.strip():
+        updated = render_pr_description_section(description)
+
+    if review_report is not None:
+        updated = render_pr_body_with_review(updated, review_report)
+    return updated
+
+
 def clean_spec_block(factory_block: str) -> str:
     """Return the specification content with internal meta, findings, and banner removed."""
     return strip_attribution_banner(
@@ -321,6 +460,8 @@ class TaskContext(BaseModel):
     branch: str = ""
     worktree_path: Path | None = None
     pr_url: str | None = None
+    pr_body: str = ""
+    pr_review_body: str = ""
 
     def model_post_init(self, __context: object) -> None:
         if not self.branch:
@@ -466,6 +607,11 @@ def format_task_prompt_context(task: TaskContext) -> str:
         lines.append(task.factory_block)
         lines.append("")
 
+    if task.pr_review_body.strip():
+        lines.append("## Latest PR Review Findings")
+        lines.append(task.pr_review_body.strip())
+        lines.append("")
+
     if task.comments:
         lines.append("## Human Comments (Chronological)")
         issue_idx = 0
@@ -499,6 +645,7 @@ class StageVerdict(BaseModel):
     updated_factory_block: str
     summary: str = ""
     publish_pr: bool = False
+    review_report: str = ""
 
 
 _STATUS_LINE_RE = re.compile(
@@ -634,8 +781,9 @@ def parse_stage_verdict(
                 status="accepted",
                 target_label=LABEL_PR_READY,
                 updated_factory_block=clean_block,
-                summary=cleaned_body or "Review accepted -> PR ready for Human Gate 2",
+                summary="Review accepted -> PR ready for Human Gate 2",
                 publish_pr=True,
+                review_report=cleaned_body,
             )
 
         if raw_token in ("HUMAN_DECISION_NEEDED", "NEEDS_HUMAN", "STOP"):
@@ -652,6 +800,7 @@ def parse_stage_verdict(
                 target_label=LABEL_NEEDS_HUMAN,
                 updated_factory_block=merged_block,
                 summary="Review requires human decision",
+                review_report=cleaned_body,
             )
 
         # Default for FAIL / REVISION_NEEDED: replace findings in-place, track round,
@@ -684,6 +833,7 @@ def parse_stage_verdict(
                     f"Review loop hit the {max_review_rounds}-round circuit breaker -> "
                     "waiting for human decision"
                 ),
+                review_report=cleaned_body,
             )
 
         block = set_factory_meta(
@@ -698,6 +848,7 @@ def parse_stage_verdict(
             target_label=LABEL_BUILD,
             updated_factory_block=block,
             summary="Review requested revisions -> returning to factory:build",
+            review_report=cleaned_body,
         )
 
     return StageVerdict(

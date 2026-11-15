@@ -30,6 +30,7 @@ from ..github import (
     push_and_create_or_update_standalone_pr,
     transition_issue_label,
     update_issue_factory_block,
+    update_pr_review_section,
 )
 from ..task import (
     LABEL_BUILD,
@@ -1176,6 +1177,12 @@ async def run_issue_stage(
         stage=stage,
         agent=cfg.agent.name,
     )
+    # Review findings live on the PR so the Issue stays focused on the spec + meta.
+    # Stripping also removes stale fallback findings written before a PR existed.
+    if stage == "review" and task.pr_url and verdict.review_report.strip():
+        verdict.updated_factory_block = strip_factory_findings(
+            verdict.updated_factory_block
+        )
     outcome.stage_verdict = verdict
 
     if effective_dry_run:
@@ -1208,6 +1215,14 @@ async def run_issue_stage(
         pr_body = build_issue_pr_body(task, verdict, reviewed_sha=pre_review_sha)
         await push_and_create_or_update_pr(
             task, pr_body=pr_body, cwd=pr_cwd, repo_slug=repo_slug
+        )
+    elif stage == "review" and task.pr_url and verdict.review_report.strip():
+        # No push needed this round: splice the fresh report into the existing PR body.
+        await update_pr_review_section(
+            task,
+            verdict.review_report,
+            cwd=resolved_workspace,
+            repo_slug=repo_slug,
         )
 
     await transition_issue_label(
