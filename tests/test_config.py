@@ -13,7 +13,7 @@ from acp_factory.acp.client import (
     resolve_persona_text,
     resolve_skill_paths,
 )
-from acp_factory.config import BudgetConfig, CheckConfig, FactoryConfig
+from acp_factory.config import BudgetConfig, CheckConfig, FactoryConfig, StageConfig
 
 
 def test_parse_yaml_config_from_goal_spec(tmp_path: Path) -> None:
@@ -608,6 +608,59 @@ COMMON_KEY = "stage_override"
         "STAGE_FLAG": "true",
         "COMMON_KEY": "stage_override",
     }
+
+
+def test_thought_max_chars(tmp_path: Path) -> None:
+    """AC-1: stage overrides win, otherwise the top-level default is inherited."""
+    cfg_file = tmp_path / "factory.toml"
+    cfg_file.write_text(
+        """\
+version = "1"
+thought_max_chars = 250
+
+[stages.build]
+thought_max_chars = 0
+
+[stages.review]
+thought_max_chars = 100
+
+[stages.spec]
+model = "anthropic/claude"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = FactoryConfig.from_file(cfg_file)
+    assert cfg.thought_max_chars == 250
+    assert cfg.resolve_stage("build").thought_max_chars == 0
+    assert cfg.resolve_stage("review").thought_max_chars == 100
+    assert cfg.resolve_stage("spec").thought_max_chars == 250
+
+    assert FactoryConfig().thought_max_chars is None
+    assert StageConfig().thought_max_chars is None
+
+    build_cfg = cfg.resolve_stage("build")
+    client = FactoryACPClient(
+        workspace=tmp_path,
+        agent_config=build_cfg.agent,
+        config_dir=build_cfg.config_dir,
+        thought_max_chars=build_cfg.thought_max_chars,
+    )
+    assert client.tracker.thought_max_chars == 0
+
+
+def test_thought_max_chars_negative_rejected() -> None:
+    """AC-2: negative values and non-integer inputs are rejected explicitly."""
+    with pytest.raises(ValidationError):
+        StageConfig(thought_max_chars=-1)
+    with pytest.raises(ValidationError):
+        FactoryConfig(thought_max_chars=-1)
+    with pytest.raises(ValidationError):
+        FactoryConfig(stages={"build": {"thought_max_chars": -5}})
+    with pytest.raises(ValidationError):
+        StageConfig.model_validate({"thought_max_chars": 1.5})
+    with pytest.raises(ValidationError):
+        StageConfig.model_validate({"thought_max_chars": "100"})
 
 
 def test_prompt_resolution_prefers_local_factory_and_case_insensitive(

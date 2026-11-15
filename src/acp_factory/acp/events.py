@@ -135,6 +135,7 @@ class TurnSummary:
     transcript_markdown: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     permissions: list[dict[str, str]] = field(default_factory=list)
+    thought_max_chars: int | None = None
 
     @property
     def tokens(self) -> int:
@@ -195,11 +196,27 @@ class TurnSummary:
             "usage": _safe_json_value(self.usage),
         }
 
-    def to_condensed_dict(self, *, max_output_len: int = 500) -> dict[str, Any]:
+    def to_condensed_dict(
+        self, *, max_output_len: int = 500, thought_max_chars: int | None = None
+    ) -> dict[str, Any]:
         """Generate a concise JSON representation optimized for retro agents and token efficiency.
 
         Large tool contents, scratchpad thoughts, and verbose outputs are aggressively truncated.
+        ``thought_max_chars`` overrides the instance cap: 0 omits thoughts, N truncates,
+        and None falls back to the instance setting (or ``max_output_len`` when unset).
         """
+        effective_thought_cap = (
+            self.thought_max_chars if thought_max_chars is None else thought_max_chars
+        )
+        if not self.thought_text:
+            thought_preview = ""
+        elif effective_thought_cap == 0:
+            thought_preview = ""
+        elif effective_thought_cap is None:
+            thought_preview = _truncate_text(self.thought_text, max_output_len)
+        else:
+            thought_preview = _truncate_text(self.thought_text, effective_thought_cap)
+
         tokens, cost_usd = extract_usage_metrics(self.usage)
         condensed_tools: list[dict[str, Any]] = []
         for tc in self.tool_calls:
@@ -231,9 +248,7 @@ class TurnSummary:
             "response_preview": _truncate_text(self.response_text, max_output_len)
             if self.response_text
             else "",
-            "thought_preview": _truncate_text(self.thought_text, max_output_len)
-            if self.thought_text
-            else "",
+            "thought_preview": thought_preview,
             "tool_calls": condensed_tools,
             "file_operations": _safe_json_value(self.file_operations),
             "permissions": _safe_json_value(self.permissions),
@@ -243,8 +258,11 @@ class TurnSummary:
 class TurnEventTracker:
     """Wraps acpterm's TranscriptRecorder to track per-turn metrics and reset state between retries."""
 
-    def __init__(self, initial_prompt: str = "") -> None:
+    def __init__(
+        self, initial_prompt: str = "", thought_max_chars: int | None = None
+    ) -> None:
         self.recorder = TranscriptRecorder(prompt=initial_prompt)
+        self.thought_max_chars = thought_max_chars
         self._turn_start: float = 0.0
         self.history: list[TurnSummary] = []
 
@@ -263,6 +281,24 @@ class TurnEventTracker:
         # Ensure acpterm's Rich markdown stream state is clean
         acpterm_output_state.end_stream()
         acpterm_output_state.flush_md()
+
+    def _render_transcript_markdown(self) -> str:
+        """Render markdown, applying the thought cap without mutating recorder state."""
+        if self.thought_max_chars is None:
+            return self.recorder.to_markdown()
+
+        original_thoughts = self.recorder.thoughts
+        thought_text = "".join(original_thoughts).strip()
+        try:
+            if self.thought_max_chars == 0 or not thought_text:
+                self.recorder.thoughts = []
+            else:
+                self.recorder.thoughts = [
+                    _truncate_text(thought_text, self.thought_max_chars)
+                ]
+            return self.recorder.to_markdown()
+        finally:
+            self.recorder.thoughts = original_thoughts
 
     def end_turn(self, stop_reason: str) -> TurnSummary:
         """Finalize the turn, record duration, and return a TurnSummary snapshot."""
@@ -301,7 +337,8 @@ class TurnEventTracker:
             permissions=list(self.recorder.permissions),
             tool_calls=recorded_tools,
             usage=dict(self.recorder.usage) if self.recorder.usage else None,
-            transcript_markdown=self.recorder.to_markdown(),
+            transcript_markdown=self._render_transcript_markdown(),
+            thought_max_chars=self.thought_max_chars,
         )
         self.history.append(summary)
         return summary

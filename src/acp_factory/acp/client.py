@@ -181,6 +181,7 @@ class FactoryACPClient:
         strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
         guardrails: GuardrailsConfig | None = None,
         deny_runs: bool = False,
+        thought_max_chars: int | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.config_dir = config_dir.resolve() if config_dir else self.workspace
@@ -196,6 +197,7 @@ class FactoryACPClient:
         self.strip_env = strip_env
         self.guardrails = guardrails or GuardrailsConfig()
         self.deny_runs = deny_runs
+        self.thought_max_chars = thought_max_chars
 
         self.persona_text: str | None = resolve_persona_text(
             agent_config.persona,
@@ -211,7 +213,7 @@ class FactoryACPClient:
         )
         self._persona_injected: bool = False
 
-        self.tracker = TurnEventTracker()
+        self.tracker = TurnEventTracker(thought_max_chars=thought_max_chars)
         self._agent: ACPAgent | None = None
 
     @property
