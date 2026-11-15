@@ -14,7 +14,7 @@ from rich.text import Text
 
 from .config import FactoryConfig
 from .github import list_actionable_issues, list_all_factory_issues
-from .history import list_run_history
+from .history import list_fleet_run_history, list_run_history
 from .inspect import (
     compute_runs_stats,
     compute_transcript_stats,
@@ -94,6 +94,24 @@ def _quiet_display(ctx: typer.Context) -> FactoryDisplay | None:
     if (ctx.obj or {}).get("quiet"):
         return FactoryDisplay(quiet=True)
     return None
+
+
+def _resolve_use_fleet(
+    fleet: bool | None,
+    fleet_config_file: Path | None,
+    base_cfg: FactoryConfig,
+) -> bool:
+    """Decide whether fleet mode is active for `next`, `status`, and `history`.
+
+    An explicit `--fleet-config` enables fleet mode unless `--no-fleet` is passed;
+    otherwise an explicit `--fleet`/`--no-fleet` wins, falling back to whether the
+    resolved config already declares a `[fleet]` section.
+    """
+    if fleet_config_file is not None:
+        return fleet is not False
+    if fleet is not None:
+        return fleet
+    return base_cfg.fleet is not None
 
 
 STARTER_CONFIG_YAML = """\
@@ -937,11 +955,7 @@ def next_cmd(
         eff_max_cost = max_cost if max_cost is not None else budget.get("max_cost")
         eff_max_turns = max_turns if max_turns is not None else budget.get("max_turns")
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-        use_fleet = (
-            fleet is not False
-            if fleet_config_file is not None
-            else (fleet if fleet is not None else (base_cfg.fleet is not None))
-        )
+        use_fleet = _resolve_use_fleet(fleet, fleet_config_file, base_cfg)
 
         if use_fleet:
             from .runner.loop import run_fleet_next
@@ -1100,11 +1114,7 @@ def status_cmd(
 
     async def _show_status() -> None:
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-        use_fleet = (
-            fleet is not False
-            if fleet_config_file is not None
-            else (fleet if fleet is not None else (base_cfg.fleet is not None))
-        )
+        use_fleet = _resolve_use_fleet(fleet, fleet_config_file, base_cfg)
 
         if use_fleet:
             from .runner.loop import collect_fleet_status
@@ -1264,13 +1274,31 @@ def history_cmd(
         Path,
         typer.Option("--workspace", "-w", help="Target workspace directory."),
     ] = Path("."),
+    config_file: Annotated[
+        Path | None,
+        typer.Option("--config", "-c", help="Path to configuration file."),
+    ] = None,
+    fleet: Annotated[
+        bool | None,
+        typer.Option(
+            "--fleet/--no-fleet",
+            help="Aggregate run history from all 'fleet.repositories' entries (auto-enabled when a fleet section is configured).",
+        ),
+    ] = None,
+    fleet_config_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--fleet-config",
+            help="Path to an operator-level fleet TOML file (overrides repo-local and user-level fleet definitions).",
+        ),
+    ] = None,
     limit: Annotated[
         int | None,
         typer.Option(
             "--limit",
             "-n",
             min=1,
-            help="Maximum number of runs to display (defaults to 50).",
+            help="Maximum number of runs to display after merging fleet results (defaults to 50).",
         ),
     ] = None,
     json_output: Annotated[
@@ -1281,15 +1309,30 @@ def history_cmd(
         ),
     ] = False,
 ) -> None:
-    """Show a chronological history of local factory runs (`.factory/runs/*/run.json`)."""
-    records = list_run_history(workspace.resolve())
+    """Show a chronological history of local factory runs (`.factory/runs/*/run.json`).
 
+    Use `--fleet` to merge runs from every repository in the fleet configuration into
+    a single timeline, newest first.
+    """
+    resolved_workspace = workspace.resolve()
+    base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
+    use_fleet = _resolve_use_fleet(fleet, fleet_config_file, base_cfg)
+
+    if use_fleet:
+        records = list_fleet_run_history(base_cfg.with_fleet_overlay(fleet_config_file))
+    else:
+        records = list_run_history(resolved_workspace)
+
+    limited = records[: limit or 50]
     if json_output:
-        console.print(json.dumps(records[: limit or 50], indent=2))
+        console.print(json.dumps(limited, indent=2))
         return
 
     if not records:
-        console.print("[dim]No factory runs found under `.factory/runs/`.[/dim]")
+        if use_fleet:
+            console.print("[dim]No factory runs found across fleet repositories.[/dim]")
+        else:
+            console.print("[dim]No factory runs found under `.factory/runs/`.[/dim]")
         return
 
     table = Table(title="acp-factory Run History")
@@ -1306,7 +1349,7 @@ def history_cmd(
     table.add_column("Cost", justify="right", no_wrap=True)
     table.add_column("Result", no_wrap=True)
 
-    for rec in records[: limit or 50]:
+    for rec in limited:
         issue = rec.get("issue_number")
         dur = rec.get("duration_seconds")
         usage = rec.get("usage") or {}
