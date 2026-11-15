@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -1987,4 +1989,133 @@ def test_render_neutralizes_spurious_prose_hash_refs_only_in_managed_prose() -> 
     assert "Human PR text: Behavior #1" in pr_body
     assert extract_pr_review_section(pr_body) == (
         "1. The spec's Behavior 1 conflicts with Finding 2; see Issue #29 and `Step #3`."
+    )
+
+
+def _init_worktree_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "factory@example.com"], cwd=path, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Factory Tests"], cwd=path, check=True
+    )
+    (path / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=path, check=True)
+    return path.resolve()
+
+
+def _add_issue_worktree(main_root: Path, issue_number: int) -> Path:
+    wt_path = main_root / ".worktrees" / f"issue-{issue_number}"
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            f"factory/issue-{issue_number}",
+            str(wt_path),
+        ],
+        cwd=main_root,
+        check=True,
+    )
+    return wt_path
+
+
+def _closed_worktree_gh(*args: object, **_kwargs: object) -> str:
+    cmd = args[0]
+    assert isinstance(cmd, list)
+    if cmd[:2] == ["issue", "list"]:
+        return "[]"
+    if cmd[:2] == ["issue", "view"]:
+        number = int(cmd[2])
+        return json.dumps(
+            {
+                "number": number,
+                "title": f"Closed issue {number}",
+                "state": "CLOSED",
+                "body": "",
+                "labels": [{"name": LABEL_DONE}],
+                "comments": [],
+                "url": f"https://github.com/acme/api/issues/{number}",
+            }
+        )
+    if cmd[:2] == ["pr", "list"]:
+        return "[]"
+    raise AssertionError(f"unexpected gh invocation: {cmd}")
+
+
+@pytest.mark.parametrize(
+    "scan_root",
+    ["worktree_subdir", "main_subdir"],
+    ids=["from_linked_worktree", "from_repo_subdirectory"],
+)
+async def test_worktree_scan_from_worktree(tmp_path: Path, scan_root: str) -> None:
+    from acp_factory.github import list_actionable_issues, list_all_factory_issues
+
+    main_root = _init_worktree_repo(tmp_path / "main")
+    worktree = _add_issue_worktree(main_root, 5)
+    if scan_root == "worktree_subdir":
+        nested = worktree / "nested"
+    else:
+        nested = main_root / "src" / "pkg"
+    nested.mkdir(parents=True)
+
+    with patch(
+        "acp_factory.github.run_gh",
+        new=AsyncMock(side_effect=_closed_worktree_gh),
+    ):
+        actionable = await list_actionable_issues(nested, repo_slug="acme/api")
+        all_issues = await list_all_factory_issues(nested, repo_slug="acme/api")
+
+    assert [task.issue_number for task in actionable] == [5]
+    assert [task.issue_number for task in all_issues] == [5]
+
+
+def test_build_dry_run_gh_plan_worktree_removal_anchoring(tmp_path: Path) -> None:
+    from acp_factory.github import build_dry_run_gh_plan
+
+    main_root = _init_worktree_repo(tmp_path / "main")
+    source_worktree = _add_issue_worktree(main_root, 10)
+    task = TaskContext(
+        issue_number=19,
+        title="Anchor worktree removal",
+        original_body="orig",
+        factory_block="## Specification\n- Anchor it.",
+        labels=[LABEL_DONE],
+    )
+    verdict = parse_stage_verdict(
+        "done",
+        "## Summary\nDone.\nSTATUS: ACCEPTED",
+        current_factory_block=task.factory_block,
+    )
+
+    plan = build_dry_run_gh_plan(
+        task,
+        verdict,
+        workspace=source_worktree,
+        run_dir=tmp_path / "dry-run",
+    )
+
+    removal = next(command for command in plan.commands if "worktree remove" in command)
+    assert str(main_root) in removal
+    assert ".worktrees/issue-19" in removal
+    assert ".worktrees/issue-10" not in removal
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("acp_factory.github", "acp_factory.runner"),
+        ("acp_factory.runner", "acp_factory.github"),
+    ],
+    ids=["github_first", "runner_first"],
+)
+def test_import_order_has_no_cycle(order: tuple[str, str]) -> None:
+    subprocess.run(
+        [sys.executable, "-c", f"import {order[0]}; import {order[1]}"],
+        check=True,
     )
