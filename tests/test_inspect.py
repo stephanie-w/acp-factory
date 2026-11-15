@@ -136,3 +136,64 @@ def test_cli_inspect_views(tmp_path: Path) -> None:
     assert len(payload["thought_matches"]) == 1
     assert len(payload["tool_call_matches"]) == 1
     assert payload["tool_call_matches"][0]["index"] == 0
+
+
+def test_turn_summary_forwards_tool_call_duration() -> None:
+    """TurnEventTracker and TurnSummary preserve duration_seconds from acpterm."""
+    from acp_factory.acp.events import TurnEventTracker
+
+    tracker = TurnEventTracker()
+    tracker.begin_turn("hi")
+    tracker.recorder.tool_calls["tc_1"] = {
+        "title": "Run pytest",
+        "kind": "execute",
+        "status": "completed",
+        "content": ["ok"],
+        "raw_input": {},
+        "raw_output": {"metadata": {"exit": 0}},
+        "duration_seconds": 1.234,
+    }
+    summary = tracker.end_turn("end_turn")
+    full = summary.to_dict()
+    condensed = summary.to_condensed_dict()
+
+    assert full["tool_calls"][0]["duration_seconds"] == 1.234
+    assert condensed["tool_calls"][0]["duration_seconds"] == 1.234
+
+
+def test_cli_stats_single_and_aggregate(tmp_path: Path) -> None:
+    """`acp-factory stats` works both for a single run and across runs."""
+    t_path = _write_sample_run(tmp_path)
+    data = json.loads(t_path.read_text(encoding="utf-8"))
+    data["duration_seconds"] = 12.5
+    data["usage"] = {"total_tokens": 1200, "cost": {"amount": 0.0125}}
+    data["tool_calls"][0]["duration_seconds"] = 4.25
+    data["tool_calls"][2]["duration_seconds"] = 0.75
+    t_path.write_text(json.dumps(data), encoding="utf-8")
+
+    runner = CliRunner()
+
+    res_single = runner.invoke(
+        app, ["stats", "20261115-120000-abcdef", "--workspace", str(tmp_path), "--json"]
+    )
+    assert res_single.exit_code == 0
+    single = json.loads(res_single.stdout)
+    assert single["tool_call_count"] == 3
+    assert single["failed_count"] == 1
+    assert single["tokens"] == 1200
+    assert single["cost_usd"] == 0.0125
+    assert single["estimated_tokens"] > 0
+    assert single["slowest_calls"][0]["index"] == 0
+    assert single["slowest_calls"][0]["duration_seconds"] == 4.25
+
+    res_agg = runner.invoke(app, ["stats", "--workspace", str(tmp_path), "--json"])
+    assert res_agg.exit_code == 0
+    agg = json.loads(res_agg.stdout)
+    assert agg["total_runs"] == 1
+    assert agg["succeeded_runs"] == 1
+    assert agg["slowest_calls"][0]["duration_seconds"] == 4.25
+
+    res_table = runner.invoke(app, ["stats", "--workspace", str(tmp_path)])
+    assert res_table.exit_code == 0
+    assert "Stats by Stage" in res_table.stdout
+    assert "Top 1 Slowest Runs" in res_table.stdout

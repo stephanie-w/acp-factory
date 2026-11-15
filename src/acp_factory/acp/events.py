@@ -163,17 +163,18 @@ class TurnSummary:
             raw_out = tc.get("raw_output")
             if max_output_chars and raw_out is not None:
                 raw_out = _condense_value(raw_out, max_output_chars)
-            formatted_tools.append(
-                {
-                    "id": tc.get("id"),
-                    "title": tc.get("title", ""),
-                    "kind": tc.get("kind", ""),
-                    "status": tc.get("status", "completed"),
-                    "raw_input": _safe_json_value(tc.get("raw_input")),
-                    "content": content,
-                    "raw_output": _safe_json_value(raw_out),
-                }
-            )
+            tool_entry: dict[str, Any] = {
+                "id": tc.get("id"),
+                "title": tc.get("title", ""),
+                "kind": tc.get("kind", ""),
+                "status": tc.get("status", "completed"),
+                "raw_input": _safe_json_value(tc.get("raw_input")),
+                "content": content,
+                "raw_output": _safe_json_value(raw_out),
+            }
+            if tc.get("duration_seconds") is not None:
+                tool_entry["duration_seconds"] = tc["duration_seconds"]
+            formatted_tools.append(tool_entry)
 
         return {
             "summary": {
@@ -233,6 +234,8 @@ class TurnSummary:
                 entry["output_preview"] = _truncate_text(str(content), max_output_len)
             if tc.get("raw_output") is not None:
                 entry["raw_output"] = _condense_value(tc["raw_output"], max_output_len)
+            if tc.get("duration_seconds") is not None:
+                entry["duration_seconds"] = tc["duration_seconds"]
             condensed_tools.append(entry)
 
         return {
@@ -314,17 +317,18 @@ class TurnEventTracker:
                 if isinstance(content_list, list)
                 else str(content_list or "")
             )
-            recorded_tools.append(
-                {
-                    "id": tc_id,
-                    "title": tc.get("title", ""),
-                    "kind": tc.get("kind", ""),
-                    "status": tc.get("status", "completed"),
-                    "raw_input": tc.get("raw_input"),
-                    "content": content_str,
-                    "raw_output": tc.get("raw_output"),
-                }
-            )
+            rec_entry: dict[str, Any] = {
+                "id": tc_id,
+                "title": tc.get("title", ""),
+                "kind": tc.get("kind", ""),
+                "status": tc.get("status", "completed"),
+                "raw_input": tc.get("raw_input"),
+                "content": content_str,
+                "raw_output": tc.get("raw_output"),
+            }
+            if tc.get("duration_seconds") is not None:
+                rec_entry["duration_seconds"] = tc["duration_seconds"]
+            recorded_tools.append(rec_entry)
 
         summary = TurnSummary(
             prompt=self.recorder.prompt,

@@ -16,6 +16,9 @@ from .config import FactoryConfig
 from .github import list_actionable_issues, list_all_factory_issues
 from .history import list_run_history
 from .inspect import (
+    compute_runs_stats,
+    compute_transcript_stats,
+    extract_tool_duration,
     extract_tool_exit_code,
     extract_tool_output,
     filter_tool_calls,
@@ -1368,14 +1371,17 @@ def _build_tool_calls_table(
     table.add_column("Kind", style="cyan", no_wrap=True)
     table.add_column("Status", no_wrap=True)
     table.add_column("Exit", justify="right", no_wrap=True)
+    table.add_column("Dur", justify="right", no_wrap=True)
     table.add_column("Title")
     for idx, tc in rows:
         ec = extract_tool_exit_code(tc)
+        dur = extract_tool_duration(tc)
         table.add_row(
             str(idx),
             str(tc.get("kind") or "-"),
             str(tc.get("status") or "-"),
             str(ec) if ec is not None else "-",
+            f"{dur:.2f}s" if dur is not None else "-",
             str(tc.get("title") or "-"),
         )
     return table
@@ -1477,9 +1483,11 @@ def inspect_cmd(
             return
         exit_code = extract_tool_exit_code(tc)
         exit_str = f" (exit {exit_code})" if exit_code is not None else ""
+        dur = extract_tool_duration(tc)
+        dur_str = f" | duration: {dur:.3f}s" if dur is not None else ""
         header = (
             f"id: {tc.get('id')}\n"
-            f"kind: {tc.get('kind')} | status: {tc.get('status')}{exit_str}\n"
+            f"kind: {tc.get('kind')} | status: {tc.get('status')}{exit_str}{dur_str}\n"
             f"title: {tc.get('title')}"
         )
         if tc.get("raw_input"):
@@ -1589,6 +1597,222 @@ def inspect_cmd(
                 matched_calls,
             )
         )
+
+
+@app.command("stats")
+def stats_cmd(
+    target: Annotated[
+        str | None,
+        typer.Argument(
+            help="Optional run ID (or prefix), run/attempt dir, or transcript JSON file. Omit to aggregate across recent runs.",
+        ),
+    ] = None,
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", "-w", help="Target workspace directory."),
+    ] = Path("."),
+    attempt: Annotated[
+        int,
+        typer.Option(
+            "--attempt", "-a", min=1, help="Attempt number (when target is given)."
+        ),
+    ] = 1,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", min=1, help="Max recent runs to aggregate."),
+    ] = 20,
+    top: Annotated[
+        int,
+        typer.Option(
+            "--top", min=1, help="Number of top slowest/largest items to show."
+        ),
+    ] = 10,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print stats as JSON."),
+    ] = False,
+) -> None:
+    """Analyze run durations, tool-call mix, slowest calls, and largest outputs."""
+    if target is not None:
+        try:
+            transcript_path = resolve_transcript_path(
+                target, workspace=workspace, attempt=attempt
+            )
+            data = load_transcript(transcript_path)
+        except Exception as exc:
+            console.print(f"[bold red]Stats Error:[/bold red] {exc}")
+            raise typer.Exit(code=1) from exc
+
+        stats = compute_transcript_stats(data, top=top)
+        if json_output:
+            typer.echo(
+                json.dumps({"transcript": str(transcript_path), **stats}, indent=2)
+            )
+            return
+
+        dur = stats.get("duration_seconds")
+        dur_str = f"{dur:.2f}s" if isinstance(dur, (int, float)) else "-"
+        console.print(
+            f"[dim]Transcript:[/dim] {transcript_path}\n"
+            f"[bold]Turn Duration:[/bold] {dur_str} | "
+            f"[bold]Tool Calls:[/bold] {stats['tool_call_count']} "
+            f"([red]{stats['failed_count']} failed[/red]) | "
+            f"[bold]Output:[/bold] {stats['total_output_chars']:,} chars\n"
+            f"[bold]Tokens:[/bold] {stats['tokens']:,} "
+            f"[dim](~{stats['estimated_tokens']:,} est.)[/dim] | "
+            f"[bold]Cost:[/bold] ${stats['cost_usd']:.4f}"
+        )
+
+        kind_table = Table(title="Tool Calls by Kind")
+        kind_table.add_column("Kind", style="cyan", no_wrap=True)
+        kind_table.add_column("Count", justify="right")
+        kind_table.add_column("Failed", justify="right")
+        kind_table.add_column("Total Dur", justify="right")
+        kind_table.add_column("Max Dur", justify="right")
+        kind_table.add_column("Output Chars", justify="right")
+        for row in stats["by_kind"]:
+            tot_d = (
+                f"{row['total_duration_seconds']:.2f}s" if row["timed_count"] else "-"
+            )
+            max_d = (
+                f"{row['max_duration_seconds']:.2f}s"
+                if row["max_duration_seconds"] is not None
+                else "-"
+            )
+            kind_table.add_row(
+                row["kind"],
+                str(row["count"]),
+                str(row["failed"]),
+                tot_d,
+                max_d,
+                f"{row['total_output_chars']:,}",
+            )
+        console.print(kind_table)
+
+        if stats["slowest_calls"]:
+            slow_table = Table(title=f"Top {len(stats['slowest_calls'])} Slowest Calls")
+            slow_table.add_column("#", justify="right", style="dim")
+            slow_table.add_column("Kind", style="cyan", no_wrap=True)
+            slow_table.add_column("Dur", justify="right", style="yellow")
+            slow_table.add_column("Title")
+            for row in stats["slowest_calls"]:
+                slow_table.add_row(
+                    str(row["index"]),
+                    row["kind"],
+                    f"{row['duration_seconds']:.3f}s",
+                    row["title"],
+                )
+            console.print(slow_table)
+
+        if stats["largest_calls"]:
+            big_table = Table(
+                title=f"Top {len(stats['largest_calls'])} Largest Outputs"
+            )
+            big_table.add_column("#", justify="right", style="dim")
+            big_table.add_column("Kind", style="cyan", no_wrap=True)
+            big_table.add_column("Chars", justify="right", style="magenta")
+            big_table.add_column("~Est. Tok", justify="right", style="dim")
+            big_table.add_column("Title")
+            for row in stats["largest_calls"]:
+                big_table.add_row(
+                    str(row["index"]),
+                    row["kind"],
+                    f"{row['output_chars']:,}",
+                    f"~{row['output_chars'] // 4:,}",
+                    row["title"],
+                )
+            console.print(big_table)
+        return
+
+    agg = compute_runs_stats(workspace.resolve(), limit=limit, top=top)
+    if json_output:
+        typer.echo(json.dumps(agg, indent=2))
+        return
+
+    if agg["total_runs"] == 0:
+        console.print("[dim]No factory runs found under `.factory/runs/`.[/dim]")
+        return
+
+    console.print(
+        f"[bold]Runs:[/bold] {agg['total_runs']} "
+        f"([green]{agg['succeeded_runs']} passed[/green], "
+        f"[red]{agg['failed_runs']} failed[/red]) | "
+        f"[bold]Total Dur:[/bold] {agg['total_duration_seconds']:.1f}s "
+        f"(avg {agg['avg_duration_seconds']:.1f}s) | "
+        f"[bold]Tokens:[/bold] {agg['total_tokens']:,} | "
+        f"[bold]Cost:[/bold] ${agg['total_cost_usd']:.4f}"
+    )
+
+    stage_table = Table(title="Stats by Stage")
+    stage_table.add_column("Stage", style="cyan", no_wrap=True)
+    stage_table.add_column("Runs", justify="right")
+    stage_table.add_column("Passed", justify="right")
+    stage_table.add_column("Avg Dur", justify="right")
+    stage_table.add_column("Avg Attempts", justify="right")
+    for sb in agg["by_stage"]:
+        stage_table.add_row(
+            sb["stage"],
+            str(sb["runs"]),
+            str(sb["succeeded"]),
+            f"{sb['avg_duration_seconds']:.1f}s",
+            f"{sb['avg_attempts']:.2f}",
+        )
+    console.print(stage_table)
+
+    if agg["slowest_runs"]:
+        runs_table = Table(title=f"Top {len(agg['slowest_runs'])} Slowest Runs")
+        runs_table.add_column("Run ID", style="dim")
+        runs_table.add_column("Stage", style="cyan", no_wrap=True)
+        runs_table.add_column("Model")
+        runs_table.add_column("Dur", justify="right", style="yellow")
+        runs_table.add_column("Result", no_wrap=True)
+        for r in agg["slowest_runs"]:
+            res_icon = (
+                "[green]✓[/green]"
+                if r["succeeded"] is True
+                else ("[red]✗[/red]" if r["succeeded"] is False else "-")
+            )
+            runs_table.add_row(
+                r["run_id"],
+                r["stage"],
+                r["model"],
+                f"{r['duration_seconds']:.1f}s",
+                res_icon,
+            )
+        console.print(runs_table)
+
+    if agg["slowest_calls"]:
+        calls_table = Table(title=f"Top {len(agg['slowest_calls'])} Slowest Tool Calls")
+        calls_table.add_column("Run ID", style="dim")
+        calls_table.add_column("Attempt", style="dim")
+        calls_table.add_column("Kind", style="cyan", no_wrap=True)
+        calls_table.add_column("Dur", justify="right", style="yellow")
+        calls_table.add_column("Title")
+        for c in agg["slowest_calls"]:
+            calls_table.add_row(
+                c["run_id"],
+                c["attempt"],
+                c["kind"],
+                f"{c['duration_seconds']:.3f}s",
+                c["title"],
+            )
+        console.print(calls_table)
+    elif agg["largest_calls"]:
+        big_table = Table(title=f"Top {len(agg['largest_calls'])} Largest Tool Outputs")
+        big_table.add_column("Run ID", style="dim")
+        big_table.add_column("Attempt", style="dim")
+        big_table.add_column("Kind", style="cyan", no_wrap=True)
+        big_table.add_column("Chars", justify="right", style="magenta")
+        big_table.add_column("Title")
+        for c in agg["largest_calls"]:
+            big_table.add_row(
+                c["run_id"],
+                c["attempt"],
+                c["kind"],
+                f"{c['output_chars']:,}",
+                c["title"],
+            )
+        console.print(big_table)
 
 
 def main() -> None:
