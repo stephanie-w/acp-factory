@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from acp_factory.acp.client import TurnResult
 from acp_factory.acp.events import TurnSummary, UsageTotals, extract_usage_metrics
 from acp_factory.config import (
@@ -149,69 +151,76 @@ def test_render_budget_escalation() -> None:
     assert "**Turns Completed:** 2" in block
 
 
-async def test_turn_cap_halts_loop(tmp_path: Path) -> None:
-    """AC-3: cumulative turns reaching max_turns halts the loop before a second turn."""
+@pytest.mark.parametrize(
+    (
+        "budget_kwargs",
+        "usage_payload",
+        "max_attempts",
+        "expected_turns",
+        "expected_reason",
+        "expected_tokens",
+        "expected_cost",
+    ),
+    [
+        (
+            {"max_turns": 1},
+            None,
+            3,
+            1,
+            "turn count (1) reached max_turns (1)",
+            0,
+            0.0,
+        ),
+        (
+            {"max_tokens_per_run": 100},
+            {"used": 60, "size": 1000, "cost": None},
+            5,
+            2,
+            "cumulative tokens 120 exceeded max_tokens_per_run (100)",
+            120,
+            0.0,
+        ),
+        (
+            {"max_cost_usd": 0.4},
+            {"used": 10, "size": 1000, "cost": {"amount": 0.25, "currency": "USD"}},
+            5,
+            2,
+            "cumulative cost $0.50 exceeded max_cost_usd ($0.40)",
+            20,
+            0.5,
+        ),
+    ],
+    ids=["turn_cap", "token_cap", "cost_cap"],
+)
+async def test_budget_cap_halts_loop(
+    tmp_path: Path,
+    budget_kwargs: dict[str, object],
+    usage_payload: dict[str, object] | None,
+    max_attempts: int,
+    expected_turns: int,
+    expected_reason: str,
+    expected_tokens: int,
+    expected_cost: float,
+) -> None:
+    """Budget caps (turns, tokens, cost) halt the loop on breach."""
     cfg = FactoryConfig(
         task="do work",
-        budget=BudgetConfig(max_turns=1),
+        budget=BudgetConfig.model_validate(budget_kwargs),
         checks=[CheckConfig(name="always-fail", cmd=_FAIL_CHECK)],
-        retry=RetryConfig(max_attempts=3),
+        retry=RetryConfig(max_attempts=max_attempts),
     )
-    fake, prompts = _fake_client()
+    fake, prompts = _fake_client(usage_payload)
     with patch("acp_factory.runner.loop.FactoryACPClient", fake):
         outcome = await run_factory(cfg, tmp_path)
 
     assert outcome.succeeded is False
     assert outcome.budget_breached is True
-    assert outcome.attempts_used == 1
-    assert len(prompts) == 1
-    assert "turn count (1) reached max_turns (1)" in (outcome.failure_reason or "")
-    assert outcome.usage.turns == 1
-
-
-async def test_token_cap_halts_loop(tmp_path: Path) -> None:
-    """AC-4: cumulative tokens exceeding max_tokens_per_run halts the loop."""
-    cfg = FactoryConfig(
-        task="do work",
-        budget=BudgetConfig(max_tokens_per_run=100),
-        checks=[CheckConfig(name="always-fail", cmd=_FAIL_CHECK)],
-        retry=RetryConfig(max_attempts=5),
-    )
-    fake, prompts = _fake_client({"used": 60, "size": 1000, "cost": None})
-    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
-        outcome = await run_factory(cfg, tmp_path)
-
-    assert outcome.succeeded is False
-    assert outcome.budget_breached is True
-    assert len(prompts) == 2
-    assert "cumulative tokens 120 exceeded max_tokens_per_run (100)" in (
-        outcome.failure_reason or ""
-    )
-    assert outcome.usage.tokens == 120
-    assert outcome.usage.turns == 2
-
-
-async def test_cost_cap_halts_loop(tmp_path: Path) -> None:
-    """AC-5: cumulative cost exceeding max_cost_usd halts the loop."""
-    cfg = FactoryConfig(
-        task="do work",
-        budget=BudgetConfig(max_cost_usd=0.4),
-        checks=[CheckConfig(name="always-fail", cmd=_FAIL_CHECK)],
-        retry=RetryConfig(max_attempts=5),
-    )
-    fake, prompts = _fake_client(
-        {"used": 10, "size": 1000, "cost": {"amount": 0.25, "currency": "USD"}}
-    )
-    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
-        outcome = await run_factory(cfg, tmp_path)
-
-    assert outcome.succeeded is False
-    assert outcome.budget_breached is True
-    assert len(prompts) == 2
-    assert "cumulative cost $0.50 exceeded max_cost_usd ($0.40)" in (
-        outcome.failure_reason or ""
-    )
-    assert outcome.usage.cost_usd == 0.5
+    assert outcome.attempts_used == expected_turns
+    assert len(prompts) == expected_turns
+    assert expected_reason in (outcome.failure_reason or "")
+    assert outcome.usage.turns == expected_turns
+    assert outcome.usage.tokens == expected_tokens
+    assert outcome.usage.cost_usd == expected_cost
 
 
 async def test_budget_escalation_transitions_issue(tmp_path: Path) -> None:
@@ -317,53 +326,56 @@ async def test_run_json_records_usage(tmp_path: Path) -> None:
     assert data["budget"]["max_turns"] == 5
 
 
-async def test_run_json_per_run_isolation_zero_usage(tmp_path: Path) -> None:
-    """AC-1: run.json records only this run's usage, not seeded cumulative totals."""
+@pytest.mark.parametrize(
+    (
+        "usage_payload",
+        "initial_usage",
+        "expected_run_usage",
+        "expected_total_usage",
+        "expected_telemetry",
+    ),
+    [
+        (
+            None,
+            UsageTotals(tokens=59_564, cost_usd=1.25, turns=3),
+            UsageTotals(tokens=0, cost_usd=0.0, turns=1),
+            UsageTotals(tokens=59_564, cost_usd=1.25, turns=4),
+            False,
+        ),
+        (
+            {"used": 1000, "size": 20000, "cost": {"amount": 0.02, "currency": "USD"}},
+            UsageTotals(tokens=50_000, cost_usd=1.0, turns=2),
+            UsageTotals(tokens=1000, cost_usd=0.02, turns=1),
+            UsageTotals(tokens=51_000, cost_usd=1.02, turns=3),
+            True,
+        ),
+    ],
+    ids=["zero_usage", "with_usage"],
+)
+async def test_run_json_per_run_isolation(
+    tmp_path: Path,
+    usage_payload: dict[str, object] | None,
+    initial_usage: UsageTotals,
+    expected_run_usage: UsageTotals,
+    expected_total_usage: UsageTotals,
+    expected_telemetry: bool,
+) -> None:
+    """run.json records only this run's usage, not seeded cumulative totals."""
     (tmp_path / ".factory").mkdir()
     cfg = FactoryConfig(task="do work")
-    fake, _ = _fake_client()
+    fake, _ = _fake_client(usage_payload)
     with patch("acp_factory.runner.loop.FactoryACPClient", fake):
-        outcome = await run_factory(
-            cfg,
-            tmp_path,
-            initial_usage=UsageTotals(tokens=59_564, cost_usd=1.25, turns=3),
-        )
+        outcome = await run_factory(cfg, tmp_path, initial_usage=initial_usage)
 
     assert outcome.succeeded is True
     assert outcome.run_dir is not None
     data = json.loads((outcome.run_dir / "run.json").read_text(encoding="utf-8"))
-    assert data["usage"]["total_tokens"] == 0
-    assert data["usage"]["total_cost_usd"] == 0.0
-    assert data["usage"]["total_turns"] == 1
-    assert data["usage"]["telemetry_available"] is False
-    # The outcome still carries cumulative totals for callers (meta persistence).
-    assert outcome.usage == UsageTotals(tokens=59_564, cost_usd=1.25, turns=4)
-    assert outcome.run_usage == UsageTotals(tokens=0, cost_usd=0.0, turns=1)
-
-
-async def test_run_json_per_run_isolation_with_usage(tmp_path: Path) -> None:
-    """AC-2: run.json records only this run's consumed tokens/cost/turns."""
-    (tmp_path / ".factory").mkdir()
-    cfg = FactoryConfig(task="do work")
-    fake, _ = _fake_client(
-        {"used": 1000, "size": 20000, "cost": {"amount": 0.02, "currency": "USD"}}
-    )
-    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
-        outcome = await run_factory(
-            cfg,
-            tmp_path,
-            initial_usage=UsageTotals(tokens=50_000, cost_usd=1.0, turns=2),
-        )
-
-    assert outcome.succeeded is True
-    assert outcome.run_dir is not None
-    data = json.loads((outcome.run_dir / "run.json").read_text(encoding="utf-8"))
-    assert data["usage"]["total_tokens"] == 1000
-    assert data["usage"]["total_cost_usd"] == 0.02
-    assert data["usage"]["total_turns"] == 1
-    assert data["usage"]["telemetry_available"] is True
-    assert outcome.usage == UsageTotals(tokens=51_000, cost_usd=1.02, turns=3)
-    assert outcome.run_usage == UsageTotals(tokens=1000, cost_usd=0.02, turns=1)
+    assert data["usage"]["total_tokens"] == expected_run_usage.tokens
+    assert data["usage"]["total_cost_usd"] == expected_run_usage.cost_usd
+    assert data["usage"]["total_turns"] == expected_run_usage.turns
+    assert data["usage"]["telemetry_available"] is expected_telemetry
+    assert outcome.usage == expected_total_usage
+    assert outcome.run_usage == expected_run_usage
 
 
 async def test_cumulative_usage_cap_enforced_with_initial_usage(
@@ -431,14 +443,17 @@ async def test_multi_stage_seeds_initial_usage(tmp_path: Path) -> None:
     assert meta["turns"] == "4"
 
 
-def test_cli_budget_flags_in_help() -> None:
-    """AC-9: --max-tokens / --max-cost / --max-turns appear in the top-level help."""
+@pytest.mark.parametrize(
+    "subcmd", [None, "issue", "next"], ids=["root", "issue", "next"]
+)
+def test_cli_budget_flags_in_help(subcmd: str | None) -> None:
+    """--max-tokens / --max-cost / --max-turns appear in top-level, issue, and next help."""
     from typer.testing import CliRunner
 
     from acp_factory.cli import app
 
-    runner = CliRunner()
-    res = runner.invoke(app, ["--help"])
+    args = [subcmd, "--help"] if subcmd else ["--help"]
+    res = CliRunner().invoke(app, args)
     assert res.exit_code == 0
     for flag in ("--max-tokens", "--max-cost", "--max-turns"):
         assert flag in res.output
@@ -479,20 +494,6 @@ def test_cli_run_applies_budget_overrides() -> None:
         assert called_cfg.budget.max_turns == 2
         assert called_cfg.budget.max_tokens_per_run == 100
         assert called_cfg.budget.max_cost_usd == 0.5
-
-
-def test_cli_issue_and_next_expose_budget_options() -> None:
-    """Findings 3: `issue` and `next` commands expose --max-tokens, --max-cost, and --max-turns."""
-    from typer.testing import CliRunner
-
-    from acp_factory.cli import app
-
-    runner = CliRunner()
-    for subcmd in ("issue", "next"):
-        res = runner.invoke(app, [subcmd, "--help"])
-        assert res.exit_code == 0
-        for flag in ("--max-tokens", "--max-cost", "--max-turns"):
-            assert flag in res.output
 
 
 async def test_stage_with_prior_turns_meta_respects_per_run_turn_cap(

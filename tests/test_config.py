@@ -295,101 +295,104 @@ def test_scaffolded_multi_stage_config_resolves_all_stages_and_skills(
     assert cfg.named_checks["security"].skills == ["security-auditor"]
 
 
-def test_user_level_home_config_loaded_in_bare_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    (
+        "has_repo_cfg",
+        "home_cfg",
+        "xdg_cfg",
+        "use_explicit",
+        "expected_task",
+        "expected_dir_kind",
+    ),
+    [
+        (
+            False,
+            'version = "1"\ntask = "personal-default-task"\n\n[agent]\nname = "opencode"\n',
+            None,
+            False,
+            "personal-default-task",
+            "home",
+        ),
+        (
+            False,
+            None,
+            'version = "1"\ntask = "xdg-task"\n',
+            False,
+            "xdg-task",
+            "xdg",
+        ),
+        (
+            True,
+            'version = "1"\ntask = "user-task"\n',
+            None,
+            False,
+            "repo-task",
+            "repo",
+        ),
+        (
+            True,
+            'version = "1"\ntask = "user-task"\n',
+            None,
+            True,
+            "explicit-task",
+            "explicit",
+        ),
+        (False, None, None, False, "", "workspace"),
+    ],
+    ids=[
+        "home_fallback",
+        "xdg_fallback",
+        "repo_beats_user",
+        "explicit_beats_all",
+        "no_config_defaults",
+    ],
+)
+def test_config_discover_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    has_repo_cfg: bool,
+    home_cfg: str | None,
+    xdg_cfg: str | None,
+    use_explicit: bool,
+    expected_task: str,
+    expected_dir_kind: str,
 ) -> None:
-    """AC-1: a bare workspace falls back to ~/.acp-factory/config.toml."""
-    workspace = tmp_path / "bare"
+    """FactoryConfig.discover resolves explicit > repo-local > ~/.acp-factory > XDG > defaults."""
+    workspace = tmp_path / "ws"
     workspace.mkdir()
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-
-    acp_dir = home / ".acp-factory"
-    acp_dir.mkdir(parents=True)
-    (acp_dir / "config.toml").write_text(
-        'version = "1"\ntask = "personal-default-task"\n\n[agent]\nname = "opencode"\n',
-        encoding="utf-8",
-    )
-
-    cfg = FactoryConfig.discover(workspace)
-    assert cfg.task == "personal-default-task"
-    assert cfg.agent.name == "opencode"
-    assert cfg.config_dir == acp_dir.resolve()
-
-
-def test_user_level_xdg_config_loaded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-2: ~/.config/acp-factory/config.toml is used when the home path is absent."""
-    workspace = tmp_path / "bare"
-    workspace.mkdir()
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-
-    xdg_dir = home / ".config" / "acp-factory"
-    xdg_dir.mkdir(parents=True)
-    (xdg_dir / "config.toml").write_text(
-        'version = "1"\ntask = "xdg-task"\n', encoding="utf-8"
-    )
-
-    cfg = FactoryConfig.discover(workspace)
-    assert cfg.task == "xdg-task"
-    assert cfg.config_dir == xdg_dir.resolve()
-
-
-def test_repo_local_beats_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC-3: a repo-local config overrides the user-level config."""
-    workspace = tmp_path / "repo"
-    (workspace / ".factory").mkdir(parents=True)
-    (workspace / ".factory" / "config.toml").write_text(
-        'version = "1"\ntask = "repo-task"\n', encoding="utf-8"
-    )
+    if has_repo_cfg:
+        (workspace / ".factory").mkdir()
+        (workspace / ".factory" / "config.toml").write_text(
+            'version = "1"\ntask = "repo-task"\n', encoding="utf-8"
+        )
 
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    acp_dir = home / ".acp-factory"
-    acp_dir.mkdir(parents=True)
-    (acp_dir / "config.toml").write_text(
-        'version = "1"\ntask = "user-task"\n', encoding="utf-8"
-    )
+    if home_cfg is not None:
+        acp_dir = home / ".acp-factory"
+        acp_dir.mkdir(parents=True)
+        (acp_dir / "config.toml").write_text(home_cfg, encoding="utf-8")
+    if xdg_cfg is not None:
+        xdg_dir = home / ".config" / "acp-factory"
+        xdg_dir.mkdir(parents=True)
+        (xdg_dir / "config.toml").write_text(xdg_cfg, encoding="utf-8")
 
-    cfg = FactoryConfig.discover(workspace)
-    assert cfg.task == "repo-task"
-
-
-def test_explicit_config_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC-4: an explicit --config path overrides repo-local and user-level config."""
-    workspace = tmp_path / "repo"
-    (workspace / ".factory").mkdir(parents=True)
-    (workspace / ".factory" / "config.toml").write_text(
-        'version = "1"\ntask = "repo-task"\n', encoding="utf-8"
-    )
-
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    acp_dir = home / ".acp-factory"
-    acp_dir.mkdir(parents=True)
-    (acp_dir / "config.toml").write_text(
-        'version = "1"\ntask = "user-task"\n', encoding="utf-8"
-    )
-
-    explicit = tmp_path / "explicit.toml"
-    explicit.write_text('version = "1"\ntask = "explicit-task"\n', encoding="utf-8")
+    explicit = None
+    if use_explicit:
+        explicit = tmp_path / "explicit.toml"
+        explicit.write_text('version = "1"\ntask = "explicit-task"\n', encoding="utf-8")
 
     cfg = FactoryConfig.discover(workspace, config_path=explicit)
-    assert cfg.task == "explicit-task"
-
-
-def test_no_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC-5: with no repo-local or user config, built-in defaults are returned."""
-    workspace = tmp_path / "bare"
-    workspace.mkdir()
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-
-    cfg = FactoryConfig.discover(workspace)
+    assert cfg.task == expected_task
     assert cfg.agent.name == "opencode"
-    assert cfg.task == ""
-    assert cfg.config_dir == workspace.resolve()
+    expected_dir = {
+        "home": home / ".acp-factory",
+        "xdg": home / ".config" / "acp-factory",
+        "repo": workspace / ".factory",
+        "explicit": tmp_path,
+        "workspace": workspace,
+    }[expected_dir_kind]
+    assert cfg.config_dir == expected_dir.resolve()
 
 
 def test_user_level_relative_paths(

@@ -8,6 +8,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from rich.console import Console
 
 from acp_factory.acp.events import (
@@ -112,66 +113,83 @@ def test_turn_summary_to_condensed_dict_truncation() -> None:
     assert "[truncated" in tc["raw_output"]["log"]
 
 
-def test_thought_max_chars_zero() -> None:
-    """AC-3: zero omits thoughts from markdown/summary, but transcript.json stays full."""
-    thought = "Internal reasoning that must not leak into output artifacts."
-    tracker = TurnEventTracker(initial_prompt="Initial prompt", thought_max_chars=0)
+@pytest.mark.parametrize(
+    (
+        "thought",
+        "thought_max_chars",
+        "expect_thinking_section",
+        "expected_md_substrings",
+        "unexpected_md_substrings",
+        "expected_preview_prefix",
+        "expected_preview_suffix",
+    ),
+    [
+        (
+            "Internal reasoning that must not leak into output artifacts.",
+            0,
+            False,
+            [],
+            [],
+            "",
+            "",
+        ),
+        (
+            "A" * 40 + "B" * 40,
+            50,
+            True,
+            ["A" * 40 + "B" * 10, "[truncated 30 chars]"],
+            ["B" * 40],
+            "A" * 40 + "B" * 10,
+            "[truncated 30 chars]",
+        ),
+        (
+            "T" * 600,
+            None,
+            True,
+            ["T" * 600],
+            ["[truncated"],
+            "T" * 500,
+            "[truncated 100 chars]",
+        ),
+    ],
+    ids=["zero", "truncated", "none_default"],
+)
+def test_thought_max_chars(
+    thought: str,
+    thought_max_chars: int | None,
+    expect_thinking_section: bool,
+    expected_md_substrings: list[str],
+    unexpected_md_substrings: list[str],
+    expected_preview_prefix: str,
+    expected_preview_suffix: str,
+) -> None:
+    """thought_max_chars controls markdown/summary truncation while keeping transcript.json full."""
+    tracker = TurnEventTracker(
+        initial_prompt="Initial prompt", thought_max_chars=thought_max_chars
+    )
     tracker.begin_turn("Turn 1")
     tracker.recorder.add_thought(thought)
     tracker.recorder.add_message("Done.")
 
     summary = tracker.end_turn("end_turn")
+    markdown = summary.transcript_markdown
 
-    assert "## Thinking" not in summary.transcript_markdown
+    assert ("## Thinking" in markdown) is expect_thinking_section
+    for sub in expected_md_substrings:
+        assert sub in markdown
+    for sub in unexpected_md_substrings:
+        assert sub not in markdown
+
     assert summary.to_dict()["thought_text"] == thought
-    assert summary.to_condensed_dict()["thought_preview"] == ""
     assert summary.thought_text == thought
     assert tracker.recorder.thoughts == [thought]
 
-
-def test_thought_max_chars_truncated() -> None:
-    """AC-4: a positive cap truncates markdown and summary, but not transcript.json."""
-    thought = "A" * 40 + "B" * 40
-    tracker = TurnEventTracker(initial_prompt="Initial prompt", thought_max_chars=50)
-    tracker.begin_turn("Turn 1")
-    tracker.recorder.add_thought(thought)
-
-    summary = tracker.end_turn("end_turn")
-    truncated_prefix = "A" * 40 + "B" * 10
-
-    markdown = summary.transcript_markdown
-    assert "## Thinking" in markdown
-    assert truncated_prefix in markdown
-    assert "B" * 40 not in markdown
-    assert "[truncated 30 chars]" in markdown
-
-    assert summary.to_dict()["thought_text"] == thought
     preview = summary.to_condensed_dict()["thought_preview"]
-    assert preview.startswith(truncated_prefix)
-    assert "[truncated 30 chars]" in preview
-    assert summary.thought_text == thought
-    assert tracker.recorder.thoughts == [thought]
-
-
-def test_thought_max_chars_none_default() -> None:
-    """AC-5: unset keeps full markdown/JSON thoughts and the 500-char summary preview."""
-    thought = "T" * 600
-    tracker = TurnEventTracker(initial_prompt="Initial prompt")
-    tracker.begin_turn("Turn 1")
-    tracker.recorder.add_thought(thought)
-
-    summary = tracker.end_turn("end_turn")
-
-    markdown = summary.transcript_markdown
-    assert "## Thinking" in markdown
-    assert thought in markdown
-    assert "[truncated" not in markdown
-
-    assert summary.to_dict()["thought_text"] == thought
-    preview = summary.to_condensed_dict()["thought_preview"]
-    assert preview.startswith("T" * 500)
-    assert "[truncated 100 chars]" in preview
-    assert summary.thought_text == thought
+    if expected_preview_prefix:
+        assert preview.startswith(expected_preview_prefix)
+        assert expected_preview_suffix in preview
+    else:
+        assert preview == ""
 
 
 def test_turn_event_tracker_lifecycle() -> None:
@@ -373,37 +391,64 @@ def test_persist_run_artifacts_review_report(tmp_path: Path) -> None:
     assert not (blank_dir / "report.md").exists()
 
 
-def test_latest_report_pointer_symlink_and_fallback(tmp_path: Path) -> None:
-    """AC-2: latest pointers are relative symlinks that fall back to a copy on OSError."""
+@pytest.mark.parametrize(
+    ("stage", "artifact_name", "pointer_name", "response_text"),
+    [
+        (
+            "review",
+            "report.md",
+            "latest-report.md",
+            "# Review Report\n\n## Findings\n- None.\n\nVERDICT: ACCEPTED\n",
+        ),
+        (
+            "build",
+            "implementation-notes.md",
+            "latest-build-notes.md",
+            "Sure, here is a walkthrough of my work.\n\n"
+            "### Implementation Summary\n"
+            "- **Files Modified**: `src/app.py`\n"
+            "### Verification\n"
+            "- **After**: `1 passed`\n"
+            "STATUS: DONE\n",
+        ),
+    ],
+    ids=["review_report", "build_notes"],
+)
+def test_latest_artifact_pointer_symlink_and_fallback(
+    tmp_path: Path,
+    stage: str,
+    artifact_name: str,
+    pointer_name: str,
+    response_text: str,
+) -> None:
+    """Latest artifact pointers are relative symlinks that fall back to a copy on OSError."""
     (tmp_path / ".factory").mkdir()
-    config = FactoryConfig(task="Review changes", active_stage="review")
-    response = "# Review Report\n\n## Findings\n- None.\n\nVERDICT: ACCEPTED\n"
+    config = FactoryConfig(task=f"Run {stage}", active_stage=stage)
 
     run_dir = _persist(
-        tmp_path, config=config, run_id="run-abc", response_text=response
+        tmp_path, config=config, run_id="run-abc", response_text=response_text
     )
     assert run_dir is not None
 
     latest_run = tmp_path / ".factory" / "runs" / "latest"
-    latest_report = tmp_path / ".factory" / "latest-report.md"
+    latest_pointer = tmp_path / ".factory" / pointer_name
     assert latest_run.is_symlink()
     assert os.readlink(latest_run) == "run-abc"
-    assert latest_report.is_symlink()
-    assert os.readlink(latest_report) == str(Path("runs") / "run-abc" / "report.md")
-    assert latest_report.read_text(encoding="utf-8") == (
-        run_dir / "report.md"
+    assert latest_pointer.is_symlink()
+    assert os.readlink(latest_pointer) == str(Path("runs") / "run-abc" / artifact_name)
+    assert latest_pointer.read_text(encoding="utf-8") == (
+        run_dir / artifact_name
     ).read_text(encoding="utf-8")
 
-    # When the platform/filesystem refuses symlinks, the pointer gracefully becomes a copy.
     with patch.object(Path, "symlink_to", side_effect=OSError("symlinks disabled")):
         fallback_dir = _persist(
-            tmp_path, config=config, run_id="run-def", response_text=response
+            tmp_path, config=config, run_id="run-def", response_text=response_text
         )
     assert fallback_dir is not None
-    assert latest_report.exists()
-    assert not latest_report.is_symlink()
-    assert latest_report.read_text(encoding="utf-8") == (
-        fallback_dir / "report.md"
+    assert latest_pointer.exists()
+    assert not latest_pointer.is_symlink()
+    assert latest_pointer.read_text(encoding="utf-8") == (
+        fallback_dir / artifact_name
     ).read_text(encoding="utf-8")
 
 
@@ -437,17 +482,49 @@ def test_persist_run_artifacts_non_review_stage(tmp_path: Path) -> None:
     )
 
 
-async def test_factory_run_outcome_report_path(tmp_path: Path) -> None:
-    """AC-4: `run_factory` exposes the persisted review report path on the outcome."""
+@pytest.mark.parametrize(
+    ("stage", "attr_name", "filename", "expected_text", "response_text"),
+    [
+        (
+            "review",
+            "report_path",
+            "report.md",
+            "VERDICT: ACCEPTED",
+            "# Review Report\n\nAll good.\n\nVERDICT: ACCEPTED",
+        ),
+        (
+            "build",
+            "build_notes_path",
+            "implementation-notes.md",
+            "### Implementation Summary",
+            "Sure, here is a walkthrough of my work.\n\n"
+            "### Implementation Summary\n"
+            "- **Files Modified**: `src/app.py`\n"
+            "### Verification\n"
+            "- **After**: `1 passed`\n"
+            "STATUS: DONE\n",
+        ),
+    ],
+    ids=["review_report", "build_notes"],
+)
+async def test_factory_run_outcome_artifact_path(
+    tmp_path: Path,
+    stage: str,
+    attr_name: str,
+    filename: str,
+    expected_text: str,
+    response_text: str,
+) -> None:
+    """`run_factory` exposes the persisted stage artifact path on the outcome."""
     (tmp_path / ".factory").mkdir()
-    config = FactoryConfig(task="Review changes", active_stage="review")
+    config = FactoryConfig(task=f"Run {stage}", active_stage=stage)
 
-    class FakeReviewClient:
+    class FakeClient:
         def __init__(self, *args: object, **kwargs: object) -> None:
             self.tracker = AsyncMock()
             self.tracker.history = []
 
-        async def __aenter__(self) -> FakeReviewClient:
+        async def __aenter__(self) -> FakeClient:
             return self
 
         async def __aexit__(self, *args: object) -> None:
@@ -463,7 +540,7 @@ async def test_factory_run_outcome_report_path(tmp_path: Path) -> None:
                     "stop_reason": "end_turn",
                     "summary": TurnSummary(
                         prompt=prompt,
-                        response_text="# Review Report\n\nAll good.\n\nVERDICT: ACCEPTED",
+                        response_text=response_text,
                         thought_text="",
                         stop_reason="end_turn",
                         duration_seconds=0.01,
@@ -472,59 +549,96 @@ async def test_factory_run_outcome_report_path(tmp_path: Path) -> None:
                 },
             )()
 
-    with patch("acp_factory.runner.loop.FactoryACPClient", FakeReviewClient):
+    with patch("acp_factory.runner.loop.FactoryACPClient", FakeClient):
         outcome = await run_factory(config, tmp_path)
 
     assert outcome.succeeded is True
     run_dir = outcome.run_dir
     assert run_dir is not None
-    assert outcome.report_path is not None
-    assert outcome.report_path == run_dir / "report.md"
-    assert outcome.report_path.is_file()
-    assert "VERDICT: ACCEPTED" in outcome.report_path.read_text(encoding="utf-8")
+    artifact_path = getattr(outcome, attr_name)
+    assert artifact_path == run_dir / filename
+    assert artifact_path.is_file()
+    assert expected_text in artifact_path.read_text(encoding="utf-8")
 
     # The field defaults to None for callers that construct outcomes directly.
-    assert (
-        FactoryRunOutcome(
-            succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
-        ).report_path
-        is None
+    default_outcome = FactoryRunOutcome(
+        succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
     )
+    assert getattr(default_outcome, attr_name) is None
 
 
-def test_show_final_summary_displays_report_path(tmp_path: Path) -> None:
-    """AC-5: the final summary grid surfaces the report path."""
+@pytest.mark.parametrize(
+    ("kwarg_name", "label", "rel_path"),
+    [
+        ("report_path", "Report:", Path(".factory/runs/run-1/report.md")),
+        (
+            "build_notes_path",
+            "Build Notes:",
+            Path(".factory/runs/run-1/implementation-notes.md"),
+        ),
+    ],
+    ids=["report_path", "build_notes_path"],
+)
+def test_show_final_summary_displays_artifact_path(
+    kwarg_name: str, label: str, rel_path: Path
+) -> None:
+    """The final summary grid surfaces report_path and build_notes_path."""
     buffer = StringIO()
     display = FactoryDisplay(Console(file=buffer, width=200, highlight=False))
-    report_path = Path(".factory/runs/run-1/report.md")
 
     display.show_final_summary(
         succeeded=True,
         attempts_used=1,
         max_attempts=1,
         total_duration=0.1,
-        report_path=report_path,
+        report_path=rel_path if kwarg_name == "report_path" else None,
+        build_notes_path=rel_path if kwarg_name == "build_notes_path" else None,
     )
 
     output = buffer.getvalue()
-    assert "Report:" in output
-    assert str(report_path) in output
+    assert label in output
+    assert str(rel_path) in output
     assert "[cyan]" not in output
 
 
-def test_cli_completion_prints_report_path(tmp_path: Path) -> None:
-    """AC-6: `issue`, `review`, and `next` print the review report path when present."""
+@pytest.mark.parametrize(
+    ("stage", "kwarg_name", "filename", "label", "include_review_cmd"),
+    [
+        ("review", "report_path", "report.md", "Review Report:", True),
+        (
+            "build",
+            "build_notes_path",
+            "implementation-notes.md",
+            "Build Notes:",
+            False,
+        ),
+    ],
+    ids=["review_report", "build_notes"],
+)
+def test_cli_completion_prints_artifact_path(
+    tmp_path: Path,
+    stage: str,
+    kwarg_name: str,
+    filename: str,
+    label: str,
+    include_review_cmd: bool,
+) -> None:
+    """CLI commands print the artifact path when present on the outcome."""
     from typer.testing import CliRunner
 
     from acp_factory.cli import app
 
-    report_path = tmp_path / ".factory" / "runs" / "run-1" / "report.md"
-    verdict = StageVerdict(
-        stage="review",
-        status="accepted",
-        target_label="factory:pr-ready",
-        updated_factory_block="",
-        summary="ok",
+    artifact_path = tmp_path / ".factory" / "runs" / "run-1" / filename
+    verdict = (
+        StageVerdict(
+            stage="review",
+            status="accepted",
+            target_label="factory:pr-ready",
+            updated_factory_block="",
+            summary="ok",
+        )
+        if stage == "review"
+        else None
     )
     outcome = FactoryRunOutcome(
         succeeded=True,
@@ -532,29 +646,31 @@ def test_cli_completion_prints_report_path(tmp_path: Path) -> None:
         attempts_used=1,
         total_duration_seconds=0.0,
         stage_verdict=verdict,
-        report_path=report_path,
+        report_path=artifact_path if kwarg_name == "report_path" else None,
+        build_notes_path=artifact_path if kwarg_name == "build_notes_path" else None,
     )
     runner = CliRunner()
 
     with patch("acp_factory.cli.run_issue_stage", new=AsyncMock(return_value=outcome)):
         issue_res = runner.invoke(app, ["issue", "5", "--workspace", str(tmp_path)])
     assert issue_res.exit_code == 0
-    assert "Review Report:" in issue_res.output
-    assert str(report_path) in issue_res.output.replace("\n", "")
+    assert label in issue_res.output
+    assert str(artifact_path) in issue_res.output.replace("\n", "")
 
-    with patch(
-        "acp_factory.cli.run_branch_review", new=AsyncMock(return_value=outcome)
-    ):
-        review_res = runner.invoke(app, ["review", "--workspace", str(tmp_path)])
-    assert review_res.exit_code == 0
-    assert "Review Report:" in review_res.output
-    assert str(report_path) in review_res.output.replace("\n", "")
+    if include_review_cmd:
+        with patch(
+            "acp_factory.cli.run_branch_review", new=AsyncMock(return_value=outcome)
+        ):
+            review_res = runner.invoke(app, ["review", "--workspace", str(tmp_path)])
+        assert review_res.exit_code == 0
+        assert label in review_res.output
+        assert str(artifact_path) in review_res.output.replace("\n", "")
 
-    task = TaskContext(issue_number=5, title="Review me", labels=["factory:review"])
+    task = TaskContext(issue_number=5, title="Task", labels=[f"factory:{stage}"])
     with (
         patch(
             "acp_factory.cli.FactoryConfig.discover",
-            return_value=FactoryConfig(task="Review", active_stage="review"),
+            return_value=FactoryConfig(task=f"Run {stage}", active_stage=stage),
         ),
         patch(
             "acp_factory.cli.list_actionable_issues",
@@ -564,8 +680,8 @@ def test_cli_completion_prints_report_path(tmp_path: Path) -> None:
     ):
         next_res = runner.invoke(app, ["next", "--workspace", str(tmp_path)])
     assert next_res.exit_code == 0
-    assert "Review Report:" in next_res.output
-    assert str(report_path) in next_res.output.replace("\n", "")
+    assert label in next_res.output
+    assert str(artifact_path) in next_res.output.replace("\n", "")
 
 
 def _build_summary_response() -> str:
@@ -628,164 +744,6 @@ def test_persist_run_artifacts_build_notes(tmp_path: Path) -> None:
     assert not (plain_dir / "implementation-notes.md").exists()
     assert not (plain_ws / ".factory" / "latest-build-notes.md").exists()
     assert not (plain_ws / ".factory" / "runs" / "latest").exists()
-
-
-def test_latest_build_notes_symlink_and_fallback(tmp_path: Path) -> None:
-    """AC-2: build-note pointers are relative symlinks that fall back to a copy."""
-    workspace = _factory_workspace(tmp_path, "ws")
-    config = FactoryConfig(task="Build it", active_stage="build")
-
-    run_dir = _persist(
-        workspace,
-        config=config,
-        run_id="run-build",
-        response_text=_build_summary_response(),
-    )
-    assert run_dir is not None
-
-    latest_run = workspace / ".factory" / "runs" / "latest"
-    latest_notes = workspace / ".factory" / "latest-build-notes.md"
-    assert latest_run.is_symlink()
-    assert os.readlink(latest_run) == "run-build"
-    assert latest_notes.is_symlink()
-    assert os.readlink(latest_notes) == str(
-        Path("runs") / "run-build" / "implementation-notes.md"
-    )
-    assert latest_notes.read_text(encoding="utf-8") == (
-        run_dir / "implementation-notes.md"
-    ).read_text(encoding="utf-8")
-
-    with patch.object(Path, "symlink_to", side_effect=OSError("symlinks disabled")):
-        fallback_dir = _persist(
-            workspace,
-            config=config,
-            run_id="run-build-fallback",
-            response_text=_build_summary_response(),
-        )
-    assert fallback_dir is not None
-    assert latest_notes.exists()
-    assert not latest_notes.is_symlink()
-    assert latest_notes.read_text(encoding="utf-8") == (
-        fallback_dir / "implementation-notes.md"
-    ).read_text(encoding="utf-8")
-
-
-async def test_factory_run_outcome_build_notes_path(tmp_path: Path) -> None:
-    """AC-3: `run_factory` exposes the persisted build notes path on the outcome."""
-    (tmp_path / ".factory").mkdir()
-    config = FactoryConfig(task="Build it", active_stage="build")
-
-    class FakeBuildClient:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            self.tracker = AsyncMock()
-            self.tracker.history = []
-
-        async def __aenter__(self) -> FakeBuildClient:
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            pass
-
-        async def send_prompt(self, prompt: str, **kwargs: object) -> object:
-            from acp_factory.acp.events import TurnSummary
-
-            return type(
-                "TurnResult",
-                (),
-                {
-                    "stop_reason": "end_turn",
-                    "summary": TurnSummary(
-                        prompt=prompt,
-                        response_text=_build_summary_response(),
-                        thought_text="",
-                        stop_reason="end_turn",
-                        duration_seconds=0.01,
-                        tool_call_count=0,
-                    ),
-                },
-            )()
-
-    with patch("acp_factory.runner.loop.FactoryACPClient", FakeBuildClient):
-        outcome = await run_factory(config, tmp_path)
-
-    assert outcome.succeeded is True
-    run_dir = outcome.run_dir
-    assert run_dir is not None
-    assert outcome.build_notes_path is not None
-    assert outcome.build_notes_path == run_dir / "implementation-notes.md"
-    assert outcome.build_notes_path.is_file()
-    assert "### Implementation Summary" in outcome.build_notes_path.read_text(
-        encoding="utf-8"
-    )
-
-    assert (
-        FactoryRunOutcome(
-            succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
-        ).build_notes_path
-        is None
-    )
-
-
-def test_show_final_summary_displays_build_notes_path(tmp_path: Path) -> None:
-    """AC-4: the final summary grid surfaces the build notes path."""
-    buffer = StringIO()
-    display = FactoryDisplay(Console(file=buffer, width=200, highlight=False))
-    build_notes_path = Path(".factory/runs/run-1/implementation-notes.md")
-
-    display.show_final_summary(
-        succeeded=True,
-        attempts_used=1,
-        max_attempts=1,
-        total_duration=0.1,
-        build_notes_path=build_notes_path,
-    )
-
-    output = buffer.getvalue()
-    assert "Build Notes:" in output
-    assert str(build_notes_path) in output
-    assert "[cyan]" not in output
-
-
-def test_cli_completion_prints_build_notes_path(tmp_path: Path) -> None:
-    """AC-5: `issue` and `next` print the build notes path when present."""
-    from typer.testing import CliRunner
-
-    from acp_factory.cli import app
-
-    build_notes_path = (
-        tmp_path / ".factory" / "runs" / "run-1" / "implementation-notes.md"
-    )
-    outcome = FactoryRunOutcome(
-        succeeded=True,
-        exit_code=0,
-        attempts_used=1,
-        total_duration_seconds=0.0,
-        build_notes_path=build_notes_path,
-    )
-    runner = CliRunner()
-
-    with patch("acp_factory.cli.run_issue_stage", new=AsyncMock(return_value=outcome)):
-        issue_res = runner.invoke(app, ["issue", "5", "--workspace", str(tmp_path)])
-    assert issue_res.exit_code == 0
-    assert "Build Notes:" in issue_res.output
-    assert str(build_notes_path) in issue_res.output.replace("\n", "")
-
-    task = TaskContext(issue_number=5, title="Build me", labels=["factory:build"])
-    with (
-        patch(
-            "acp_factory.cli.FactoryConfig.discover",
-            return_value=FactoryConfig(task="Build", active_stage="build"),
-        ),
-        patch(
-            "acp_factory.cli.list_actionable_issues",
-            new=AsyncMock(return_value=[task]),
-        ),
-        patch("acp_factory.cli.run_issue_stage", new=AsyncMock(return_value=outcome)),
-    ):
-        next_res = runner.invoke(app, ["next", "--workspace", str(tmp_path)])
-    assert next_res.exit_code == 0
-    assert "Build Notes:" in next_res.output
-    assert str(build_notes_path) in next_res.output.replace("\n", "")
 
 
 async def test_review_stage_injects_prior_build_notes(tmp_path: Path) -> None:

@@ -50,56 +50,82 @@ def test_fleet_config_parsing_and_defaults() -> None:
     # fleet max_review_rounds wins over top-level
     assert cfg.effective_max_review_rounds == 5
 
-
-def test_fleet_config_defaults_when_absent() -> None:
-    cfg = FactoryConfig.model_validate({"max_review_rounds": 7})
-    assert cfg.fleet is None
-    assert cfg.effective_max_review_rounds == 7
+    absent_cfg = FactoryConfig.model_validate({"max_review_rounds": 7})
+    assert absent_cfg.fleet is None
+    assert absent_cfg.effective_max_review_rounds == 7
 
 
-def test_build_repo_admission_single_active_branch() -> None:
-    tasks = [
-        _task(1, LABEL_BUILD),
-        _task(2, LABEL_BUILD),
-        _task(3, LABEL_SPEC),
-    ]
-    admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=1)
-    # Only one build/review issue is admitted (cap applied); no pr-ready
-    assert admission.has_pr_ready is False
-    assert [t.issue_number for t in admission.build_review_issues] == [1]
-    # Read-only spec issue is still actionable (not branch-contending)
-    assert [t.issue_number for t in admission.actionable_issues] == [1, 2, 3]
-
-
-def test_build_repo_admission_pr_ready_counts_as_contending() -> None:
-    tasks = [
-        _task(1, LABEL_PR_READY),
-        _task(2, LABEL_BUILD),
-    ]
-    admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=1)
-    assert admission.has_pr_ready is True
-    assert [t.issue_number for t in admission.pr_ready_issues] == [1]
-    # The build is still tracked but pr-ready blocks it
-    assert [t.issue_number for t in admission.build_review_issues] == [2]
-
-
-def test_build_repo_admission_no_contending_issues() -> None:
-    tasks = [_task(1, LABEL_SPEC), _task(2, LABEL_REVIEW)]
-    # review is branch-contending; spec is not
-    admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=2)
-    assert admission.has_pr_ready is False
-    assert [t.issue_number for t in admission.build_review_issues] == [2]
-
-
-def test_build_repo_admission_pr_ready_higher_number_still_blocks() -> None:
-    """A pr-ready issue with a HIGHER number than a queued build still blocks it (Finding 1)."""
-    tasks = [
-        _task(10, LABEL_BUILD),
-        _task(11, LABEL_PR_READY),
-    ]
-    admission = build_repo_admission("acme/repo", tasks, max_active_branches_per_repo=1)
-    assert admission.has_pr_ready is True
-    assert [t.issue_number for t in admission.pr_ready_issues] == [11]
+@pytest.mark.parametrize(
+    (
+        "tasks",
+        "max_branches",
+        "expected_pr_ready",
+        "expected_pr_nums",
+        "expected_build_review",
+        "expected_actionable",
+    ),
+    [
+        (
+            [_task(1, LABEL_BUILD), _task(2, LABEL_BUILD), _task(3, LABEL_SPEC)],
+            1,
+            False,
+            [],
+            [1],
+            [1, 2, 3],
+        ),
+        (
+            [_task(1, LABEL_PR_READY), _task(2, LABEL_BUILD)],
+            1,
+            True,
+            [1],
+            [2],
+            None,
+        ),
+        (
+            [_task(1, LABEL_SPEC), _task(2, LABEL_REVIEW)],
+            2,
+            False,
+            [],
+            [2],
+            None,
+        ),
+        (
+            [_task(10, LABEL_BUILD), _task(11, LABEL_PR_READY)],
+            1,
+            True,
+            [11],
+            None,
+            None,
+        ),
+    ],
+    ids=[
+        "single_active_branch",
+        "pr_ready_counts_as_contending",
+        "no_contending_issues",
+        "pr_ready_higher_number_blocks",
+    ],
+)
+def test_build_repo_admission(
+    tasks: list[TaskContext],
+    max_branches: int,
+    expected_pr_ready: bool,
+    expected_pr_nums: list[int],
+    expected_build_review: list[int] | None,
+    expected_actionable: list[int] | None,
+) -> None:
+    admission = build_repo_admission(
+        "acme/repo", tasks, max_active_branches_per_repo=max_branches
+    )
+    assert admission.has_pr_ready is expected_pr_ready
+    assert [t.issue_number for t in admission.pr_ready_issues] == expected_pr_nums
+    if expected_build_review is not None:
+        assert [
+            t.issue_number for t in admission.build_review_issues
+        ] == expected_build_review
+    if expected_actionable is not None:
+        assert [
+            t.issue_number for t in admission.actionable_issues
+        ] == expected_actionable
 
 
 def test_max_review_rounds_threaded_through_parse() -> None:
@@ -838,20 +864,17 @@ async def test_run_fleet_next_respects_limit(tmp_path: Path) -> None:
     assert results[0].issues_processed == 1
 
 
-def test_cli_next_and_status_limit_help() -> None:
-    """Verify that --limit / -n is exposed in CLI help for both next and status."""
+@pytest.mark.parametrize("command", ["next", "status"])
+def test_cli_next_and_status_help_flags(command: str) -> None:
+    """Verify --limit / -n and --fleet-config are exposed in CLI help for next and status."""
     from typer.testing import CliRunner
 
     from acp_factory.cli import app
 
-    runner = CliRunner()
-    res_next = runner.invoke(app, ["next", "--help"])
-    assert res_next.exit_code == 0
-    assert "--limit" in res_next.output or "-n" in res_next.output
-
-    res_status = runner.invoke(app, ["status", "--help"])
-    assert res_status.exit_code == 0
-    assert "--limit" in res_status.output or "-n" in res_status.output
+    result = CliRunner().invoke(app, [command, "--help"])
+    assert result.exit_code == 0
+    assert "--limit" in result.output or "-n" in result.output
+    assert "--fleet-config" in result.output
 
 
 def test_cli_next_fleet_effective_limit_defaults(tmp_path: Path) -> None:
@@ -981,10 +1004,21 @@ def test_discover_fleet_config_precedence(
     assert primary.repositories == {"acme/primary": "~/DEV/primary"}
 
 
-def test_fleet_config_overlay_repo_local_no_fleet_auto_loads_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("explicit_cli", "expected_repos"),
+    [
+        (False, {"acme/core": "~/DEV/core"}),
+        (True, {"acme/explicit": "~/DEV/explicit"}),
+    ],
+    ids=["auto_loads_home_when_repo_has_no_fleet", "explicit_cli_option_overrides"],
+)
+def test_cli_next_fleet_config_overlay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_cli: bool,
+    expected_repos: dict[str, str],
 ) -> None:
-    """AC-1: `next --fleet` overlays ~/.acp-factory/fleet.toml when repo config has no [fleet]."""
+    """`next --fleet` overlays user fleet.toml when absent, and `--fleet-config` overrides all."""
     from typer.testing import CliRunner
 
     from acp_factory.cli import app
@@ -993,13 +1027,22 @@ def test_fleet_config_overlay_repo_local_no_fleet_auto_loads_home(
     monkeypatch.setenv("HOME", str(home))
     _write_fleet_toml(home / ".acp-factory/fleet.toml", {"acme/core": "~/DEV/core"})
 
-    workspace = tmp_path / "repo"
-    (workspace / ".factory").mkdir(parents=True)
-    (workspace / ".factory" / "config.toml").write_text(
-        'version = "1"\n', encoding="utf-8"
-    )
-    repo_cfg = FactoryConfig.discover(workspace)
-    assert repo_cfg.fleet is None
+    if explicit_cli:
+        explicit = tmp_path / "custom-fleet.toml"
+        _write_fleet_toml(explicit, {"acme/explicit": "~/DEV/explicit"})
+        repo_cfg = FactoryConfig.model_validate(
+            {"fleet": {"repositories": {"acme/repo": "~/DEV/repo"}}}
+        )
+        args = ["next", "--fleet-config", str(explicit)]
+    else:
+        workspace = tmp_path / "repo"
+        (workspace / ".factory").mkdir(parents=True)
+        (workspace / ".factory" / "config.toml").write_text(
+            'version = "1"\n', encoding="utf-8"
+        )
+        repo_cfg = FactoryConfig.discover(workspace)
+        assert repo_cfg.fleet is None
+        args = ["next", "--fleet", "--workspace", str(workspace)]
 
     captured: dict[str, FactoryConfig] = {}
 
@@ -1012,105 +1055,54 @@ def test_fleet_config_overlay_repo_local_no_fleet_auto_loads_home(
         patch("acp_factory.config.FactoryConfig.discover", return_value=repo_cfg),
         patch("acp_factory.runner.loop.run_fleet_next", new=fake_fleet_next),
     ):
-        result = runner.invoke(app, ["next", "--fleet", "--workspace", str(workspace)])
+        result = runner.invoke(app, args)
 
     assert result.exit_code == 0, result.output
     overlaid = captured["config"].fleet
     assert overlaid is not None
-    assert overlaid.repositories == {"acme/core": "~/DEV/core"}
+    assert overlaid.repositories == expected_repos
+
+    if explicit_cli:
+        with pytest.raises(FileNotFoundError):
+            repo_cfg.with_fleet_overlay(tmp_path / "does-not-exist.toml")
 
 
-def test_fleet_config_overlay_repo_local_no_fleet_falls_back_to_xdg(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("repo_fleet_toml", "expected_repos"),
+    [
+        ("", {"acme/api": "~/DEV/api"}),
+        (
+            '[fleet.repositories]\n"acme/repo" = "~/DEV/repo"\n',
+            {"acme/repo": "~/DEV/repo"},
+        ),
+    ],
+    ids=["falls_back_to_xdg", "preserves_repo_local_fleet"],
+)
+def test_fleet_config_overlay_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repo_fleet_toml: str,
+    expected_repos: dict[str, str],
 ) -> None:
-    """AC-2: discovery falls back to ~/.config/acp-factory/fleet.toml when the primary is absent."""
+    """Repo-local [fleet] wins over operator overlay; otherwise falls back to XDG fleet.toml."""
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     _write_fleet_toml(
         home / ".config/acp-factory/fleet.toml", {"acme/api": "~/DEV/api"}
     )
 
-    cfg = FactoryConfig.model_validate({"version": "1"})
-    overlaid = cfg.with_fleet_overlay()
-
-    assert overlaid.fleet is not None
-    assert overlaid.fleet.repositories == {"acme/api": "~/DEV/api"}
-    assert cfg.fleet is None
-
-
-def test_fleet_config_overlay_repo_local_with_fleet_preserves_repo_fleet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-3: a repo-local [fleet] wins over the operator-level default overlay."""
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    _write_fleet_toml(home / ".acp-factory/fleet.toml", {"acme/user": "~/DEV/user"})
-
     workspace = tmp_path / "repo"
     (workspace / ".factory").mkdir(parents=True)
     (workspace / ".factory" / "config.toml").write_text(
-        'version = "1"\n[fleet.repositories]\n"acme/repo" = "~/DEV/repo"\n',
-        encoding="utf-8",
+        f'version = "1"\n{repo_fleet_toml}', encoding="utf-8"
     )
     cfg = FactoryConfig.discover(workspace)
-    assert cfg.fleet is not None
-
     overlaid = cfg.with_fleet_overlay()
+
     assert overlaid.fleet is not None
-    assert overlaid.fleet.repositories == {"acme/repo": "~/DEV/repo"}
-
-
-def test_fleet_config_overlay_explicit_cli_option_overrides(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-4: `--fleet-config <path>` overrides repo-local and user-level fleet definitions."""
-    from typer.testing import CliRunner
-
-    from acp_factory.cli import app
-
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    _write_fleet_toml(home / ".acp-factory/fleet.toml", {"acme/user": "~/DEV/user"})
-
-    explicit = tmp_path / "custom-fleet.toml"
-    _write_fleet_toml(explicit, {"acme/explicit": "~/DEV/explicit"})
-
-    repo_cfg = FactoryConfig.model_validate(
-        {"fleet": {"repositories": {"acme/repo": "~/DEV/repo"}}}
-    )
-    captured: dict[str, FactoryConfig] = {}
-
-    async def fake_fleet_next(config: FactoryConfig, **kwargs: object):
-        captured["config"] = config
-        return []
-
-    runner = CliRunner()
-    with (
-        patch("acp_factory.config.FactoryConfig.discover", return_value=repo_cfg),
-        patch("acp_factory.runner.loop.run_fleet_next", new=fake_fleet_next),
-    ):
-        result = runner.invoke(app, ["next", "--fleet-config", str(explicit)])
-
-    assert result.exit_code == 0, result.output
-    overlaid = captured["config"].fleet
-    assert overlaid is not None
-    assert overlaid.repositories == {"acme/explicit": "~/DEV/explicit"}
-
-    with pytest.raises(FileNotFoundError):
-        repo_cfg.with_fleet_overlay(tmp_path / "does-not-exist.toml")
-
-
-def test_cli_next_and_status_fleet_config_help() -> None:
-    """AC-6: `next --help` and `status --help` document the --fleet-config option."""
-    from typer.testing import CliRunner
-
-    from acp_factory.cli import app
-
-    runner = CliRunner()
-    for command in ("next", "status"):
-        result = runner.invoke(app, [command, "--help"])
-        assert result.exit_code == 0
-        assert "--fleet-config" in result.output
+    assert overlaid.fleet.repositories == expected_repos
+    if not repo_fleet_toml:
+        assert cfg.fleet is None
 
 
 async def test_runner_loop_overlays_fleet_when_none(

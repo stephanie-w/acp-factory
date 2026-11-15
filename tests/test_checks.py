@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from acp_factory.acp.client import TurnResult
 from acp_factory.acp.events import TurnSummary
 from acp_factory.config import CheckConfig, FactoryConfig, RetryConfig
@@ -581,7 +583,47 @@ def test_all_skill_validators_and_templates_exist_and_work(tmp_path: Path) -> No
     assert res_comb_sec.returncode == 0
 
 
-def test_build_workspace_env_strips_host_virtualenv_and_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("extra_vars", "stripped_keys"),
+    [
+        (
+            {
+                "PYTHONPATH": "/opt/custom_python",
+                "PYTHONHOME": "/opt/python",
+                "USER": "developer",
+            },
+            ["PYTHONPATH", "PYTHONHOME"],
+        ),
+        (
+            {
+                "NODE_PATH": "/global/node_modules",
+                "NODE_OPTIONS": "--inspect",
+                "INIT_CWD": "/outer/caller/dir",
+                "npm_config_prefix": "/opt/npm",
+                "BUNDLE_GEMFILE": "/outer/Gemfile",
+                "BUNDLE_BIN_PATH": "/outer/bin/bundle",
+                "GEM_HOME": "/outer/gems",
+                "GEM_PATH": "/outer/gems",
+                "RUBYOPT": "-W3",
+            },
+            [
+                "NODE_PATH",
+                "NODE_OPTIONS",
+                "INIT_CWD",
+                "npm_config_prefix",
+                "BUNDLE_GEMFILE",
+                "BUNDLE_BIN_PATH",
+                "GEM_HOME",
+                "GEM_PATH",
+                "RUBYOPT",
+            ],
+        ),
+    ],
+    ids=["python_venv_vars", "node_npm_ruby_vars"],
+)
+def test_build_workspace_env_strips_leak_vars(
+    tmp_path: Path, extra_vars: dict[str, str], stripped_keys: list[str]
+) -> None:
     fake_venv = tmp_path / "host_venv"
     fake_venv_bin = fake_venv / "bin"
     fake_venv_bin.mkdir(parents=True)
@@ -594,64 +636,31 @@ def test_build_workspace_env_strips_host_virtualenv_and_path(tmp_path: Path) -> 
         "PATH": f"{fake_venv_bin}:/usr/local/bin:{fake_conda_bin}:/usr/bin",
         "VIRTUAL_ENV": str(fake_venv),
         "VIRTUAL_ENV_PROMPT": "(host_venv)",
-        "PYTHONPATH": "/opt/custom_python",
-        "PYTHONHOME": "/opt/python",
         "CONDA_PREFIX": str(fake_conda),
         "CONDA_DEFAULT_ENV": "base",
-        "USER": "developer",
+        **extra_vars,
     }
 
     with patch.dict("os.environ", mock_env, clear=True):
         env = build_workspace_env(tmp_path)
 
-    # Host venv/conda environment variables stripped
-    assert "VIRTUAL_ENV" not in env
-    assert "VIRTUAL_ENV_PROMPT" not in env
-    assert "PYTHONPATH" not in env
-    assert "PYTHONHOME" not in env
-    assert "CONDA_PREFIX" not in env
-    assert "CONDA_DEFAULT_ENV" not in env
+    for key in [
+        "VIRTUAL_ENV",
+        "VIRTUAL_ENV_PROMPT",
+        "CONDA_PREFIX",
+        "CONDA_DEFAULT_ENV",
+        *stripped_keys,
+    ]:
+        assert key not in env
 
-    # General environment retained
-    assert env.get("USER") == "developer"
+    if "USER" in extra_vars:
+        assert env.get("USER") == "developer"
 
-    # Virtualenv / Conda bin paths removed from PATH
     path_entries = env["PATH"].split(":")
     assert str(fake_venv_bin) not in path_entries
     assert str(fake_conda_bin) not in path_entries
     assert "/usr/local/bin" in path_entries
     assert "/usr/bin" in path_entries
-
-
-def test_build_workspace_env_strips_node_and_npm_leak_vars(tmp_path: Path) -> None:
-    mock_env = {
-        "NODE_PATH": "/global/node_modules",
-        "NODE_OPTIONS": "--inspect",
-        "INIT_CWD": "/outer/caller/dir",
-        "npm_config_prefix": "/opt/npm",
-        "BUNDLE_GEMFILE": "/outer/Gemfile",
-        "BUNDLE_BIN_PATH": "/outer/bin/bundle",
-        "GEM_HOME": "/outer/gems",
-        "GEM_PATH": "/outer/gems",
-        "RUBYOPT": "-W3",
-        "PATH": "/usr/bin:/bin",
-    }
-
-    with patch.dict("os.environ", mock_env, clear=True):
-        env = build_workspace_env(tmp_path)
-
-    for key in (
-        "NODE_PATH",
-        "NODE_OPTIONS",
-        "INIT_CWD",
-        "npm_config_prefix",
-        "BUNDLE_GEMFILE",
-        "BUNDLE_BIN_PATH",
-        "GEM_HOME",
-        "GEM_PATH",
-        "RUBYOPT",
-    ):
-        assert key not in env
 
 
 def test_workspace_env_git_identity(tmp_path: Path) -> None:

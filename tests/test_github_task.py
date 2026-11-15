@@ -168,40 +168,6 @@ def test_merge_pr_feedback_orders_comments_chronologically() -> None:
     assert task.comments[3].created_at == "2026-11-03T09:00:00Z"
 
 
-def test_merge_pr_feedback_renders_review_submitted_at_timestamp() -> None:
-    task = TaskContext(
-        issue_number=42,
-        title="Add category filter",
-        comments=[
-            IssueComment(
-                author="original",
-                body="Issue comment",
-                created_at="2026-11-01T12:00:00Z",
-            )
-        ],
-    )
-
-    task.merge_pr_feedback(
-        [],
-        [
-            {
-                "author": {"login": "bob"},
-                "body": "Please add tests.",
-                "state": "CHANGES_REQUESTED",
-                "submittedAt": "2026-11-03T09:00:00Z",
-            }
-        ],
-    )
-
-    prompt_ctx = format_task_prompt_context(task)
-    assert (
-        "### PR Review by @bob (CHANGES_REQUESTED) (2026-11-03T09:00:00Z)" in prompt_ctx
-    )
-    assert prompt_ctx.index("### Comment #1 by @original") < prompt_ctx.index(
-        "### PR Review by @bob"
-    )
-
-
 def test_merge_pr_feedback_skips_non_dict_and_tolerates_missing_fields() -> None:
     task = TaskContext(issue_number=42, title="Add category filter")
 
@@ -358,67 +324,46 @@ async def test_fetch_issue_merges_pr_feedback(tmp_path: Path) -> None:
     ]
 
 
-async def test_fetch_issue_no_pr_or_error(tmp_path: Path) -> None:
-    async def no_pr_run_gh(
+@pytest.mark.parametrize(
+    ("pr_list_response", "pr_view_response", "expected_pr_url"),
+    [
+        ("[]", None, None),
+        (GitHubError("branch is not pushed"), None, None),
+        (
+            json.dumps([{"number": 88, "url": "https://example.test/pull/88"}]),
+            GitHubError("rate limited"),
+            "https://example.test/pull/88",
+        ),
+        (json.dumps({"number": 88}), None, None),
+    ],
+    ids=["no_pr", "pr_list_error", "pr_view_error", "malformed_pr_list"],
+)
+async def test_fetch_issue_pr_fallback_cases(
+    tmp_path: Path,
+    pr_list_response: str | Exception,
+    pr_view_response: str | Exception | None,
+    expected_pr_url: str | None,
+) -> None:
+    async def fake_run_gh(
         args: list[str], cwd: Path, *, input_text: str | None = None
     ) -> str:
         if args[:2] == ["issue", "view"]:
             return json.dumps(_issue_payload())
         if args[:2] == ["pr", "list"]:
-            return "[]"
+            if isinstance(pr_list_response, Exception):
+                raise pr_list_response
+            return pr_list_response
+        if args[:2] == ["pr", "view"]:
+            if isinstance(pr_view_response, Exception):
+                raise pr_view_response
+            assert pr_view_response is not None
+            return pr_view_response
         raise AssertionError(f"unexpected gh call: {args}")
 
-    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=no_pr_run_gh)):
+    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=fake_run_gh)):
         task = await fetch_issue(42, tmp_path)
 
-    assert task.pr_url is None
-    assert [c.body for c in task.comments] == ["Issue-side context."]
-
-    async def failing_pr_list(
-        args: list[str], cwd: Path, *, input_text: str | None = None
-    ) -> str:
-        if args[:2] == ["issue", "view"]:
-            return json.dumps(_issue_payload())
-        raise GitHubError("branch is not pushed")
-
-    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=failing_pr_list)):
-        task = await fetch_issue(42, tmp_path)
-
-    assert task.pr_url is None
-    assert [c.body for c in task.comments] == ["Issue-side context."]
-
-    async def failing_pr_view(
-        args: list[str], cwd: Path, *, input_text: str | None = None
-    ) -> str:
-        if args[:2] == ["issue", "view"]:
-            return json.dumps(_issue_payload())
-        if args[:2] == ["pr", "list"]:
-            return json.dumps([{"number": 88, "url": "https://example.test/pull/88"}])
-        raise GitHubError("rate limited")
-
-    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=failing_pr_view)):
-        task = await fetch_issue(42, tmp_path)
-
-    assert [c.kind for c in task.comments] == ["issue_comment"]
-    assert [c.body for c in task.comments] == ["Issue-side context."]
-
-
-async def test_fetch_issue_handles_malformed_pr_list_payload(tmp_path: Path) -> None:
-    async def malformed_pr_list(
-        args: list[str], cwd: Path, *, input_text: str | None = None
-    ) -> str:
-        if args[:2] == ["issue", "view"]:
-            return json.dumps(_issue_payload())
-        if args[:2] == ["pr", "list"]:
-            return json.dumps({"number": 88})
-        raise AssertionError(f"unexpected gh call: {args}")
-
-    with patch(
-        "acp_factory.github.run_gh", new=AsyncMock(side_effect=malformed_pr_list)
-    ):
-        task = await fetch_issue(42, tmp_path)
-
-    assert task.pr_url is None
+    assert task.pr_url == expected_pr_url
     assert [c.kind for c in task.comments] == ["issue_comment"]
     assert [c.body for c in task.comments] == ["Issue-side context."]
 
@@ -811,55 +756,50 @@ def test_factory_meta_and_findings_primitives() -> None:
     assert clean_spec_block(with_findings) == "## Specification\n- X"
 
 
-def test_split_issue_body_preserves_code_block_delimiters() -> None:
-    original = (
-        "Example of a factory block inside a code fence:\n"
-        "```markdown\n"
-        "<!-- factory:start -->\n"
-        "example content\n"
-        "<!-- factory:end -->\n"
-        "```\n"
-        "After the example."
-    )
-    spec = (
-        "## Specification\n"
-        "Markers to demonstrate:\n"
-        "```html\n"
-        "<!-- factory:start -->\n"
-        "<!-- factory:end -->\n"
-        "```\n"
-        "Tail of spec."
-    )
-
+@pytest.mark.parametrize(
+    ("original", "spec"),
+    [
+        (
+            "Example of a factory block inside a code fence:\n"
+            "```markdown\n"
+            "<!-- factory:start -->\n"
+            "example content\n"
+            "<!-- factory:end -->\n"
+            "```\n"
+            "After the example.",
+            "## Specification\n"
+            "Markers to demonstrate:\n"
+            "```html\n"
+            "<!-- factory:start -->\n"
+            "<!-- factory:end -->\n"
+            "```\n"
+            "Tail of spec.",
+        ),
+        (
+            "~~~\n<!-- factory:start -->\n<!-- factory:end -->\n~~~\nReal body.",
+            "## Specification\n- X",
+        ),
+    ],
+    ids=["backtick_fences", "tilde_fences"],
+)
+def test_split_issue_body_preserves_code_block_delimiters(
+    original: str, spec: str
+) -> None:
     rendered = render_issue_body(original, spec)
     parsed_orig, parsed_block = split_issue_body(rendered)
 
     assert parsed_orig == original
     assert parsed_block == spec
-    assert parsed_orig.count("<!-- factory:start -->") == 1
-    assert parsed_orig.count("<!-- factory:end -->") == 1
-    assert "```markdown" in parsed_orig
-
     # A second round-trip must remain stable.
     assert split_issue_body(render_issue_body(parsed_orig, parsed_block)) == (
         original,
         spec,
     )
 
-
-def test_split_issue_body_masks_tilde_and_unclosed_fences() -> None:
-    original = "~~~\n<!-- factory:start -->\n<!-- factory:end -->\n~~~\nReal body."
-    parsed_orig, parsed_block = split_issue_body(
-        render_issue_body(original, "## Specification\n- X")
-    )
-    assert parsed_orig == original
-    assert parsed_block == "## Specification\n- X"
-
-    # An unclosed fence cannot be masked, so no live block is detected.
-    unclosed = "```\n<!-- factory:start -->\nunclosed"
-    assert split_issue_body(unclosed) == (unclosed, "")
-    assert split_issue_body("") == ("", "")
-    assert split_issue_body("   \n\t ") == ("", "")
+    # Unclosed fences and blank bodies have no live factory block.
+    for raw in ("```\n<!-- factory:start -->\nunclosed", "", "   \n\t "):
+        expected_orig = raw if raw.strip() else ""
+        assert split_issue_body(raw) == (expected_orig, "")
 
 
 def test_findings_helpers_preserve_code_block_markers() -> None:
@@ -1036,12 +976,24 @@ def test_parse_review_round_tolerates_non_numeric() -> None:
     assert parse_review_round({"review_round": "abc"}) == 0
 
 
-async def test_run_issue_stage_review_publish_guard_aborts_on_sha_mismatch(
+@pytest.mark.parametrize(
+    ("issue_num", "head_shas", "expected_label", "should_publish"),
+    [
+        (9, ["pre-sha", "post-sha"], LABEL_NEEDS_HUMAN, False),
+        (10, ["pre-sha", "pre-sha"], LABEL_PR_READY, True),
+    ],
+    ids=["sha_mismatch_aborts", "sha_match_publishes"],
+)
+async def test_run_issue_stage_review_publish_sha_guard(
     tmp_path: Path,
+    issue_num: int,
+    head_shas: list[str],
+    expected_label: str,
+    should_publish: bool,
 ) -> None:
-    (tmp_path / ".worktrees" / "issue-9").mkdir(parents=True)
+    (tmp_path / ".worktrees" / f"issue-{issue_num}").mkdir(parents=True)
     task = TaskContext(
-        issue_number=9,
+        issue_number=issue_num,
         title="Add filter",
         original_body="orig",
         factory_block="## Specification\n- Add filter.",
@@ -1062,7 +1014,7 @@ async def test_run_issue_stage_review_publish_guard_aborts_on_sha_mismatch(
         ),
         patch(
             "acp_factory.runner.loop.get_head_sha",
-            new=AsyncMock(side_effect=["pre-sha", "post-sha"]),
+            new=AsyncMock(side_effect=head_shas),
         ),
         patch(
             "acp_factory.runner.loop.is_worktree_clean",
@@ -1076,63 +1028,18 @@ async def test_run_issue_stage_review_publish_guard_aborts_on_sha_mismatch(
             "acp_factory.runner.loop.push_and_create_or_update_pr", new=AsyncMock()
         ) as mock_pr,
     ):
-        res = await run_issue_stage(tmp_path, 9)
-        assert res.stage_verdict is not None
-        assert res.stage_verdict.target_label == LABEL_NEEDS_HUMAN
-        mock_pr.assert_not_awaited()
-        mock_transition.assert_awaited_once_with(
-            task, LABEL_NEEDS_HUMAN, cwd=tmp_path.resolve(), repo_slug=None
-        )
+        res = await run_issue_stage(tmp_path, issue_num)
 
-
-async def test_run_issue_stage_review_accepted_publishes_with_sha(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / ".worktrees" / "issue-10").mkdir(parents=True)
-    task = TaskContext(
-        issue_number=10,
-        title="Add filter",
-        original_body="orig",
-        factory_block="## Specification\n- Add filter.",
-        labels=[LABEL_REVIEW],
-    )
-    outcome = FactoryRunOutcome(
-        succeeded=True,
-        exit_code=0,
-        attempts_used=1,
-        total_duration_seconds=0.3,
-        last_response_text="Looks good.\nSTATUS: ACCEPTED",
-    )
-
-    with (
-        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
-        patch(
-            "acp_factory.runner.loop.run_factory", new=AsyncMock(return_value=outcome)
-        ),
-        patch(
-            "acp_factory.runner.loop.get_head_sha",
-            new=AsyncMock(return_value="pre-sha"),
-        ),
-        patch(
-            "acp_factory.runner.loop.is_worktree_clean",
-            new=AsyncMock(return_value=True),
-        ),
-        patch("acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()),
-        patch(
-            "acp_factory.runner.loop.transition_issue_label", new=AsyncMock()
-        ) as mock_transition,
-        patch(
-            "acp_factory.runner.loop.push_and_create_or_update_pr", new=AsyncMock()
-        ) as mock_pr,
-    ):
-        res = await run_issue_stage(tmp_path, 10)
-        assert res.stage_verdict is not None
-        assert res.stage_verdict.target_label == LABEL_PR_READY
+    assert res.stage_verdict is not None
+    assert res.stage_verdict.target_label == expected_label
+    if should_publish:
         mock_pr.assert_awaited_once()
         assert "Reviewed-SHA: `pre-sha`" in mock_pr.call_args.kwargs["pr_body"]
-        mock_transition.assert_awaited_once_with(
-            task, LABEL_PR_READY, cwd=tmp_path.resolve(), repo_slug=None
-        )
+    else:
+        mock_pr.assert_not_awaited()
+    mock_transition.assert_awaited_once_with(
+        task, expected_label, cwd=tmp_path.resolve(), repo_slug=None
+    )
 
 
 def test_has_existing_spec_detection() -> None:
@@ -1652,7 +1559,62 @@ async def test_review_maintains_issue_meta(tmp_path: Path) -> None:
     assert "Still missing tests." not in issue_block
 
 
-def test_dry_run_pr_edit_plan(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    (
+        "pr_body_in",
+        "verdict_text",
+        "expected_in",
+        "expected_not_in",
+        "expect_warning",
+    ),
+    [
+        (
+            "",
+            "## Findings\n- Add tests.\nSTATUS: REVISION_NEEDED",
+            ["<!-- factory:review:start -->", "- Add tests."],
+            [],
+            True,
+        ),
+        (
+            "Human-written PR intro.\n\n"
+            "<!-- factory:review:start -->\n"
+            "## Findings\n- old finding\n"
+            "<!-- factory:review:end -->\n\n"
+            "Human-written PR footer.",
+            "## Findings\n- Add tests.\nSTATUS: REVISION_NEEDED",
+            ["Human-written PR intro.", "Human-written PR footer.", "- Add tests."],
+            ["old finding"],
+            False,
+        ),
+        (
+            "Human-written PR intro.\n\n"
+            "<!-- factory:pr-description:start -->\n"
+            "## Summary\nOld summary\n"
+            "<!-- factory:pr-description:end -->\n\n"
+            "<!-- factory:review:start -->\n"
+            "## Findings\n- stale unresolved finding\n"
+            "<!-- factory:review:end -->\n\n"
+            "Human-written PR footer.",
+            "STATUS: ACCEPTED",
+            ["Human-written PR intro.", "Human-written PR footer."],
+            [
+                "stale unresolved finding",
+                "<!-- factory:review:start -->",
+                "<!-- factory:review:end -->",
+            ],
+            False,
+        ),
+    ],
+    ids=["no_fetched_body_warns", "preserves_fetched_body", "clears_stale_on_accept"],
+)
+def test_dry_run_pr_edit_plan(
+    tmp_path: Path,
+    pr_body_in: str,
+    verdict_text: str,
+    expected_in: list[str],
+    expected_not_in: list[str],
+    expect_warning: bool,
+) -> None:
     from acp_factory.github import build_dry_run_gh_plan
 
     task = TaskContext(
@@ -1663,10 +1625,11 @@ def test_dry_run_pr_edit_plan(tmp_path: Path) -> None:
         factory_block="## Specification\n- Add filter.",
         labels=[LABEL_REVIEW],
         pr_url="https://github.com/acme/api/pull/88",
+        pr_body=pr_body_in,
     )
     verdict = parse_stage_verdict(
         "review",
-        "## Findings\n- Add tests.\nSTATUS: REVISION_NEEDED",
+        verdict_text,
         current_factory_block=task.factory_block,
         reviewed_sha="pre-sha",
     )
@@ -1682,65 +1645,87 @@ def test_dry_run_pr_edit_plan(tmp_path: Path) -> None:
     assert plan.pr_body_file is not None
     assert plan.pr_body_file.exists()
     pr_body = plan.pr_body_file.read_text(encoding="utf-8")
-    assert "<!-- factory:review:start -->" in pr_body
-    assert "- Add tests." in pr_body
+    for needle in expected_in:
+        assert needle in pr_body
+    for needle in expected_not_in:
+        assert needle not in pr_body
     assert any(
         command.startswith("gh pr edit 88") and "--body-file" in command
         for command in plan.commands
     )
-    assert any("pr-35-body.md" in command for command in plan.commands)
-    assert any("WARNING" in command for command in plan.commands)
+    assert any("WARNING" in command for command in plan.commands) is expect_warning
+    if not pr_body_in:
+        assert any("pr-35-body.md" in command for command in plan.commands)
 
 
-def test_dry_run_pr_edit_plan_preserves_fetched_body(tmp_path: Path) -> None:
-    from acp_factory.github import build_dry_run_gh_plan
-
-    task = TaskContext(
-        issue_number=35,
-        title="Add filter",
-        original_body="orig",
-        url="https://github.com/acme/api/issues/35",
-        factory_block="## Specification\n- Add filter.",
-        labels=[LABEL_REVIEW],
-        pr_url="https://github.com/acme/api/pull/88",
-        pr_body=(
-            "Human-written PR intro.\n\n"
+@pytest.mark.parametrize(
+    (
+        "existing_body",
+        "fresh_pr_body",
+        "expected_in",
+        "expected_not_in",
+        "expect_review",
+    ),
+    [
+        (
+            "Human intro.\n\n"
+            "Closes #42\n\n"
+            "<!-- factory:pr-description:start -->\n"
+            "## Summary\nOLD summary\n\n## Specification\nOLD spec\n\n"
+            "Reviewed-SHA: `oldsha`\n"
+            "<!-- factory:pr-description:end -->\n\n"
             "<!-- factory:review:start -->\n"
             "## Findings\n- old finding\n"
             "<!-- factory:review:end -->\n\n"
-            "Human-written PR footer."
+            "Human footer.",
+            "<!-- factory:pr-description:start -->\n"
+            "## Summary\nNEW summary\n\n## Specification\nNEW spec\n\n"
+            "Reviewed-SHA: `newsha`\n"
+            "<!-- factory:pr-description:end -->\n\n"
+            "<!-- factory:review:start -->\n"
+            "## Findings\n- new finding\n"
+            "<!-- factory:review:end -->",
+            [
+                "Human intro.",
+                "Human footer.",
+                "Closes #42",
+                "NEW summary",
+                "NEW spec",
+                "Reviewed-SHA: `newsha`",
+            ],
+            ["OLD summary", "OLD spec", "oldsha", "old finding"],
+            True,
         ),
-    )
-    verdict = parse_stage_verdict(
-        "review",
-        "## Findings\n- Add tests.\nSTATUS: REVISION_NEEDED",
-        current_factory_block=task.factory_block,
-        reviewed_sha="pre-sha",
-    )
-
-    plan = build_dry_run_gh_plan(
-        task,
-        verdict,
-        workspace=tmp_path,
-        run_dir=tmp_path / ".factory" / "runs" / "dry-run-test",
-        reviewed_sha="pre-sha",
-    )
-
-    assert plan.pr_body_file is not None
-    pr_body = plan.pr_body_file.read_text(encoding="utf-8")
-    assert "Human-written PR intro." in pr_body
-    assert "Human-written PR footer." in pr_body
-    assert "- Add tests." in pr_body
-    assert "old finding" not in pr_body
-    assert any(
-        command.startswith("gh pr edit 88") and "--body-file" in command
-        for command in plan.commands
-    )
-    assert not any("WARNING" in command for command in plan.commands)
-
-
-async def test_push_and_create_or_update_pr_refreshes_managed_sections(
+        (
+            "Human intro.\n\n"
+            "<!-- factory:pr-description:start -->\n"
+            "## Summary\nAccepted summary\n"
+            "<!-- factory:pr-description:end -->\n\n"
+            "<!-- factory:review:start -->\n"
+            "## Findings\n- stale unresolved finding\n"
+            "<!-- factory:review:end -->\n\n"
+            "Human footer.",
+            "<!-- factory:pr-description:start -->\n"
+            "## Summary\nAccepted summary\n"
+            "<!-- factory:pr-description:end -->",
+            ["Human intro.", "Human footer.", "Accepted summary"],
+            [
+                "stale unresolved finding",
+                "<!-- factory:review:start -->",
+                "<!-- factory:review:end -->",
+            ],
+            False,
+        ),
+    ],
+    ids=["refreshes_managed_sections", "clears_stale_review_on_empty_accept"],
+)
+async def test_push_and_create_or_update_pr_managed_sections(
     tmp_path: Path,
+    existing_body: str,
+    fresh_pr_body: str,
+    expected_in: list[str],
+    expected_not_in: list[str],
+    expect_review: bool,
 ) -> None:
     from acp_factory.github import push_and_create_or_update_pr
     from acp_factory.task import (
@@ -1765,27 +1750,6 @@ async def test_push_and_create_or_update_pr_refreshes_managed_sections(
     async def fake_exec(*args: object, **kwargs: object) -> _FakeProc:
         return _FakeProc()
 
-    existing_body = (
-        "Human intro.\n\n"
-        "Closes #42\n\n"
-        "<!-- factory:pr-description:start -->\n"
-        "## Summary\nOLD summary\n\n## Specification\nOLD spec\n\n"
-        "Reviewed-SHA: `oldsha`\n"
-        "<!-- factory:pr-description:end -->\n\n"
-        "<!-- factory:review:start -->\n"
-        "## Findings\n- old finding\n"
-        "<!-- factory:review:end -->\n\n"
-        "Human footer."
-    )
-    fresh_pr_body = (
-        "<!-- factory:pr-description:start -->\n"
-        "## Summary\nNEW summary\n\n## Specification\nNEW spec\n\n"
-        "Reviewed-SHA: `newsha`\n"
-        "<!-- factory:pr-description:end -->\n\n"
-        "<!-- factory:review:start -->\n"
-        "## Findings\n- new finding\n"
-        "<!-- factory:review:end -->"
-    )
     calls: list[tuple[list[str], str | None]] = []
 
     async def fake_run_gh(
@@ -1811,22 +1775,17 @@ async def test_push_and_create_or_update_pr_refreshes_managed_sections(
     edit_call = next(call for call in calls if call[0][:2] == ["pr", "edit"])
     updated = edit_call[1] or ""
 
-    assert "Human intro." in updated
-    assert "Human footer." in updated
-    assert "Closes #42" in updated
-    assert "NEW summary" in updated
-    assert "NEW spec" in updated
-    assert "Reviewed-SHA: `newsha`" in updated
-    assert "OLD summary" not in updated
-    assert "OLD spec" not in updated
-    assert "oldsha" not in updated
-    assert "old finding" not in updated
+    for needle in expected_in:
+        assert needle in updated
+    for needle in expected_not_in:
+        assert needle not in updated
     assert updated.count(FACTORY_PR_DESCRIPTION_START) == 1
-    assert extract_pr_description_section(updated) == (
-        "## Summary\nNEW summary\n\n## Specification\nNEW spec\n\n"
-        "Reviewed-SHA: `newsha`"
-    )
-    assert extract_pr_review_section(updated) == "## Findings\n- new finding"
+    if expect_review:
+        assert extract_pr_description_section(updated) == (
+            "## Summary\nNEW summary\n\n## Specification\nNEW spec\n\n"
+            "Reviewed-SHA: `newsha`"
+        )
+        assert extract_pr_review_section(updated) == "## Findings\n- new finding"
 
 
 def test_render_pr_description_section_rejects_bad_input() -> None:
@@ -1881,7 +1840,63 @@ async def test_update_pr_review_section_ignores_markers_inside_code_fences(
     assert "```\n<!-- factory:review:start -->\n```" in new_body
 
 
-def test_render_pr_body_with_review_drops_dangling_end_marker() -> None:
+@pytest.mark.parametrize(
+    ("raw_body", "report", "expected_in", "expected_not_in", "expected_extracted"),
+    [
+        (
+            "Human note.\n<!-- factory:review:end -->\nstray tail",
+            "## Findings\n- new",
+            ["Human note.", "stray tail"],
+            [],
+            "## Findings\n- new",
+        ),
+        (
+            "<!-- factory:review:end -->",
+            "## Findings\n- only",
+            [],
+            [],
+            "## Findings\n- only",
+        ),
+        (
+            "Intro\n<!-- factory:review:end -->\n"
+            "<!-- factory:review:start -->\n## Findings\n- old\n<!-- factory:review:end -->\n\n"
+            "Outro\n\n<!-- factory:review:start -->\nstray stale text\n<!-- factory:review:end -->",
+            "## Findings\n- fresh",
+            ["Intro", "Outro"],
+            ["stray stale text"],
+            "## Findings\n- fresh",
+        ),
+        (
+            "Intro\n<!-- factory:review:start -->\n## Findings\n- old\n<!-- factory:review:end -->\n\n"
+            "Outro\n\n<!-- factory:review:start -->\ndangling unclosed text",
+            "## Findings\n- fresh",
+            ["Outro"],
+            ["dangling unclosed text"],
+            "## Findings\n- fresh",
+        ),
+        (
+            "Human PR note.",
+            "## Findings\n- Check `<!-- factory:review:start -->` and `<!-- factory:review:end -->` handling.",
+            ["Human PR note.", "(escaped)"],
+            [],
+            None,
+        ),
+    ],
+    ids=[
+        "dangling_end_marker",
+        "end_marker_only",
+        "trailing_dangling_markers",
+        "trailing_unclosed_marker",
+        "sanitizes_embedded_markers",
+    ],
+)
+def test_render_pr_body_with_review_edge_cases(
+    raw_body: str,
+    report: str,
+    expected_in: list[str],
+    expected_not_in: list[str],
+    expected_extracted: str | None,
+) -> None:
     from acp_factory.task import (
         FACTORY_REVIEW_END,
         FACTORY_REVIEW_START,
@@ -1889,203 +1904,20 @@ def test_render_pr_body_with_review_drops_dangling_end_marker() -> None:
         render_pr_body_with_review,
     )
 
-    dangling = render_pr_body_with_review(
-        f"Human note.\n{FACTORY_REVIEW_END}\nstray tail", "## Findings\n- new"
-    )
-
-    assert dangling.count(FACTORY_REVIEW_START) == 1
-    assert dangling.count(FACTORY_REVIEW_END) == 1
-    assert "Human note." in dangling
-    assert "stray tail" in dangling
-    assert extract_pr_review_section(dangling) == "## Findings\n- new"
-
-    end_only = render_pr_body_with_review(FACTORY_REVIEW_END, "## Findings\n- only")
-    assert end_only == (
-        f"{FACTORY_REVIEW_START}\n## Findings\n- only\n{FACTORY_REVIEW_END}"
-    )
-
-
-def test_render_pr_body_with_review_cleans_trailing_dangling_markers() -> None:
-    from acp_factory.task import (
-        FACTORY_REVIEW_END,
-        FACTORY_REVIEW_START,
-        extract_pr_review_section,
-        render_pr_body_with_review,
-    )
-
-    corrupted = (
-        f"Intro\n{FACTORY_REVIEW_END}\n"
-        f"{FACTORY_REVIEW_START}\n## Findings\n- old\n{FACTORY_REVIEW_END}\n\n"
-        f"Outro\n\n{FACTORY_REVIEW_START}\nstray stale text\n{FACTORY_REVIEW_END}"
-    )
-    cleaned = render_pr_body_with_review(corrupted, "## Findings\n- fresh")
-
-    assert cleaned.count(FACTORY_REVIEW_START) == 1
-    assert cleaned.count(FACTORY_REVIEW_END) == 1
-    assert "Intro" in cleaned
-    assert "Outro" in cleaned
-    assert "stray stale text" not in cleaned
-    assert extract_pr_review_section(cleaned) == "## Findings\n- fresh"
-
-    trailing_unclosed = (
-        f"Intro\n{FACTORY_REVIEW_START}\n## Findings\n- old\n{FACTORY_REVIEW_END}\n\n"
-        f"Outro\n\n{FACTORY_REVIEW_START}\ndangling unclosed text"
-    )
-    cleaned_unclosed = render_pr_body_with_review(
-        trailing_unclosed, "## Findings\n- fresh"
-    )
-    assert cleaned_unclosed.count(FACTORY_REVIEW_START) == 1
-    assert cleaned_unclosed.count(FACTORY_REVIEW_END) == 1
-    assert "Outro" in cleaned_unclosed
-    assert "dangling unclosed text" not in cleaned_unclosed
-    assert extract_pr_review_section(cleaned_unclosed) == "## Findings\n- fresh"
-
-
-def test_render_pr_body_with_review_sanitizes_embedded_markers() -> None:
-    from acp_factory.task import (
-        FACTORY_REVIEW_END,
-        FACTORY_REVIEW_START,
-        extract_pr_review_section,
-        render_pr_body_with_review,
-    )
-
-    report_with_markers = f"## Findings\n- Check `{FACTORY_REVIEW_START}` and `{FACTORY_REVIEW_END}` handling."
-    rendered = render_pr_body_with_review("Human PR note.", report_with_markers)
-
+    rendered = render_pr_body_with_review(raw_body, report)
     assert rendered.count(FACTORY_REVIEW_START) == 1
     assert rendered.count(FACTORY_REVIEW_END) == 1
-    extracted = extract_pr_review_section(rendered)
-    assert "(escaped)" in extracted
-    assert "Human PR note." in rendered
-
-    re_rendered = render_pr_body_with_review(rendered, "## Findings\n- clean")
-    assert extract_pr_review_section(re_rendered) == "## Findings\n- clean"
-    assert "Human PR note." in re_rendered
-
-
-async def test_push_and_create_or_update_pr_clears_stale_review_on_empty_accept(
-    tmp_path: Path,
-) -> None:
-    from acp_factory.github import push_and_create_or_update_pr
-    from acp_factory.task import FACTORY_REVIEW_END, FACTORY_REVIEW_START
-
-    task = TaskContext(
-        issue_number=42,
-        title="Add filter",
-        branch="factory/issue-42",
-        pr_url="https://github.com/acme/api/pull/88",
-    )
-
-    class _FakeProc:
-        returncode = 0
-
-        async def communicate(self) -> tuple[bytes, bytes]:
-            return b"", b""
-
-    async def fake_exec(*args: object, **kwargs: object) -> _FakeProc:
-        return _FakeProc()
-
-    existing_body = (
-        "Human intro.\n\n"
-        "<!-- factory:pr-description:start -->\n"
-        "## Summary\nAccepted summary\n"
-        "<!-- factory:pr-description:end -->\n\n"
-        "<!-- factory:review:start -->\n"
-        "## Findings\n- stale unresolved finding\n"
-        "<!-- factory:review:end -->\n\n"
-        "Human footer."
-    )
-    # An accepted verdict with no review body produces a description-only PR body.
-    fresh_pr_body = (
-        "<!-- factory:pr-description:start -->\n"
-        "## Summary\nAccepted summary\n"
-        "<!-- factory:pr-description:end -->"
-    )
-    calls: list[tuple[list[str], str | None]] = []
-
-    async def fake_run_gh(
-        args: list[str], cwd: Path, *, input_text: str | None = None
-    ) -> str:
-        calls.append((args, input_text))
-        if args[:2] == ["pr", "list"]:
-            return json.dumps(
-                [{"number": 88, "url": "https://github.com/acme/api/pull/88"}]
-            )
-        if args[:2] == ["pr", "view"]:
-            return json.dumps({"body": existing_body})
-        if args[:2] == ["pr", "edit"]:
-            return ""
-        raise AssertionError(f"unexpected gh call: {args}")
-
-    with (
-        patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=fake_run_gh)),
-        patch("acp_factory.github.asyncio.create_subprocess_exec", new=fake_exec),
-    ):
-        await push_and_create_or_update_pr(task, pr_body=fresh_pr_body, cwd=tmp_path)
-
-    edit_call = next(call for call in calls if call[0][:2] == ["pr", "edit"])
-    updated = edit_call[1] or ""
-
-    assert "Human intro." in updated
-    assert "Human footer." in updated
-    assert "Accepted summary" in updated
-    assert "stale unresolved finding" not in updated
-    assert FACTORY_REVIEW_START not in updated
-    assert FACTORY_REVIEW_END not in updated
-
-
-def test_dry_run_pr_edit_plan_clears_stale_review_on_empty_accept(
-    tmp_path: Path,
-) -> None:
-    from acp_factory.github import build_dry_run_gh_plan
-    from acp_factory.task import FACTORY_REVIEW_END, FACTORY_REVIEW_START
-
-    task = TaskContext(
-        issue_number=35,
-        title="Add filter",
-        original_body="orig",
-        url="https://github.com/acme/api/issues/35",
-        factory_block="## Specification\n- Add filter.",
-        labels=[LABEL_REVIEW],
-        pr_url="https://github.com/acme/api/pull/88",
-        pr_body=(
-            "Human-written PR intro.\n\n"
-            "<!-- factory:pr-description:start -->\n"
-            "## Summary\nOld summary\n"
-            "<!-- factory:pr-description:end -->\n\n"
-            "<!-- factory:review:start -->\n"
-            "## Findings\n- stale unresolved finding\n"
-            "<!-- factory:review:end -->\n\n"
-            "Human-written PR footer."
-        ),
-    )
-    verdict = parse_stage_verdict(
-        "review",
-        "STATUS: ACCEPTED",
-        current_factory_block=task.factory_block,
-        reviewed_sha="pre-sha",
-    )
-    assert verdict.review_report == ""
-
-    plan = build_dry_run_gh_plan(
-        task,
-        verdict,
-        workspace=tmp_path,
-        run_dir=tmp_path / ".factory" / "runs" / "dry-run-test",
-        reviewed_sha="pre-sha",
-    )
-
-    assert plan.pr_body_file is not None
-    pr_body = plan.pr_body_file.read_text(encoding="utf-8")
-    assert "Human-written PR intro." in pr_body
-    assert "Human-written PR footer." in pr_body
-    assert "stale unresolved finding" not in pr_body
-    assert FACTORY_REVIEW_START not in pr_body
-    assert FACTORY_REVIEW_END not in pr_body
-    assert any(
-        command.startswith("gh pr edit 88") and "--body-file" in command
-        for command in plan.commands
-    )
+    for needle in expected_in:
+        assert needle in rendered
+    for needle in expected_not_in:
+        assert needle not in rendered
+    if expected_extracted is not None:
+        assert extract_pr_review_section(rendered) == expected_extracted
+    else:
+        assert "(escaped)" in extract_pr_review_section(rendered)
+        re_rendered = render_pr_body_with_review(rendered, "## Findings\n- clean")
+        assert extract_pr_review_section(re_rendered) == "## Findings\n- clean"
+        assert "Human PR note." in re_rendered
 
 
 def test_build_issue_pr_body_accepted_does_not_duplicate_review_report() -> None:

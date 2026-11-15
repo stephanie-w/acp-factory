@@ -18,48 +18,44 @@ from acp_factory.runner.guardrails import (
 )
 
 
-def test_path_contained_within_workspace(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("target_rel", "expected_safe", "expected_reason_sub"),
+    [
+        ("src/main.py", True, None),
+        (".", True, None),
+        ("../outside.txt", False, "escapes workspace"),
+        ("/etc/passwd", False, "escapes workspace"),
+    ],
+    ids=["rel_inside", "workspace_root", "dotdot_escape", "system_path_escape"],
+)
+def test_path_containment(
+    tmp_path: Path,
+    target_rel: str,
+    expected_safe: bool,
+    expected_reason_sub: str | None,
+) -> None:
     ws = tmp_path / "workspace"
-    ws.mkdir()
-    child = ws / "src" / "main.py"
-    child.parent.mkdir()
-    child.touch()
-
-    safe, reason = is_path_contained(child, ws)
-    assert safe is True
-    assert reason is None
-
-    # Relative path inside workspace
-    safe, reason = is_path_contained("src/main.py", ws)
-    assert safe is True
-    assert reason is None
-
-    # Workspace directory itself
-    safe, reason = is_path_contained(ws, ws)
-    assert safe is True
-    assert reason is None
-
-
-def test_path_escaping_workspace_denied(tmp_path: Path) -> None:
-    ws = tmp_path / "workspace"
-    ws.mkdir()
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "main.py").touch()
     outside = tmp_path / "outside.txt"
     outside.touch()
 
-    # Direct outside path
-    safe, reason = is_path_contained(outside, ws)
-    assert safe is False
-    assert "escapes workspace" in (reason or "")
+    # Check both relative/direct forms for inside/outside files
+    target: Path | str = ws if target_rel == "." else target_rel
+    safe, reason = is_path_contained(target, ws)
+    assert safe is expected_safe
+    if expected_reason_sub is None:
+        assert reason is None
+    else:
+        assert expected_reason_sub in (reason or "")
 
-    # Dot-dot traversal
-    safe, reason = is_path_contained("../outside.txt", ws)
-    assert safe is False
-    assert "escapes workspace" in (reason or "")
-
-    # Sensitive system path
-    safe, reason = is_path_contained("/etc/passwd", ws)
-    assert safe is False
-    assert "escapes workspace" in (reason or "")
+    # Also verify absolute Path inputs for inside child and outside file
+    if target_rel == "src/main.py":
+        assert is_path_contained(ws / "src" / "main.py", ws) == (True, None)
+    elif target_rel == "../outside.txt":
+        abs_safe, abs_reason = is_path_contained(outside, ws)
+        assert abs_safe is False
+        assert "escapes workspace" in (abs_reason or "")
 
 
 def test_path_contained_resources_dir_read_only(tmp_path: Path) -> None:
@@ -157,50 +153,39 @@ def test_custom_denied_commands() -> None:
     assert reason is None
 
 
-def test_guardrails_main_denies_outside_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("kind", "target_type", "title", "expected_code"),
+    [
+        ("read", "outside", None, 1),
+        ("write", "inside", None, 0),
+        ("execute", None, "sudo rm -rf /", 1),
+    ],
+    ids=["denies_outside_path", "allows_inside_path", "denies_dangerous_command"],
+)
+def test_guardrails_main_decisions(
+    tmp_path: Path,
+    kind: str,
+    target_type: str | None,
+    title: str | None,
+    expected_code: int,
+) -> None:
     ws = tmp_path / "workspace"
     ws.mkdir()
-    outside = tmp_path / "secret.txt"
-    outside.touch()
+    env = {"ACPTERM_PERMISSION_KIND": kind, "ACPTERM_CWD": str(ws)}
+    if target_type == "outside":
+        outside = tmp_path / "secret.txt"
+        outside.touch()
+        env["ACPTERM_PERMISSION_PATH"] = str(outside)
+    elif target_type == "inside":
+        inside = ws / "file.py"
+        inside.touch()
+        env["ACPTERM_PERMISSION_PATH"] = str(inside)
+    if title is not None:
+        env["ACPTERM_PERMISSION_TITLE"] = title
 
-    env = {
-        "ACPTERM_PERMISSION_KIND": "read",
-        "ACPTERM_PERMISSION_PATH": str(outside),
-        "ACPTERM_CWD": str(ws),
-    }
     with patch.dict("os.environ", env, clear=True), pytest.raises(SystemExit) as exc:
         guardrails_main([])
-    assert exc.value.code == 1
-
-
-def test_guardrails_main_allows_inside_path(tmp_path: Path) -> None:
-    ws = tmp_path / "workspace"
-    ws.mkdir()
-    inside = ws / "file.py"
-    inside.touch()
-
-    env = {
-        "ACPTERM_PERMISSION_KIND": "write",
-        "ACPTERM_PERMISSION_PATH": str(inside),
-        "ACPTERM_CWD": str(ws),
-    }
-    with patch.dict("os.environ", env, clear=True), pytest.raises(SystemExit) as exc:
-        guardrails_main([])
-    assert exc.value.code == 0
-
-
-def test_guardrails_main_denies_dangerous_command(tmp_path: Path) -> None:
-    ws = tmp_path / "workspace"
-    ws.mkdir()
-
-    env = {
-        "ACPTERM_PERMISSION_KIND": "execute",
-        "ACPTERM_PERMISSION_TITLE": "sudo rm -rf /",
-        "ACPTERM_CWD": str(ws),
-    }
-    with patch.dict("os.environ", env, clear=True), pytest.raises(SystemExit) as exc:
-        guardrails_main([])
-    assert exc.value.code == 1
+    assert exc.value.code == expected_code
 
 
 def test_factory_config_guardrails_schema() -> None:

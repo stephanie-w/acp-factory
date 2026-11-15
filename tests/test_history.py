@@ -8,6 +8,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from rich.console import Console
 
 from acp_factory.cli import history_cmd
@@ -147,54 +148,40 @@ def test_history_cmd_table_renders(tmp_path: Path) -> None:
     assert "acme/core" in text
 
 
-def test_history_cmd_table_renders_model_and_attempts(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("run_id", "extra", "expected_model", "expected_attempts"),
+    [
+        (
+            "run-a",
+            {"model": "claude-3-5-sonnet", "attempts_used": 2, "max_attempts": 3},
+            "claude-3-5-sonnet",
+            "2/3",
+        ),
+        ("legacy", {}, "-", "-"),
+        ("partial", {"attempts_used": 9}, "-", "9"),
+        (
+            "booly",
+            {"model": "", "attempts_used": True, "max_attempts": False},
+            "-",
+            "-",
+        ),
+    ],
+    ids=[
+        "model_and_attempts",
+        "legacy_missing_fields",
+        "attempts_without_max",
+        "rejects_boolean_attempts",
+    ],
+)
+def test_history_cmd_table_columns(
+    tmp_path: Path,
+    run_id: str,
+    extra: dict[str, object],
+    expected_model: str,
+    expected_attempts: str,
+) -> None:
     runs_dir = tmp_path / ".factory" / "runs"
-    _write_run(
-        runs_dir,
-        "run-a",
-        "2026-11-13T16:00:00+00:00",
-        model="claude-3-5-sonnet",
-        attempts_used=2,
-        max_attempts=3,
-    )
-
-    out = StringIO()
-    with patch(
-        "acp_factory.cli.console",
-        new=Console(file=out, force_terminal=False, width=200),
-    ):
-        history_cmd(workspace=tmp_path, limit=10, json_output=False)
-
-    text = out.getvalue()
-    columns = _history_columns(text)
-    assert columns["Model"] == ["claude-3-5-sonnet"]
-    assert columns["Attempts"] == ["2/3"]
-
-
-def test_history_cmd_table_renders_legacy_missing_fields(tmp_path: Path) -> None:
-    runs_dir = tmp_path / ".factory" / "runs"
-    _write_run(runs_dir, "legacy", "2026-11-13T16:00:00+00:00")
-
-    out = StringIO()
-    with patch(
-        "acp_factory.cli.console",
-        new=Console(file=out, force_terminal=False, width=200),
-    ):
-        history_cmd(workspace=tmp_path, limit=10, json_output=False)
-
-    columns = _history_columns(out.getvalue())
-    assert columns["Model"] == ["-"]
-    assert columns["Attempts"] == ["-"]
-
-
-def test_history_cmd_table_attempts_without_max_attempts(tmp_path: Path) -> None:
-    runs_dir = tmp_path / ".factory" / "runs"
-    _write_run(
-        runs_dir,
-        "partial",
-        "2026-11-13T16:00:00+00:00",
-        attempts_used=9,
-    )
+    _write_run(runs_dir, run_id, "2026-11-13T16:00:00+00:00", **extra)
 
     out = StringIO()
     with patch(
@@ -204,28 +191,5 @@ def test_history_cmd_table_attempts_without_max_attempts(tmp_path: Path) -> None
         history_cmd(workspace=tmp_path, limit=10, json_output=False)
 
     columns = _history_columns(out.getvalue())
-    assert columns["Attempts"] == ["9"]
-    assert columns["Model"] == ["-"]
-
-
-def test_history_cmd_table_rejects_boolean_attempts(tmp_path: Path) -> None:
-    runs_dir = tmp_path / ".factory" / "runs"
-    _write_run(
-        runs_dir,
-        "booly",
-        "2026-11-13T16:00:00+00:00",
-        model="",
-        attempts_used=True,
-        max_attempts=False,
-    )
-
-    out = StringIO()
-    with patch(
-        "acp_factory.cli.console",
-        new=Console(file=out, force_terminal=False, width=200),
-    ):
-        history_cmd(workspace=tmp_path, limit=10, json_output=False)
-
-    columns = _history_columns(out.getvalue())
-    assert columns["Model"] == ["-"]
-    assert columns["Attempts"] == ["-"]
+    assert columns["Model"] == [expected_model]
+    assert columns["Attempts"] == [expected_attempts]

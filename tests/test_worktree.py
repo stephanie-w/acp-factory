@@ -231,40 +231,53 @@ def _setup_remote_and_local(tmp_path: Path) -> tuple[Path, Path]:
     return bare, local
 
 
-async def test_ensure_workspace_git_sync_offline(tmp_path: Path) -> None:
-    assert await ensure_workspace_git_sync(tmp_path, offline=True) == 0
-
-
-async def test_ensure_workspace_git_sync_not_git_repo(tmp_path: Path) -> None:
-    non_git = tmp_path / "non_git"
-    non_git.mkdir()
-    assert await ensure_workspace_git_sync(non_git) == 0
-
-
-async def test_ensure_workspace_git_sync_no_remote(tmp_path: Path) -> None:
-    local = _init_repo(tmp_path / "local_no_remote")
-    assert await ensure_workspace_git_sync(local) == 0
-
-
-async def test_ensure_workspace_git_sync_up_to_date(tmp_path: Path) -> None:
-    _, local = _setup_remote_and_local(tmp_path)
-    assert await ensure_workspace_git_sync(local) == 0
-
-
-async def test_ensure_workspace_git_sync_auto_fast_forwards(tmp_path: Path) -> None:
-    bare, local = _setup_remote_and_local(tmp_path)
-
-    # Make a commit from another checkout and push to bare origin
+def _push_remote_commit(
+    bare: Path, tmp_path: Path, filename: str, content: str, message: str
+) -> None:
     other = tmp_path / "other"
     _git("clone", "-q", str(bare), str(other), cwd=tmp_path)
     _git("config", "user.email", "other@example.com", cwd=other)
     _git("config", "user.name", "Other Dev", cwd=other)
-    (other / "feature.txt").write_text("upstream feature\n", encoding="utf-8")
-    _git("add", "feature.txt", cwd=other)
-    _git("commit", "-qm", "feat: new upstream feature", cwd=other)
+    (other / filename).write_text(content, encoding="utf-8")
+    _git("add", filename, cwd=other)
+    _git("commit", "-qm", message, cwd=other)
     _git("push", "-q", "origin", "HEAD", cwd=other)
 
-    # local is clean and behind
+
+@pytest.mark.parametrize(
+    ("mode", "offline"),
+    [
+        ("non_git", True),
+        ("non_git", False),
+        ("no_remote", False),
+        ("up_to_date", False),
+    ],
+    ids=["offline", "not_git_repo", "no_remote", "up_to_date"],
+)
+async def test_ensure_workspace_git_sync_noop_cases(
+    tmp_path: Path, mode: str, offline: bool
+) -> None:
+    if mode == "non_git":
+        target = tmp_path / "non_git"
+        target.mkdir()
+    elif mode == "no_remote":
+        target = _init_repo(tmp_path / "local_no_remote")
+    else:
+        _, target = _setup_remote_and_local(tmp_path)
+
+    assert await ensure_workspace_git_sync(target, offline=offline) == 0
+
+
+async def test_ensure_workspace_git_sync_auto_fast_forwards(tmp_path: Path) -> None:
+    bare, local = _setup_remote_and_local(tmp_path)
+    _push_remote_commit(
+        bare,
+        tmp_path,
+        "feature.txt",
+        "upstream feature\n",
+        "feat: new upstream feature",
+    )
+
     synced = await ensure_workspace_git_sync(local)
     assert synced == 1
     assert (local / "feature.txt").read_text(encoding="utf-8") == "upstream feature\n"
@@ -272,17 +285,14 @@ async def test_ensure_workspace_git_sync_auto_fast_forwards(tmp_path: Path) -> N
 
 async def test_ensure_workspace_git_sync_dirty_aborts(tmp_path: Path) -> None:
     bare, local = _setup_remote_and_local(tmp_path)
+    _push_remote_commit(
+        bare,
+        tmp_path,
+        "feature.txt",
+        "upstream feature\n",
+        "feat: new upstream feature",
+    )
 
-    other = tmp_path / "other"
-    _git("clone", "-q", str(bare), str(other), cwd=tmp_path)
-    _git("config", "user.email", "other@example.com", cwd=other)
-    _git("config", "user.name", "Other Dev", cwd=other)
-    (other / "feature.txt").write_text("upstream feature\n", encoding="utf-8")
-    _git("add", "feature.txt", cwd=other)
-    _git("commit", "-qm", "feat: new upstream feature", cwd=other)
-    _git("push", "-q", "origin", "HEAD", cwd=other)
-
-    # local is dirty and behind
     (local / "README.md").write_text("dirty uncommitted change\n", encoding="utf-8")
     with pytest.raises(GitSyncError, match="uncommitted changes"):
         await ensure_workspace_git_sync(local)
@@ -290,17 +300,8 @@ async def test_ensure_workspace_git_sync_dirty_aborts(tmp_path: Path) -> None:
 
 async def test_ensure_workspace_git_sync_diverged_aborts(tmp_path: Path) -> None:
     bare, local = _setup_remote_and_local(tmp_path)
+    _push_remote_commit(bare, tmp_path, "remote.txt", "remote\n", "remote commit")
 
-    other = tmp_path / "other"
-    _git("clone", "-q", str(bare), str(other), cwd=tmp_path)
-    _git("config", "user.email", "other@example.com", cwd=other)
-    _git("config", "user.name", "Other Dev", cwd=other)
-    (other / "remote.txt").write_text("remote\n", encoding="utf-8")
-    _git("add", "remote.txt", cwd=other)
-    _git("commit", "-qm", "remote commit", cwd=other)
-    _git("push", "-q", "origin", "HEAD", cwd=other)
-
-    # local committed a different change -> diverged
     (local / "local.txt").write_text("local\n", encoding="utf-8")
     _git("add", "local.txt", cwd=local)
     _git("commit", "-qm", "local commit", cwd=local)
