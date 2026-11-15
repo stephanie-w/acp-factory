@@ -19,6 +19,7 @@ persona = "agents/triage.agent.md"
 skills = ["issue-triage", "html2md"]
 prompt = "prompts/triage.md"
 checks = ["validate-triage"]
+thought_max_chars = 100
 
 [stages.spec]
 agent = "agy"
@@ -34,11 +35,12 @@ checks = ["validate-spec"]
 agent = "opencode"
 model = "deepseek/deepseek-flash"
 read_only = false
-pre = ["uv sync --frozen", "uv run --frozen ruff check", "uv run --frozen ty check"]
+pre = ["uv sync --frozen", "uv run --frozen ruff format", "uv run --frozen ruff check", "uv run --frozen ty check"]
 persona = "agents/implementer.agent.md"
 skills = ["tdd-builder"]
 prompt = "prompts/build.md"
 checks = ["lint", "test"]
+thought_max_chars = 100
 
 [stages.review]
 agent = "opencode"
@@ -48,6 +50,7 @@ persona = "agents/reviewer.agent.md"
 skills = ["code-reviewer", "security-auditor"]
 prompt = "prompts/review.md"
 checks = ["validate-review", "validate-security"]
+thought_max_chars = 100
 
 [stages.retro]
 agent = "opencode"
