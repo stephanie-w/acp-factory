@@ -125,6 +125,14 @@ acp-factory history
 acp-factory history --json
 ```
 
+Pass `--fleet` to merge runs from every repository in the active fleet configuration into a single timeline (`Repo` is populated from each `run.json`'s `repo_slug`, falling back to the fleet map key). `--limit` is global across the merged timeline, `--fleet` is auto-enabled when a `[fleet]` section is configured, and `--fleet-config <path>` overrides the operator fleet file:
+
+```bash
+acp-factory history --fleet
+acp-factory history --fleet --json
+acp-factory history --fleet-config /path/to/custom-fleet.toml
+```
+
 ### Fleet Orchestration (Multi-Repo)
 
 Run the same 5-stage workflow across many repositories. Each `owner/repo` maps to an explicit local checkout path (no on-demand cloning).
@@ -161,7 +169,9 @@ Advance one step per repo (with stage-aware admission control so each repo has a
 ```bash
 acp-factory next --fleet
 acp-factory status --fleet
+acp-factory history --fleet
 acp-factory next --fleet-config /path/to/custom-fleet.toml
+acp-factory history --fleet-config /path/to/custom-fleet.toml
 ```
 
 `--fleet` is auto-enabled whenever a `[fleet]` section is present in the active config, or when `--fleet-config` is supplied (unless `--no-fleet` is also given). `--fleet-config <path>` must point to an existing TOML file.

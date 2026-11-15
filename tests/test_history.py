@@ -12,8 +12,8 @@ import pytest
 from rich.console import Console
 
 from acp_factory.cli import history_cmd
-from acp_factory.config import FactoryConfig
-from acp_factory.history import list_run_history
+from acp_factory.config import FactoryConfig, FleetConfig
+from acp_factory.history import list_fleet_run_history, list_run_history
 from acp_factory.runner.loop import _persist_run_artifacts
 
 
@@ -39,6 +39,25 @@ def _history_columns(text: str) -> dict[str, list[str]]:
     ]
     header, *data = ([cell.strip() for cell in re.split("[│┃]", row)] for row in rows)
     return {name: [row[index] for row in data] for index, name in enumerate(header)}
+
+
+def _write_fleet_config(path: Path, repositories: dict[str, str]) -> Path:
+    lines = ["[repositories]"]
+    lines.extend(f'"{slug}" = "{checkout}"' for slug, checkout in repositories.items())
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_repo_local_fleet(workspace: Path, repositories: dict[str, str]) -> None:
+    factory_dir = workspace / ".factory"
+    factory_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["[fleet.repositories]"]
+    lines.extend(f'"{slug}" = "{checkout}"' for slug, checkout in repositories.items())
+    (factory_dir / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _fleet_config(repositories: dict[str, str]) -> FactoryConfig:
+    return FactoryConfig(fleet=FleetConfig(repositories=repositories))
 
 
 def test_list_run_history_sorts_newest_first(tmp_path: Path) -> None:
@@ -193,3 +212,186 @@ def test_history_cmd_table_columns(
     columns = _history_columns(out.getvalue())
     assert columns["Model"] == [expected_model]
     assert columns["Attempts"] == [expected_attempts]
+
+
+def test_list_fleet_run_history_merges_sorts_and_tags(tmp_path: Path) -> None:
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _write_run(repo_a / ".factory" / "runs", "old", "2026-11-10T10:00:00+00:00")
+    _write_run(
+        repo_b / ".factory" / "runs",
+        "new",
+        "2026-11-13T16:00:00+00:00",
+        repo_slug="provided/slug",
+    )
+    _write_run(
+        repo_a / ".factory" / "runs",
+        "null-slug",
+        "2026-11-11T10:00:00+00:00",
+        repo_slug=None,
+    )
+
+    records = list_fleet_run_history(
+        _fleet_config({"demo/repo-a": str(repo_a), "demo/repo-b": str(repo_b)})
+    )
+
+    assert [r["run_id"] for r in records] == ["new", "null-slug", "old"]
+    by_id = {r["run_id"]: r for r in records}
+    assert by_id["old"]["repo_slug"] == "demo/repo-a"
+    assert by_id["null-slug"]["repo_slug"] == "demo/repo-a"
+    assert by_id["new"]["repo_slug"] == "provided/slug"
+
+
+def test_list_fleet_run_history_error_isolation(tmp_path: Path) -> None:
+    good = tmp_path / "good"
+    _write_run(good / ".factory" / "runs", "ok", "2026-11-13T16:00:00+00:00")
+    broken = tmp_path / "broken"
+    (broken / ".factory" / "runs" / "bad").mkdir(parents=True)
+    (broken / ".factory" / "runs" / "bad" / "run.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+
+    records = list_fleet_run_history(
+        _fleet_config(
+            {
+                "demo/good": str(good),
+                "demo/missing": str(tmp_path / "does-not-exist"),
+                "demo/broken": str(broken),
+                "not-a-valid-slug": str(good),
+            }
+        )
+    )
+
+    assert [r["run_id"] for r in records] == ["ok"]
+    assert records[0]["repo_slug"] == "demo/good"
+
+
+def test_list_fleet_run_history_empty_config() -> None:
+    assert list_fleet_run_history(FactoryConfig()) == []
+    assert list_fleet_run_history(_fleet_config({})) == []
+
+
+def test_history_cmd_fleet_table(tmp_path: Path) -> None:
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _write_run(repo_a / ".factory" / "runs", "run-a", "2026-11-13T16:00:00+00:00")
+    _write_run(repo_b / ".factory" / "runs", "run-b", "2026-11-13T17:00:00+00:00")
+    fleet_file = _write_fleet_config(
+        tmp_path / "fleet.toml",
+        {"demo/repo-a": str(repo_a), "demo/repo-b": str(repo_b)},
+    )
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(
+            workspace=tmp_path,
+            fleet_config_file=fleet_file,
+            limit=10,
+            json_output=False,
+        )
+
+    columns = _history_columns(out.getvalue())
+    assert columns["Run ID"] == ["run-b", "run-a"]
+    assert columns["Repo"] == ["demo/repo-b", "demo/repo-a"]
+
+
+def test_history_cmd_fleet_config_override(tmp_path: Path) -> None:
+    repo_local = tmp_path / "repo-local"
+    _write_run(
+        repo_local / ".factory" / "runs", "local-run", "2026-11-13T16:00:00+00:00"
+    )
+    _write_repo_local_fleet(tmp_path, {"demo/local": str(repo_local)})
+
+    repo_override = tmp_path / "repo-override"
+    _write_run(
+        repo_override / ".factory" / "runs",
+        "override-run",
+        "2026-11-13T17:00:00+00:00",
+    )
+    fleet_file = _write_fleet_config(
+        tmp_path / "fleet.toml", {"demo/override": str(repo_override)}
+    )
+
+    preserved = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=preserved, force_terminal=False, width=200),
+    ):
+        history_cmd(workspace=tmp_path, limit=10, json_output=True)
+
+    preserved_data = json.loads(preserved.getvalue())
+    assert [r["run_id"] for r in preserved_data] == ["local-run"]
+    assert preserved_data[0]["repo_slug"] == "demo/local"
+
+    overridden = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=overridden, force_terminal=False, width=200),
+    ):
+        history_cmd(
+            workspace=tmp_path,
+            fleet_config_file=fleet_file,
+            limit=10,
+            json_output=True,
+        )
+
+    overridden_data = json.loads(overridden.getvalue())
+    assert [r["run_id"] for r in overridden_data] == ["override-run"]
+    assert overridden_data[0]["repo_slug"] == "demo/override"
+
+
+def test_history_cmd_fleet_json(tmp_path: Path) -> None:
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _write_run(repo_a / ".factory" / "runs", "run-a", "2026-11-13T16:00:00+00:00")
+    _write_run(repo_b / ".factory" / "runs", "run-b", "2026-11-13T17:00:00+00:00")
+    fleet_file = _write_fleet_config(
+        tmp_path / "fleet.toml",
+        {"demo/repo-a": str(repo_a), "demo/repo-b": str(repo_b)},
+    )
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(
+            workspace=tmp_path,
+            fleet_config_file=fleet_file,
+            limit=10,
+            json_output=True,
+        )
+
+    data = json.loads(out.getvalue())
+    assert [r["run_id"] for r in data] == ["run-b", "run-a"]
+    assert {r["repo_slug"] for r in data} == {"demo/repo-a", "demo/repo-b"}
+
+
+def test_list_fleet_run_history_limit(tmp_path: Path) -> None:
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _write_run(repo_a / ".factory" / "runs", "a-old", "2026-11-13T10:00:00+00:00")
+    _write_run(repo_a / ".factory" / "runs", "a-new", "2026-11-13T12:00:00+00:00")
+    _write_run(repo_b / ".factory" / "runs", "b-mid", "2026-11-13T11:00:00+00:00")
+    fleet_file = _write_fleet_config(
+        tmp_path / "fleet.toml",
+        {"demo/repo-a": str(repo_a), "demo/repo-b": str(repo_b)},
+    )
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(
+            workspace=tmp_path,
+            fleet_config_file=fleet_file,
+            limit=2,
+            json_output=True,
+        )
+
+    data = json.loads(out.getvalue())
+    assert [r["run_id"] for r in data] == ["a-new", "b-mid"]
