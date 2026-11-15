@@ -55,7 +55,7 @@ Notes:
 
 - `/tmp/acp-factory.lock` is an empty marker file; no data is stored in it.
 - `flock -n` exits immediately (non-blocking) if the lock is held, so the next cron fire waits for the following interval instead of queueing.
-- Redirect output to a log file, since cron mails stdout/stderr by default.
+- Redirect output to a log file, since cron mails stdout/stderr by default. Once your setup is verified, you can discard output with `>/dev/null 2>&1` (or `>/dev/null` to keep only stderr) — per-run artifacts (`run.json`, transcripts, check logs) are still saved under `.factory/runs/<run-id>/`.
 - cron does not reload `~/.bashrc`/`~/.zshrc`. Put any non-default `PATH` or token exports directly in the crontab line or in a wrapper script.
 
 ## Recipe 2 — systemd service + timer
