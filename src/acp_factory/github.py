@@ -22,6 +22,7 @@ from .task import (
     render_pr_body_with_managed_sections,
     render_pr_body_with_review,
     render_pr_description_section,
+    strip_pr_review_section,
 )
 
 
@@ -539,6 +540,10 @@ async def push_and_create_or_update_pr(
                 description=fresh_description,
                 review_report=review_report or None,
             )
+            if not review_report:
+                # Acceptance reports can be empty (a bare `STATUS: ACCEPTED`); clear
+                # the previous round's managed review section instead of leaving it stale.
+                updated_body = strip_pr_review_section(updated_body)
         elif current_body and review_report:
             updated_body = render_pr_body_with_review(current_body, review_report)
         else:
@@ -762,11 +767,16 @@ def build_dry_run_gh_plan(
         if pr_ref and task.pr_body.strip():
             # Mirror the live path: refresh only the managed sections of the
             # existing PR body so human-written text survives the update.
+            fresh_review = extract_pr_review_section(inner_body)
             merged_body = render_pr_body_with_managed_sections(
                 task.pr_body,
                 description=extract_pr_description_section(inner_body),
-                review_report=extract_pr_review_section(inner_body) or None,
+                review_report=fresh_review or None,
             )
+            if not fresh_review:
+                # Empty acceptance report: clear the stale managed review section,
+                # matching `push_and_create_or_update_pr`.
+                merged_body = strip_pr_review_section(merged_body)
             full_pr_body = f"{merged_body.rstrip()}\n"
         pr_body_file = out_dir / f"pr-{task.issue_number}-body.md"
         pr_body_file.write_text(full_pr_body, encoding="utf-8")

@@ -1879,3 +1879,152 @@ async def test_update_pr_review_section_ignores_markers_inside_code_fences(
     assert new_body.count(FACTORY_REVIEW_START) == 2
     assert "## Findings\n- fresh" in new_body
     assert "```\n<!-- factory:review:start -->\n```" in new_body
+
+
+def test_render_pr_body_with_review_drops_dangling_end_marker() -> None:
+    from acp_factory.task import (
+        FACTORY_REVIEW_END,
+        FACTORY_REVIEW_START,
+        extract_pr_review_section,
+        render_pr_body_with_review,
+    )
+
+    dangling = render_pr_body_with_review(
+        f"Human note.\n{FACTORY_REVIEW_END}\nstray tail", "## Findings\n- new"
+    )
+
+    assert dangling.count(FACTORY_REVIEW_START) == 1
+    assert dangling.count(FACTORY_REVIEW_END) == 1
+    assert "Human note." in dangling
+    assert "stray tail" in dangling
+    assert extract_pr_review_section(dangling) == "## Findings\n- new"
+
+    end_only = render_pr_body_with_review(FACTORY_REVIEW_END, "## Findings\n- only")
+    assert end_only == (
+        f"{FACTORY_REVIEW_START}\n## Findings\n- only\n{FACTORY_REVIEW_END}"
+    )
+
+
+async def test_push_and_create_or_update_pr_clears_stale_review_on_empty_accept(
+    tmp_path: Path,
+) -> None:
+    from acp_factory.github import push_and_create_or_update_pr
+    from acp_factory.task import FACTORY_REVIEW_END, FACTORY_REVIEW_START
+
+    task = TaskContext(
+        issue_number=42,
+        title="Add filter",
+        branch="factory/issue-42",
+        pr_url="https://github.com/acme/api/pull/88",
+    )
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def fake_exec(*args: object, **kwargs: object) -> _FakeProc:
+        return _FakeProc()
+
+    existing_body = (
+        "Human intro.\n\n"
+        "<!-- factory:pr-description:start -->\n"
+        "## Summary\nAccepted summary\n"
+        "<!-- factory:pr-description:end -->\n\n"
+        "<!-- factory:review:start -->\n"
+        "## Findings\n- stale unresolved finding\n"
+        "<!-- factory:review:end -->\n\n"
+        "Human footer."
+    )
+    # An accepted verdict with no review body produces a description-only PR body.
+    fresh_pr_body = (
+        "<!-- factory:pr-description:start -->\n"
+        "## Summary\nAccepted summary\n"
+        "<!-- factory:pr-description:end -->"
+    )
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def fake_run_gh(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        calls.append((args, input_text))
+        if args[:2] == ["pr", "list"]:
+            return json.dumps(
+                [{"number": 88, "url": "https://github.com/acme/api/pull/88"}]
+            )
+        if args[:2] == ["pr", "view"]:
+            return json.dumps({"body": existing_body})
+        if args[:2] == ["pr", "edit"]:
+            return ""
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with (
+        patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=fake_run_gh)),
+        patch("acp_factory.github.asyncio.create_subprocess_exec", new=fake_exec),
+    ):
+        await push_and_create_or_update_pr(task, pr_body=fresh_pr_body, cwd=tmp_path)
+
+    edit_call = next(call for call in calls if call[0][:2] == ["pr", "edit"])
+    updated = edit_call[1] or ""
+
+    assert "Human intro." in updated
+    assert "Human footer." in updated
+    assert "Accepted summary" in updated
+    assert "stale unresolved finding" not in updated
+    assert FACTORY_REVIEW_START not in updated
+    assert FACTORY_REVIEW_END not in updated
+
+
+def test_dry_run_pr_edit_plan_clears_stale_review_on_empty_accept(
+    tmp_path: Path,
+) -> None:
+    from acp_factory.github import build_dry_run_gh_plan
+    from acp_factory.task import FACTORY_REVIEW_END, FACTORY_REVIEW_START
+
+    task = TaskContext(
+        issue_number=35,
+        title="Add filter",
+        original_body="orig",
+        url="https://github.com/acme/api/issues/35",
+        factory_block="## Specification\n- Add filter.",
+        labels=[LABEL_REVIEW],
+        pr_url="https://github.com/acme/api/pull/88",
+        pr_body=(
+            "Human-written PR intro.\n\n"
+            "<!-- factory:pr-description:start -->\n"
+            "## Summary\nOld summary\n"
+            "<!-- factory:pr-description:end -->\n\n"
+            "<!-- factory:review:start -->\n"
+            "## Findings\n- stale unresolved finding\n"
+            "<!-- factory:review:end -->\n\n"
+            "Human-written PR footer."
+        ),
+    )
+    verdict = parse_stage_verdict(
+        "review",
+        "STATUS: ACCEPTED",
+        current_factory_block=task.factory_block,
+        reviewed_sha="pre-sha",
+    )
+    assert verdict.review_report == ""
+
+    plan = build_dry_run_gh_plan(
+        task,
+        verdict,
+        workspace=tmp_path,
+        run_dir=tmp_path / ".factory" / "runs" / "dry-run-test",
+        reviewed_sha="pre-sha",
+    )
+
+    assert plan.pr_body_file is not None
+    pr_body = plan.pr_body_file.read_text(encoding="utf-8")
+    assert "Human-written PR intro." in pr_body
+    assert "Human-written PR footer." in pr_body
+    assert "stale unresolved finding" not in pr_body
+    assert FACTORY_REVIEW_START not in pr_body
+    assert FACTORY_REVIEW_END not in pr_body
+    assert any(
+        command.startswith("gh pr edit 88") and "--body-file" in command
+        for command in plan.commands
+    )

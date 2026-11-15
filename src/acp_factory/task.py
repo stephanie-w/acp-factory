@@ -41,6 +41,7 @@ _FACTORY_REVIEW_RE = re.compile(
     re.DOTALL,
 )
 _FACTORY_REVIEW_START_RE = re.compile(re.escape(FACTORY_REVIEW_START))
+_FACTORY_REVIEW_END_RE = re.compile(re.escape(FACTORY_REVIEW_END))
 
 FACTORY_PR_DESCRIPTION_START = "<!-- factory:pr-description:start -->"
 FACTORY_PR_DESCRIPTION_END = "<!-- factory:pr-description:end -->"
@@ -279,8 +280,9 @@ def render_pr_body_with_review(pr_body: str, review_report: str) -> str:
     """Splice `review_report` into the managed PR review section, preserving all other text.
 
     An existing managed section is replaced in place. When the body has no complete
-    section, a dangling start marker (and everything after it) is discarded before
-    appending a fresh managed section, so stale review text cannot linger.
+    section, dangling start/end markers (and any text after a dangling start) are
+    discarded before appending a fresh managed section, so stale review text or
+    stray markers cannot linger.
     """
     report = review_report.strip()
     if not report:
@@ -292,11 +294,27 @@ def render_pr_body_with_review(pr_body: str, review_report: str) -> str:
     if match is not None:
         return f"{pr_body[: match.start()]}{section}{pr_body[match.end() :]}"
 
+    # With no complete section every end marker is dangling; drop them so the
+    # freshly appended section is the only review block.
+    base = _remove_unfenced_matches(_FACTORY_REVIEW_END_RE, pr_body)
+    masked = _mask_code_blocks(base)
     dangling = _FACTORY_REVIEW_START_RE.search(masked)
-    base = pr_body[: dangling.start()].rstrip() if dangling is not None else pr_body
+    base = base[: dangling.start()].rstrip() if dangling is not None else base
     if not base.strip():
         return section
     return f"{base.rstrip()}\n\n{section}\n"
+
+
+def strip_pr_review_section(pr_body: str) -> str:
+    """Remove the managed PR review section (and any dangling markers) from a PR body."""
+    cleaned = _remove_unfenced_matches(_FACTORY_REVIEW_RE, pr_body)
+    masked = _mask_code_blocks(cleaned)
+    dangling = _FACTORY_REVIEW_START_RE.search(masked)
+    if dangling is not None:
+        cleaned = cleaned[: dangling.start()]
+    cleaned = _remove_unfenced_matches(_FACTORY_REVIEW_END_RE, cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def extract_pr_description_section(pr_body: str) -> str:
