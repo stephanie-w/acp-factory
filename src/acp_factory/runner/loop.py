@@ -171,15 +171,39 @@ def build_initial_prompt(
     return "\n".join(lines)
 
 
+_RESPONSE_PREVIEW_CHARS = 4000
+
+
+def _format_response_excerpt(
+    response_text: str,
+    max_chars: int = _RESPONSE_PREVIEW_CHARS,
+) -> str:
+    """Return `response_text` bounded to `max_chars` (preserving head and tail)."""
+    stripped = response_text.strip()
+    if len(stripped) <= max_chars:
+        return stripped
+    half = max_chars // 2
+    omitted = len(stripped) - max_chars
+    return (
+        f"{stripped[:half]}\n\n... [{omitted} chars omitted] ...\n\n{stripped[-half:]}"
+    )
+
+
 def build_retry_prompt(
     task: str,
     attempt: int,
     max_attempts: int,
     check_results: list[CheckResult],
+    *,
+    captured_response: str | None = None,
 ) -> str:
     """Construct a structured feedback prompt when a check fails."""
     failed_check = check_results[-1]
     passed_checks = [r for r in check_results[:-1] if r.passed]
+    is_response_check = (
+        failed_check.check_type == "cmd"
+        and "FACTORY_RESPONSE_FILE" in failed_check.command_or_prompt
+    )
 
     lines = [
         f"# Verification Failed — Retry Attempt {attempt} of {max_attempts}",
@@ -208,16 +232,42 @@ def build_retry_prompt(
     lines.append(failed_check.truncated_output.strip() or "(no output)")
     lines.append("```")
     lines.append("")
+
+    if is_response_check and captured_response is not None:
+        lines.append("### Captured Response (`$FACTORY_RESPONSE_FILE`)")
+        lines.append(
+            "This exact text was captured from your previous final response and passed to the validator:"
+        )
+        lines.append("````markdown")
+        lines.append(_format_response_excerpt(captured_response) or "(empty)")
+        lines.append("````")
+        lines.append("")
+
     lines.append("## Instructions")
-    lines.append(
-        "Analyze the failure output above, fix the root cause in the workspace without "
-        "breaking prior work or previously passing checks, and verify your changes."
-    )
-    lines.append(
-        "Remember: You are executing autonomously with no human operator in the loop. "
-        "Do NOT end your turn asking questions or proposing a strategy for approval; "
-        "apply all changes directly to the workspace."
-    )
+    if is_response_check:
+        lines.append(
+            "This check validated your previous final response text (`$FACTORY_RESPONSE_FILE`). "
+            "Fix the formatting or content issue described in the error output above and output "
+            "the complete, corrected markdown report directly as your final response."
+        )
+        lines.append(
+            "Do NOT inspect orchestrator/runner code or try to locate `$FACTORY_RESPONSE_FILE` "
+            "on disk; the file is temporary and populated verbatim from your final assistant message."
+        )
+        lines.append(
+            "Remember: You are executing autonomously with no human operator in the loop. "
+            "Do NOT end your turn asking questions or proposing a strategy for approval."
+        )
+    else:
+        lines.append(
+            "Analyze the failure output above, fix the root cause in the workspace without "
+            "breaking prior work or previously passing checks, and verify your changes."
+        )
+        lines.append(
+            "Remember: You are executing autonomously with no human operator in the loop. "
+            "Do NOT end your turn asking questions or proposing a strategy for approval; "
+            "apply all changes directly to the workspace."
+        )
     return "\n".join(lines)
 
 
@@ -758,6 +808,7 @@ async def run_factory(
                         attempt=attempt + 1,
                         max_attempts=config.retry.max_attempts,
                         check_results=results,
+                        captured_response=last_response_text,
                     )
 
             turn_transcripts = [

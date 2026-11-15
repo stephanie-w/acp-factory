@@ -322,6 +322,35 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "Pytest" in prompt
     assert "AssertionError: 1 != 2" in prompt
     assert "Remember: You are executing autonomously" in prompt
+    assert "apply all changes directly to the workspace" in prompt
+
+
+def test_build_retry_prompt_for_response_file_check() -> None:
+    from acp_factory.runner.checks import CheckResult
+
+    results = [
+        CheckResult(
+            name="Validate triage output",
+            check_type="cmd",
+            command_or_prompt='uv run --frozen python "$FACTORY_SKILLS_DIR/issue-triage/scripts/validate_triage.py" "$FACTORY_RESPONSE_FILE"',
+            passed=False,
+            exit_code=1,
+            raw_output="Missing '### Codebase Inspection' heading.",
+            truncated_output="Missing '### Codebase Inspection' heading.",
+            duration_seconds=0.2,
+        )
+    ]
+    prompt = build_retry_prompt(
+        "Triage issue #10",
+        attempt=2,
+        max_attempts=3,
+        check_results=results,
+        captured_response="### Summary\nI looked at the repo.\nSTATUS: OK",
+    )
+    assert "Captured Response (`$FACTORY_RESPONSE_FILE`)" in prompt
+    assert "### Summary\nI looked at the repo.\nSTATUS: OK" in prompt
+    assert "Do NOT inspect orchestrator/runner code" in prompt
+    assert "apply all changes directly to the workspace" not in prompt
 
 
 async def test_spec_validation_check_self_heals_via_factory_response_file(
