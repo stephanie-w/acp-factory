@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "acpterm",
-    "agent-client-protocol>=0.11.0,<1.0.0",
+    "agent-client-protocol>=0.11.0,<2.0.0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0.2",
     "rich>=15.0.0",
@@ -22,7 +22,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-acpterm = { git = "https://github.com/stephanie-w/acpterm.git" }
+acpterm = { git = "https://github.com/stephanie-w/acpterm.git", rev = "3fec31f97f673ac5e8d0332d3e9ed7c658ae28b6" }
 
 [build-system]
 requires = ["uv_build>=0.9.0,<0.12"]
