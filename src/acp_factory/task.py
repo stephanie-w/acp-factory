@@ -42,6 +42,13 @@ _FACTORY_REVIEW_RE = re.compile(
 )
 _FACTORY_REVIEW_START_RE = re.compile(re.escape(FACTORY_REVIEW_START))
 
+FACTORY_PR_DESCRIPTION_START = "<!-- factory:pr-description:start -->"
+FACTORY_PR_DESCRIPTION_END = "<!-- factory:pr-description:end -->"
+_FACTORY_PR_DESCRIPTION_RE = re.compile(
+    rf"{re.escape(FACTORY_PR_DESCRIPTION_START)}(.*?){re.escape(FACTORY_PR_DESCRIPTION_END)}",
+    re.DOTALL,
+)
+
 MAX_REVIEW_ROUNDS = 3
 
 LABEL_TRIAGE = "factory:triage"
@@ -292,6 +299,51 @@ def render_pr_body_with_review(pr_body: str, review_report: str) -> str:
     return f"{base.rstrip()}\n\n{section}\n"
 
 
+def extract_pr_description_section(pr_body: str) -> str:
+    """Return the content between the managed PR description markers, without the markers."""
+    match = _FACTORY_PR_DESCRIPTION_RE.search(_mask_code_blocks(pr_body))
+    if not match:
+        return ""
+    return pr_body[match.start(1) : match.end(1)].strip()
+
+
+def render_pr_description_section(description: str) -> str:
+    """Wrap factory-managed PR description text in its managed markers."""
+    clean = description.strip()
+    if not clean:
+        raise ValueError("description must be non-empty")
+    return f"{FACTORY_PR_DESCRIPTION_START}\n{clean}\n{FACTORY_PR_DESCRIPTION_END}"
+
+
+def render_pr_body_with_managed_sections(
+    pr_body: str,
+    *,
+    description: str,
+    review_report: str | None = None,
+) -> str:
+    """Refresh the managed PR description (and optional review) sections in-place.
+
+    Only content between the managed markers is replaced; every other byte of
+    human-written text is preserved. Legacy bodies without description markers are
+    left untouched (the review section is still spliced) to avoid duplicating the
+    description on the next publish.
+    """
+    if not description.strip():
+        raise ValueError("description must be non-empty")
+
+    updated = pr_body
+    match = _FACTORY_PR_DESCRIPTION_RE.search(_mask_code_blocks(updated))
+    if match is not None:
+        section = render_pr_description_section(description)
+        updated = f"{updated[: match.start()]}{section}{updated[match.end() :]}"
+    elif not updated.strip():
+        updated = render_pr_description_section(description)
+
+    if review_report is not None:
+        updated = render_pr_body_with_review(updated, review_report)
+    return updated
+
+
 def clean_spec_block(factory_block: str) -> str:
     """Return the specification content with internal meta, findings, and banner removed."""
     return strip_attribution_banner(
@@ -361,6 +413,7 @@ class TaskContext(BaseModel):
     branch: str = ""
     worktree_path: Path | None = None
     pr_url: str | None = None
+    pr_body: str = ""
     pr_review_body: str = ""
 
     def model_post_init(self, __context: object) -> None:

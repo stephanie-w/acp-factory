@@ -16,9 +16,12 @@ from .task import (
     StageVerdict,
     TaskContext,
     clean_spec_block,
+    extract_pr_description_section,
     extract_pr_review_section,
     render_issue_body,
+    render_pr_body_with_managed_sections,
     render_pr_body_with_review,
+    render_pr_description_section,
 )
 
 
@@ -145,6 +148,7 @@ async def _merge_open_pr_feedback(
     )
     body = feedback.get("body")
     if isinstance(body, str):
+        task.pr_body = body
         task.pr_review_body = extract_pr_review_section(body)
 
 
@@ -526,11 +530,19 @@ async def push_and_create_or_update_pr(
             str(current.get("body") or "") if isinstance(current, dict) else ""
         )
         review_report = extract_pr_review_section(pr_body)
-        updated_body = (
-            render_pr_body_with_review(current_body, review_report)
-            if current_body and review_report
-            else full_pr_body
-        )
+        fresh_description = extract_pr_description_section(pr_body)
+        if current_body and fresh_description:
+            # Refresh the factory-managed description and review sections in place,
+            # preserving any human-written text outside the managed markers.
+            updated_body = render_pr_body_with_managed_sections(
+                current_body,
+                description=fresh_description,
+                review_report=review_report or None,
+            )
+        elif current_body and review_report:
+            updated_body = render_pr_body_with_review(current_body, review_report)
+        else:
+            updated_body = full_pr_body
         await run_gh(
             [
                 "pr",
@@ -690,11 +702,12 @@ def build_issue_pr_body(
     *,
     reviewed_sha: str | None = None,
 ) -> str:
-    """Build the inner PR description body (summary + clean spec + optional Reviewed-SHA)."""
+    """Build the inner PR body: managed description (summary + clean spec) and review report."""
     spec_text = clean_spec_block(verdict.updated_factory_block) or task.original_body
-    body = f"## Summary\n{verdict.summary}\n\n## Specification\n{spec_text}"
+    description = f"## Summary\n{verdict.summary}\n\n## Specification\n{spec_text}"
     if reviewed_sha:
-        body += f"\n\nReviewed-SHA: `{reviewed_sha}`"
+        description += f"\n\nReviewed-SHA: `{reviewed_sha}`"
+    body = render_pr_description_section(description)
     if verdict.review_report.strip():
         body = render_pr_body_with_review(body, verdict.review_report)
     return body
@@ -746,6 +759,15 @@ def build_dry_run_gh_plan(
         pr_title = f"{task.title} (#{task.issue_number})"
         inner_body = build_issue_pr_body(task, verdict, reviewed_sha=reviewed_sha)
         full_pr_body = f"Closes #{task.issue_number}\n\n{inner_body.strip()}\n"
+        if pr_ref and task.pr_body.strip():
+            # Mirror the live path: refresh only the managed sections of the
+            # existing PR body so human-written text survives the update.
+            merged_body = render_pr_body_with_managed_sections(
+                task.pr_body,
+                description=extract_pr_description_section(inner_body),
+                review_report=extract_pr_review_section(inner_body) or None,
+            )
+            full_pr_body = f"{merged_body.rstrip()}\n"
         pr_body_file = out_dir / f"pr-{task.issue_number}-body.md"
         pr_body_file.write_text(full_pr_body, encoding="utf-8")
         rel_pr_file = _rel_or_abs(pr_body_file, path_base)
@@ -754,6 +776,11 @@ def build_dry_run_gh_plan(
         )
         commands.append(f"{git_prefix}push -u origin {shlex.quote(task.branch)}")
         if pr_ref:
+            if not task.pr_body.strip():
+                commands.append(
+                    "# WARNING: no fetched PR body available; this file replaces the "
+                    "entire PR description. Preserve human-written text manually."
+                )
             commands.append(
                 f"gh pr edit {shlex.quote(pr_ref)}{repo_flag} "
                 f"--body-file {shlex.quote(str(rel_pr_file))}"
@@ -765,9 +792,20 @@ def build_dry_run_gh_plan(
                 f"--body-file {shlex.quote(str(rel_pr_file))}"
             )
     elif task.pr_url and verdict.review_report.strip():
-        inner_body = build_issue_pr_body(task, verdict, reviewed_sha=reviewed_sha)
         pr_body_file = out_dir / f"pr-{task.issue_number}-body.md"
-        pr_body_file.write_text(f"{inner_body.strip()}\n", encoding="utf-8")
+        if task.pr_body.strip():
+            merged_body = render_pr_body_with_review(
+                task.pr_body, verdict.review_report
+            )
+            pr_body_file.write_text(f"{merged_body.rstrip()}\n", encoding="utf-8")
+        else:
+            inner_body = build_issue_pr_body(task, verdict, reviewed_sha=reviewed_sha)
+            pr_body_file.write_text(f"{inner_body.strip()}\n", encoding="utf-8")
+            commands.append(
+                "# WARNING: no fetched PR body available; this file replaces the "
+                "entire PR description. Re-insert only the factory:review section "
+                "to preserve human-written text."
+            )
         rel_pr_file = _rel_or_abs(pr_body_file, path_base)
         commands.append(
             f"gh pr edit {shlex.quote(pr_ref or '')}{repo_flag} "

@@ -28,7 +28,7 @@ To keep issues clean and readable, `acp-factory` enforces a strict separation be
 | **Issue Body (`<!-- factory:start -->` block)** | **Orchestrator** (and **Human** if editing directly) | Single canonical source of truth for Triage status, the Specification, `## Assumptions`, `## Decisions`, and any `## Open Questions`. Updated in-place via `gh issue edit`. |
 | **Issue Comments** | **Human Only** | Human answers to open questions, review feedback, or revision requests. The orchestrator **never** posts bot comments on the issue thread. |
 | **Issue Labels (`factory:*`)** | **Orchestrator** (on stage pass/halt) & **Human** (at Gates 1 & 2) | Drives the 5-stage workflow state machine. Agents cannot mutate labels directly. |
-| **Pull Request** | **Orchestrator** (opens/updates PR after `review` passes) | Delivers the reviewed branch and PR description for **Human Gate 2**. Never auto-merged. |
+| **Pull Request** | **Orchestrator** (opens/updates PR after `review` passes) | Delivers the reviewed branch and PR description for **Human Gate 2**. Never auto-merged. The factory-managed description (`<!-- factory:pr-description:start/end -->`) and review report (`<!-- factory:review:start/end -->`) sections are refreshed in place on every bounce-back, preserving human-written text outside the markers. |
 
 ### C. Bot Identity & Credential Isolation
 
@@ -119,6 +119,7 @@ stateDiagram-v2
     - **Transition**:
       - If **accepted**: Orchestrator pushes `factory/issue-<id>`, opens/updates the GitHub Pull Request (`Closes #<id>`), writes the review report into the PR body's managed `<!-- factory:review:start --> ... <!-- factory:review:end -->` section, and sets `factory:pr-ready` (**Human Gate 2**).
       - If **revision needed**: Writes the review findings into the managed `<!-- factory:review:start/end -->` section of the **PR body** (preserving human-written text outside the markers) and sets `factory:build` for another build round (up to 3 review rounds). If no PR exists yet, findings fall back to the Issue Body's `<!-- factory:findings:start/end -->` block so the builder still receives feedback; once a PR exists, any stale Issue findings block is stripped.
+      - When an existing PR is updated (accepted re-runs or dry-run plans), the factory-managed description section (summary, specification, `Reviewed-SHA`) is also refreshed so it never goes stale; human-written text outside the managed markers is preserved.
       - The Issue Body's `<!-- factory:meta -->` comment continues to track `stage`, `review_round`, `last_reviewed_sha`, `tokens`, `cost`, and `turns` for every review outcome.
 
 5. **`done` (`factory:done` or Issue `CLOSED`)**:
