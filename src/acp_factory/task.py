@@ -42,6 +42,9 @@ _FACTORY_REVIEW_RE = re.compile(
 )
 _FACTORY_REVIEW_START_RE = re.compile(re.escape(FACTORY_REVIEW_START))
 _FACTORY_REVIEW_END_RE = re.compile(re.escape(FACTORY_REVIEW_END))
+_FACTORY_REVIEW_MARKER_RE = re.compile(
+    rf"({re.escape(FACTORY_REVIEW_START)}|{re.escape(FACTORY_REVIEW_END)})"
+)
 
 FACTORY_PR_DESCRIPTION_START = "<!-- factory:pr-description:start -->"
 FACTORY_PR_DESCRIPTION_END = "<!-- factory:pr-description:end -->"
@@ -276,23 +279,49 @@ def extract_pr_review_section(pr_body: str) -> str:
     return pr_body[match.start(1) : match.end(1)].strip()
 
 
+def _sanitize_review_report(report: str) -> str:
+    """Neutralize unfenced review markers inside a report so they cannot split the section."""
+    spans = [
+        (match.start(), match.end(), match.group(0))
+        for match in _FACTORY_REVIEW_MARKER_RE.finditer(_mask_code_blocks(report))
+    ]
+    for start, end, marker in reversed(spans):
+        escaped = (
+            "<!-- factory:review:start (escaped) -->"
+            if marker == FACTORY_REVIEW_START
+            else "<!-- factory:review:end (escaped) -->"
+        )
+        report = f"{report[:start]}{escaped}{report[end:]}"
+    return report
+
+
 def render_pr_body_with_review(pr_body: str, review_report: str) -> str:
     """Splice `review_report` into the managed PR review section, preserving all other text.
 
     An existing managed section is replaced in place. When the body has no complete
     section, dangling start/end markers (and any text after a dangling start) are
     discarded before appending a fresh managed section, so stale review text or
-    stray markers cannot linger.
+    stray markers cannot linger. Any trailing dangling markers after an existing
+    complete section are also cleaned up.
     """
-    report = review_report.strip()
-    if not report:
+    raw_report = review_report.strip()
+    if not raw_report:
         raise ValueError("review_report must be non-empty")
+    report = _sanitize_review_report(raw_report)
     section = f"{FACTORY_REVIEW_START}\n{report}\n{FACTORY_REVIEW_END}"
 
     masked = _mask_code_blocks(pr_body)
     match = _FACTORY_REVIEW_RE.search(masked)
     if match is not None:
-        return f"{pr_body[: match.start()]}{section}{pr_body[match.end() :]}"
+        prefix = _remove_unfenced_matches(
+            _FACTORY_REVIEW_END_RE, pr_body[: match.start()]
+        )
+        suffix = _remove_unfenced_matches(_FACTORY_REVIEW_RE, pr_body[match.end() :])
+        suffix = _remove_unfenced_matches(_FACTORY_REVIEW_END_RE, suffix)
+        dangling_suffix = _FACTORY_REVIEW_START_RE.search(_mask_code_blocks(suffix))
+        if dangling_suffix is not None:
+            suffix = suffix[: dangling_suffix.start()].rstrip()
+        return f"{prefix}{section}{suffix}"
 
     # With no complete section every end marker is dangling; drop them so the
     # freshly appended section is the only review block.

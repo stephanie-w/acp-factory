@@ -1905,6 +1905,64 @@ def test_render_pr_body_with_review_drops_dangling_end_marker() -> None:
     )
 
 
+def test_render_pr_body_with_review_cleans_trailing_dangling_markers() -> None:
+    from acp_factory.task import (
+        FACTORY_REVIEW_END,
+        FACTORY_REVIEW_START,
+        extract_pr_review_section,
+        render_pr_body_with_review,
+    )
+
+    corrupted = (
+        f"Intro\n{FACTORY_REVIEW_END}\n"
+        f"{FACTORY_REVIEW_START}\n## Findings\n- old\n{FACTORY_REVIEW_END}\n\n"
+        f"Outro\n\n{FACTORY_REVIEW_START}\nstray stale text\n{FACTORY_REVIEW_END}"
+    )
+    cleaned = render_pr_body_with_review(corrupted, "## Findings\n- fresh")
+
+    assert cleaned.count(FACTORY_REVIEW_START) == 1
+    assert cleaned.count(FACTORY_REVIEW_END) == 1
+    assert "Intro" in cleaned
+    assert "Outro" in cleaned
+    assert "stray stale text" not in cleaned
+    assert extract_pr_review_section(cleaned) == "## Findings\n- fresh"
+
+    trailing_unclosed = (
+        f"Intro\n{FACTORY_REVIEW_START}\n## Findings\n- old\n{FACTORY_REVIEW_END}\n\n"
+        f"Outro\n\n{FACTORY_REVIEW_START}\ndangling unclosed text"
+    )
+    cleaned_unclosed = render_pr_body_with_review(
+        trailing_unclosed, "## Findings\n- fresh"
+    )
+    assert cleaned_unclosed.count(FACTORY_REVIEW_START) == 1
+    assert cleaned_unclosed.count(FACTORY_REVIEW_END) == 1
+    assert "Outro" in cleaned_unclosed
+    assert "dangling unclosed text" not in cleaned_unclosed
+    assert extract_pr_review_section(cleaned_unclosed) == "## Findings\n- fresh"
+
+
+def test_render_pr_body_with_review_sanitizes_embedded_markers() -> None:
+    from acp_factory.task import (
+        FACTORY_REVIEW_END,
+        FACTORY_REVIEW_START,
+        extract_pr_review_section,
+        render_pr_body_with_review,
+    )
+
+    report_with_markers = f"## Findings\n- Check `{FACTORY_REVIEW_START}` and `{FACTORY_REVIEW_END}` handling."
+    rendered = render_pr_body_with_review("Human PR note.", report_with_markers)
+
+    assert rendered.count(FACTORY_REVIEW_START) == 1
+    assert rendered.count(FACTORY_REVIEW_END) == 1
+    extracted = extract_pr_review_section(rendered)
+    assert "(escaped)" in extracted
+    assert "Human PR note." in rendered
+
+    re_rendered = render_pr_body_with_review(rendered, "## Findings\n- clean")
+    assert extract_pr_review_section(re_rendered) == "## Findings\n- clean"
+    assert "Human PR note." in re_rendered
+
+
 async def test_push_and_create_or_update_pr_clears_stale_review_on_empty_accept(
     tmp_path: Path,
 ) -> None:
