@@ -10,7 +10,9 @@ from typing import Any
 from acpterm.output import _state as acpterm_output_state
 from acpterm.transcript import TranscriptRecorder
 
-type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValue] | None
+type JsonValue = (
+    str | int | float | bool | list[JsonValue] | dict[str, JsonValue] | None
+)
 
 
 @dataclass
