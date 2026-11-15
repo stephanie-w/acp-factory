@@ -21,7 +21,7 @@ from .runner.worktree import (
     resolve_main_repo_root,
 )
 from .task import TaskContext
-from .ui.display import console
+from .ui.display import FactoryDisplay, console
 
 app = typer.Typer(
     name="acp-factory",
@@ -58,9 +58,29 @@ def _budget_callback(
             help="Maximum number of agent turns allowed in a run (overrides the budget configuration section).",
         ),
     ] = None,
+    quiet: Annotated[
+        bool,
+        typer.Option(
+            "--quiet",
+            "-q",
+            help="Keep banners and show a spinner + truncated response instead of streaming ACP output.",
+        ),
+    ] = False,
 ) -> None:
     """Execution budget guardrails overriding the `[budget]` configuration section."""
-    ctx.obj = {"max_tokens": max_tokens, "max_cost": max_cost, "max_turns": max_turns}
+    ctx.obj = {
+        "max_tokens": max_tokens,
+        "max_cost": max_cost,
+        "max_turns": max_turns,
+        "quiet": quiet,
+    }
+
+
+def _quiet_display(ctx: typer.Context) -> FactoryDisplay | None:
+    """Return a quiet FactoryDisplay when `-q`/`--quiet` is set, else None."""
+    if (ctx.obj or {}).get("quiet"):
+        return FactoryDisplay(quiet=True)
+    return None
 
 
 STARTER_CONFIG_YAML = """\
@@ -577,6 +597,7 @@ def run_cmd(
             run_factory(
                 cfg,
                 resolved_workspace,
+                display=_quiet_display(ctx),
                 verbose=verbose,
                 export_transcript=export,
             )
@@ -671,6 +692,7 @@ def issue_cmd(
                 stage_override=stage,
                 config_file=config_file,
                 dry_run=dry_run,
+                display=_quiet_display(ctx),
                 verbose=verbose,
                 max_tokens=eff_max_tokens,
                 max_cost=eff_max_cost,
@@ -704,6 +726,7 @@ def issue_cmd(
 
 @app.command("review")
 def review_cmd(
+    ctx: typer.Context,
     description: Annotated[
         str | None,
         typer.Argument(
@@ -778,6 +801,7 @@ def review_cmd(
                 pr_title=title,
                 config_file=config_file,
                 dry_run=dry_run,
+                display=_quiet_display(ctx),
                 verbose=verbose,
                 offline=offline,
             )
@@ -919,6 +943,7 @@ def next_cmd(
                 limit=effective_limit,
                 dry_run=dry_run,
                 verbose=verbose,
+                display=_quiet_display(ctx),
             )
             if not results:
                 console.print(
@@ -965,6 +990,7 @@ def next_cmd(
                 t.issue_number,
                 config_file=config_file,
                 dry_run=dry_run,
+                display=_quiet_display(ctx),
                 verbose=verbose,
                 max_tokens=eff_max_tokens,
                 max_cost=eff_max_cost,

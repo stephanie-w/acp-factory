@@ -837,3 +837,71 @@ async def test_branch_review_injects_prior_build_notes(tmp_path: Path) -> None:
     injected = captured[0].task
     assert "## Builder Implementation Notes" in injected
     assert "- **Evidence**: `1 passed`" in injected
+
+
+def test_agent_turn_status_quiet_mode_only() -> None:
+    """agent_turn_status uses Status only when display.quiet is True and enabled."""
+    from contextlib import nullcontext
+
+    from rich.status import Status
+
+    buffer = StringIO()
+    normal_display = FactoryDisplay(Console(file=buffer, width=120, highlight=False))
+    assert isinstance(normal_display.agent_turn_status(enabled=True), nullcontext)
+
+    quiet_display = FactoryDisplay(
+        Console(file=buffer, width=120, highlight=False), quiet=True
+    )
+    assert isinstance(quiet_display.agent_turn_status(enabled=False), nullcontext)
+
+    enabled_cm = quiet_display.agent_turn_status(enabled=True, message="Working...")
+    assert isinstance(enabled_cm, Status)
+    with enabled_cm:
+        pass
+
+
+def test_show_response_preview_truncates() -> None:
+    """show_response_preview renders a compact truncated panel."""
+    buffer = StringIO()
+    display = FactoryDisplay(
+        Console(file=buffer, width=120, highlight=False), quiet=True
+    )
+
+    long_response = "\n".join(f"line {i}" for i in range(1, 25))
+    display.show_response_preview(long_response, max_lines=5, max_chars=200)
+
+    output = buffer.getvalue()
+    assert "Agent Response (truncated)" in output
+    assert "line 1" in output
+    assert "line 5" in output
+    assert "line 6" not in output
+    assert "... (truncated)" in output
+
+
+def test_cli_quiet_flag_passes_quiet_display(tmp_path: Path) -> None:
+    """Passing -q/--quiet passes a quiet FactoryDisplay to run_issue_stage."""
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+    from acp_factory.runner.loop import FactoryRunOutcome
+
+    captured_kwargs: list[dict[str, object]] = []
+
+    async def fake_run_issue_stage(*args, **kwargs):
+        captured_kwargs.append(kwargs)
+        return FactoryRunOutcome(
+            succeeded=True,
+            exit_code=0,
+            attempts_used=1,
+            total_duration_seconds=0.1,
+        )
+
+    runner = CliRunner()
+    with patch("acp_factory.cli.run_issue_stage", new=fake_run_issue_stage):
+        res = runner.invoke(app, ["-q", "issue", "19", "--workspace", str(tmp_path)])
+
+    assert res.exit_code == 0
+    assert len(captured_kwargs) == 1
+    disp = captured_kwargs[0].get("display")
+    assert isinstance(disp, FactoryDisplay)
+    assert disp.quiet is True

@@ -422,6 +422,7 @@ async def run_single_check(
                 config_dir=config_dir,
                 resources_dir=resources_dir,
                 read_only=True,
+                silent=acp_client.silent if acp_client else False,
                 deny_runs=True,
                 extra_env=extra_env,
                 strip_env=strip_env,

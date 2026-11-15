@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -23,8 +24,11 @@ console = Console(highlight=False)
 class FactoryDisplay:
     """Renders structured Rich terminal UI for the acp-factory orchestration loop."""
 
-    def __init__(self, custom_console: Console | None = None) -> None:
+    def __init__(
+        self, custom_console: Console | None = None, *, quiet: bool = False
+    ) -> None:
         self.console = custom_console or console
+        self.quiet = quiet
 
     def show_run_header(
         self,
@@ -257,5 +261,51 @@ class FactoryDisplay:
                 "\n".join(cmd_lines),
                 title="[bold yellow]Dry-Run: Manual GitHub Commands (Human Action)[/bold yellow]",
                 border_style="yellow",
+            )
+        )
+
+    def agent_turn_status(
+        self,
+        *,
+        enabled: bool = True,
+        message: str = "Running agent turn...",
+    ) -> AbstractContextManager[Any]:
+        """Return a Rich status spinner in quiet mode while an agent turn runs."""
+        if not enabled or not self.quiet:
+            return nullcontext()
+        return self.console.status(message, spinner="dots")
+
+    def show_response_preview(
+        self,
+        response_text: str,
+        *,
+        max_lines: int = 12,
+        max_chars: int = 800,
+    ) -> None:
+        """Render a compact truncated preview of the agent response for quiet mode."""
+        stripped = response_text.strip()
+        if not stripped:
+            return
+
+        lines = stripped.splitlines()
+        truncated = False
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            truncated = True
+
+        preview = "\n".join(lines)
+        if len(preview) > max_chars:
+            preview = preview[:max_chars].rstrip()
+            truncated = True
+
+        if truncated:
+            preview = f"{preview}\n... (truncated)"
+
+        self.console.print(
+            Panel(
+                Text(preview),
+                title="[dim]Agent Response (truncated)[/dim]",
+                border_style="dim",
+                expand=False,
             )
         )

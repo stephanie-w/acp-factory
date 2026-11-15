@@ -629,6 +629,7 @@ async def run_factory(
             guardrails=config.guardrails,
             deny_runs=bool(config.active_stage and config.active_stage != "retro"),
             verbose=verbose,
+            silent=ui.quiet,
             extra_env=config.env or None,
             strip_env=config.strip_env or None,
             thought_max_chars=config.thought_max_chars,
@@ -660,10 +661,13 @@ async def run_factory(
                     attempt, config.retry.max_attempts, context=context_tag
                 )
 
-                turn_res = await acp_client.send_prompt(
-                    prompt, timeout=config.agent.timeout
-                )
+                with ui.agent_turn_status(enabled=not verbose):
+                    turn_res = await acp_client.send_prompt(
+                        prompt, timeout=config.agent.timeout
+                    )
                 last_response_text = turn_res.summary.response_text
+                if ui.quiet and last_response_text.strip():
+                    ui.show_response_preview(last_response_text)
 
                 # Post-turn accumulation: fold this turn's usage into both the
                 # per-run totals (persisted in run.json) and the cumulative issue
