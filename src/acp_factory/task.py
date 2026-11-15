@@ -781,7 +781,7 @@ def parse_stage_verdict(
                 status="accepted",
                 target_label=LABEL_PR_READY,
                 updated_factory_block=clean_block,
-                summary=cleaned_body or "Review accepted -> PR ready for Human Gate 2",
+                summary="Review accepted -> PR ready for Human Gate 2",
                 publish_pr=True,
                 review_report=cleaned_body,
             )

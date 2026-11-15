@@ -2086,3 +2086,29 @@ def test_dry_run_pr_edit_plan_clears_stale_review_on_empty_accept(
         command.startswith("gh pr edit 88") and "--body-file" in command
         for command in plan.commands
     )
+
+
+def test_build_issue_pr_body_accepted_does_not_duplicate_review_report() -> None:
+    from acp_factory.github import build_issue_pr_body
+    from acp_factory.task import extract_pr_review_section, parse_stage_verdict
+
+    task = TaskContext(
+        issue_number=42,
+        title="feat: sample",
+        original_body="Spec body",
+        factory_block="<!-- factory:meta stage=review -->",
+        labels=["factory:review"],
+        branch="factory/issue-42",
+    )
+    report_body = "### Findings\n- None.\n\n### Security Findings\n- None."
+    verdict = parse_stage_verdict(
+        "review",
+        f"{report_body}\n\nSTATUS: ACCEPTED",
+        current_factory_block=task.factory_block,
+        reviewed_sha="deadbeef",
+    )
+
+    pr_body = build_issue_pr_body(task, verdict, reviewed_sha="deadbeef")
+    assert pr_body.count("### Findings") == 1
+    assert "Review accepted -> PR ready for Human Gate 2" in pr_body
+    assert extract_pr_review_section(pr_body) == report_body
