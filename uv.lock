@@ -8,7 +8,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "acpterm" },
-    { name = "agent-client-protocol" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "rich" },
@@ -26,7 +25,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "acpterm", git = "https://github.com/stephanie-w/acpterm.git?rev=3fec31f97f673ac5e8d0332d3e9ed7c658ae28b6" },
-    { name = "agent-client-protocol", specifier = ">=0.11.0,<2.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=15.0.0" },
