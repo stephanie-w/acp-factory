@@ -5,14 +5,24 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from .config import FactoryConfig
 from .github import list_actionable_issues, list_all_factory_issues
 from .history import list_run_history
+from .inspect import (
+    extract_tool_exit_code,
+    extract_tool_output,
+    filter_tool_calls,
+    load_transcript,
+    resolve_transcript_path,
+    search_text_lines,
+)
 from .runner.loop import run_branch_review, run_factory, run_issue_stage
 from .runner.worktree import (
     GitSyncError,
@@ -312,7 +322,10 @@ DEFAULT_STAGE_PROMPTS: dict[str, str] = {
         "failing test or deterministic check first.\n"
         "2. Implement the minimal root-cause change strictly within `## Files to Touch`, probing bad and "
         "borderline inputs so invalid data is explicitly rejected.\n"
-        "3. Self-review `git diff` against the 7-point quality standard and commit your changes locally "
+        "3. If `## Latest PR Review Findings` or `## PR Review Feedback` / `## Human Review Comments` are "
+        "present, fixing every actionable finding (including `[blocking]`, `[major]`, and `[minor]` items) "
+        "is part of your job — add regression tests where applicable and fix them in code.\n"
+        "4. Self-review `git diff` against the 7-point quality standard and commit your changes locally "
         "on the current branch without pushing."
     ),
     "REVIEW.md": (
@@ -1344,6 +1357,238 @@ def history_cmd(
             result_cell,
         )
     console.print(table)
+
+
+def _build_tool_calls_table(
+    title: str, rows: list[tuple[int, dict[str, Any]]]
+) -> Table:
+    """Build a Rich summary table for matched tool calls."""
+    table = Table(title=title)
+    table.add_column("#", justify="right", style="dim", no_wrap=True)
+    table.add_column("Kind", style="cyan", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Exit", justify="right", no_wrap=True)
+    table.add_column("Title")
+    for idx, tc in rows:
+        ec = extract_tool_exit_code(tc)
+        table.add_row(
+            str(idx),
+            str(tc.get("kind") or "-"),
+            str(tc.get("status") or "-"),
+            str(ec) if ec is not None else "-",
+            str(tc.get("title") or "-"),
+        )
+    return table
+
+
+@app.command("inspect")
+def inspect_cmd(
+    target: Annotated[
+        str | None,
+        typer.Argument(
+            help="Run ID (or prefix), run/attempt directory, or transcript JSON file. Defaults to the latest run.",
+        ),
+    ] = None,
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", "-w", help="Target workspace directory."),
+    ] = Path("."),
+    attempt: Annotated[
+        int,
+        typer.Option("--attempt", "-a", min=1, help="Attempt number to inspect."),
+    ] = 1,
+    thoughts: Annotated[
+        bool,
+        typer.Option("--thoughts", "-t", help="Show agent thought text."),
+    ] = False,
+    calls: Annotated[
+        bool,
+        typer.Option("--calls", "-c", help="List tool calls."),
+    ] = False,
+    call_index: Annotated[
+        int | None,
+        typer.Option(
+            "--call",
+            min=0,
+            help="Inspect a single tool call by index in full detail.",
+        ),
+    ] = None,
+    response: Annotated[
+        bool,
+        typer.Option("--response", "-r", help="Show agent response text."),
+    ] = False,
+    kind: Annotated[
+        str | None,
+        typer.Option(
+            "--kind",
+            "-k",
+            help="Filter tool calls by kind (e.g. execute, read, edit).",
+        ),
+    ] = None,
+    failed: Annotated[
+        bool,
+        typer.Option(
+            "--failed",
+            help="Only show failed or non-zero-exit tool calls.",
+        ),
+    ] = False,
+    grep: Annotated[
+        str | None,
+        typer.Option(
+            "--grep",
+            "-g",
+            help="Case-insensitive regex search across thoughts, tool calls, and response.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print the selected view as JSON."),
+    ] = False,
+) -> None:
+    """Explore thoughts, tool calls, and responses from a local transcript."""
+    try:
+        transcript_path = resolve_transcript_path(
+            target, workspace=workspace, attempt=attempt
+        )
+        data = load_transcript(transcript_path)
+    except Exception as exc:
+        console.print(f"[bold red]Inspect Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    raw_calls = data.get("tool_calls")
+    tool_calls: list[dict[str, Any]] = (
+        [tc for tc in raw_calls if isinstance(tc, dict)]
+        if isinstance(raw_calls, list)
+        else []
+    )
+    thought_text = str(data.get("thought_text") or data.get("thought_preview") or "")
+    response_text = str(data.get("response_text") or data.get("response_preview") or "")
+
+    if call_index is not None:
+        if call_index >= len(tool_calls):
+            console.print(
+                f"[bold red]Inspect Error:[/bold red] Tool call index {call_index} "
+                f"out of range (0..{max(len(tool_calls) - 1, 0)})."
+            )
+            raise typer.Exit(code=1)
+        tc = tool_calls[call_index]
+        if json_output:
+            typer.echo(json.dumps(tc, indent=2))
+            return
+        exit_code = extract_tool_exit_code(tc)
+        exit_str = f" (exit {exit_code})" if exit_code is not None else ""
+        header = (
+            f"id: {tc.get('id')}\n"
+            f"kind: {tc.get('kind')} | status: {tc.get('status')}{exit_str}\n"
+            f"title: {tc.get('title')}"
+        )
+        if tc.get("raw_input"):
+            header += f"\nraw_input: {json.dumps(tc.get('raw_input'))}"
+        output = extract_tool_output(tc)
+        body = f"{header}\n\n{output}" if output else header
+        console.print(
+            Panel(
+                Text(body),
+                title=f"Tool Call #{call_index}",
+                border_style="cyan",
+            )
+        )
+        return
+
+    matched_calls = filter_tool_calls(tool_calls, kind=kind, failed=failed, grep=grep)
+
+    if grep is not None and not (thoughts or calls or response):
+        thought_hits = search_text_lines(thought_text, grep) if thought_text else []
+        response_hits = search_text_lines(response_text, grep) if response_text else []
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "transcript": str(transcript_path),
+                        "pattern": grep,
+                        "thought_matches": [
+                            {"line": ln, "text": txt} for ln, txt in thought_hits
+                        ],
+                        "tool_call_matches": [
+                            {"index": idx, **tc} for idx, tc in matched_calls
+                        ],
+                        "response_matches": [
+                            {"line": ln, "text": txt} for ln, txt in response_hits
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+            return
+        console.print(f"[dim]Transcript:[/dim] {transcript_path}")
+        if thought_hits:
+            console.print(
+                Panel(
+                    Text("\n".join(f"{ln}: {txt}" for ln, txt in thought_hits)),
+                    title=f"Thoughts matching /{grep}/ ({len(thought_hits)})",
+                    border_style="magenta",
+                )
+            )
+        if matched_calls:
+            console.print(
+                _build_tool_calls_table(
+                    f"Tool Calls matching /{grep}/ ({len(matched_calls)})",
+                    matched_calls,
+                )
+            )
+        if response_hits:
+            console.print(
+                Panel(
+                    Text("\n".join(f"{ln}: {txt}" for ln, txt in response_hits)),
+                    title=f"Response matching /{grep}/ ({len(response_hits)})",
+                    border_style="green",
+                )
+            )
+        if not (thought_hits or matched_calls or response_hits):
+            console.print(f"[dim]No matches for /{grep}/.[/dim]")
+        return
+
+    if json_output:
+        payload: dict[str, Any] = {"transcript": str(transcript_path)}
+        if thoughts:
+            payload["thought_text"] = thought_text
+        if response:
+            payload["response_text"] = response_text
+        if calls or not (thoughts or response):
+            payload["tool_calls"] = [{"index": idx, **tc} for idx, tc in matched_calls]
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    console.print(f"[dim]Transcript:[/dim] {transcript_path}")
+
+    if thoughts:
+        console.print(
+            Panel(
+                Text(thought_text or "(empty)"),
+                title="Thoughts",
+                border_style="magenta",
+            )
+        )
+
+    if response:
+        console.print(
+            Panel(
+                Text(response_text or "(empty)"),
+                title="Response",
+                border_style="green",
+            )
+        )
+
+    if calls or not (thoughts or response):
+        if not matched_calls:
+            console.print("[dim]No matching tool calls.[/dim]")
+            return
+        console.print(
+            _build_tool_calls_table(
+                f"Tool Calls ({len(matched_calls)}/{len(tool_calls)})",
+                matched_calls,
+            )
+        )
 
 
 def main() -> None:
