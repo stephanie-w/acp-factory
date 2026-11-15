@@ -425,10 +425,9 @@ def test_spec_validator_catches_unformatted_questions_and_normalizes_valid_spec(
 ) -> None:
     import subprocess
 
-    from acp_factory.config import resolve_resources_dir
+    from acp_factory.resources import get_bundled_resources_dir
 
-    resources_root = resolve_resources_dir()
-    assert resources_root is not None
+    resources_root = get_bundled_resources_dir()
     validator = (
         resources_root / "skills" / "spec-writer" / "scripts" / "validate_spec.py"
     )

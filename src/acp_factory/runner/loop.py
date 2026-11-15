@@ -670,12 +670,23 @@ async def run_factory(
                     )
 
         # 2. Agent Worker & Check Feedback Loop
-        resolved_res_dir = config.resolved_resources_dir
+        resolved_res_dirs = config.resolved_resource_dirs
+        resolved_res_dir = resolved_res_dirs[0] if resolved_res_dirs else None
+        effective_discover = (
+            config.agent.discover_apm_resources
+            if config.agent.discover_apm_resources is not None
+            else config.discover_apm_resources
+        )
+        merged_instructions = list(
+            dict.fromkeys([*config.instructions, *config.agent.instructions])
+        )
         async with FactoryACPClient(
             workspace=active_cwd,
             agent_config=config.agent,
             config_dir=config.config_dir,
-            resources_dir=resolved_res_dir,
+            resource_dirs=resolved_res_dirs,
+            instructions=merged_instructions,
+            discover_apm_resources=effective_discover,
             guardrails=config.guardrails,
             deny_runs=bool(config.active_stage and config.active_stage != "retro"),
             verbose=verbose,
@@ -781,6 +792,8 @@ async def run_factory(
                         acp_client=acp_client,
                         config_dir=config.config_dir,
                         resources_dir=resolved_res_dir,
+                        resource_dirs=resolved_res_dirs,
+                        discover_apm_resources=effective_discover,
                         max_output_lines=config.retry.max_output_lines,
                         on_check_complete=ui.show_check_result,
                         extra_env=check_env,

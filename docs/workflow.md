@@ -147,9 +147,10 @@ stateDiagram-v2
      - **ML & Data Pipelines (Kubeflow, Vertex, Airflow, Argo, CI)**: Offline DAG/workflow compilation and artifact schema dry-run checks.
      - **Cloud IaC & Containers (Terraform/OpenTofu, Helm, K8s, Docker)**: Static and plan-time local validation (`terraform fmt -check && terraform validate`, `tflint`, `helm template`, `kubeconform`) — **never** live cloud mutations.
 
-3. **Workspace & Catalog Skills via `apm` (`~/DEV/coding-ai-resources`)**:
-   - Target workspaces bring their own `apm.yml` and run `apm install` as a `pre` / `setup` command in `.factory/config.toml` (deploying project skills into `.agents/skills/` or `apm_modules/`).
-   - `resolve_skill_paths` searches the target workspace first (`.factory/skills/`, `skills/`, `.agents/skills/`, `.apm/skills/`, `apm_modules/`) and falls back to `acp-factory`'s bundled `skills/` directory so built-in skills work out-of-the-box on any repository.
+3. **Bundled Core, Layered `resource_dirs`, & `apm` Auto-Discovery**:
+   - Core orchestration personas, stage prompts, and skills/validators (`issue-triage`, `spec-writer`, `tdd-builder`, `code-reviewer`, `security-auditor`, `retro`) are bundled inside `acp_factory/resources/` as the lowest-precedence fallback.
+   - Additional catalogs (e.g., org policy auditors or custom overrides) can be layered via `resource_dirs = [...]` (or legacy `resources_dir`), `FACTORY_RESOURCES_DIRS` / `FACTORY_RESOURCES_DIR`, or `.factory/`.
+   - Target workspaces bring their own `apm.yml` + `apm.lock.yaml` and run `apm install --frozen` in `pre` / `setup`. When `discover_apm_resources = true` (the default), `acp-factory` auto-discovers deployed domain skills and `*.instructions.md` files from `apm.lock.yaml` (`deployed_files`) and standard directories (`.agents/skills/`, `.apm/skills/`, `.github/instructions/`, `apm_modules/`)—injecting them lazily under `# Available Workspace Skills` and `# Domain & Policy Instructions` with YAML frontmatter summaries.
 
 ### B. Stage Configuration Reference
 

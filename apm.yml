@@ -1,6 +1,10 @@
 name: factory-workspace
 version: 0.1.0
 description: APM configuration for acp-factory skills and MCP dependencies
+targets:
+  - gemini
+  - opencode
 dependencies:
-  apm: []
+  apm:
+    - stephanie-w/coding-ai-resources/skills/html2md
   mcp: []

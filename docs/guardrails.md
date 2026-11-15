@@ -10,7 +10,7 @@ When `guardrails.enabled` is `true` (default), [`FactoryACPClient.start()`](../s
 
 ### Workspace Path Containment (`is_path_contained`)
 - **Workspace boundary:** Relative and symlinked paths are resolved against `ACPTERM_CWD`. Any path outside the active workspace (or worktree) is denied.
-- **External resources catalog (read-only):** When `kind` is `read` or `view`, reading from `resources_dir` (`--resources-dir` / `FACTORY_RESOURCES_DIR`, e.g., `coding-ai-resources` skills/prompts) is permitted.
+- **External & bundled resources catalogs (read-only):** When `kind` is `read` or `view`, reading from configured `resource_dirs` / `resources_dir` (`--resources-dir` / `FACTORY_RESOURCES_DIRS` / `FACTORY_RESOURCES_DIR`) and `acp-factory`'s package-bundled resources is permitted.
 - **Explicit allowlist:** Paths listed in `[guardrails].allowed_paths` (`--allow-path` / `FACTORY_GUARDRAILS_ALLOWED_PATHS`) are permitted.
 - **Run artifact isolation (`--deny-runs`):** In all stages except `retro`, access to `.factory/runs/`, `.factory/latest-report.md`, and `.factory/latest-build-notes.md` is denied so agents do not read prior run transcripts or reports directly from disk.
 

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 # Built-in patterns for catastrophic, unrecoverable, or unauthorized host operations.
@@ -122,6 +123,7 @@ def is_path_contained(
     allowed_paths: list[str | Path] | None = None,
     is_read: bool = False,
     resources_dir: str | Path | None = None,
+    resource_dirs: Sequence[str | Path] | None = None,
     deny_runs: bool = False,
 ) -> tuple[bool, str | None]:
     """Verify that a target file path is contained within the workspace or explicitly permitted paths."""
@@ -157,13 +159,23 @@ def is_path_contained(
             )
         return True, None
 
-    # 2. Reading from external resources catalog (e.g. skills or prompts)
-    if is_read and resources_dir:
-        res_resolved = Path(resources_dir).expanduser().resolve()
-        if target_resolved == res_resolved or target_resolved.is_relative_to(
-            res_resolved
-        ):
-            return True, None
+    # 2. Reading from external or bundled resources catalogs (e.g. skills, instructions, or prompts)
+    if is_read:
+        from ..resources import get_bundled_resources_dir
+
+        read_roots: list[str | Path] = []
+        if resources_dir:
+            read_roots.append(resources_dir)
+        if resource_dirs:
+            read_roots.extend(resource_dirs)
+        read_roots.append(get_bundled_resources_dir())
+
+        for raw_root in read_roots:
+            res_resolved = Path(raw_root).expanduser().resolve()
+            if target_resolved == res_resolved or target_resolved.is_relative_to(
+                res_resolved
+            ):
+                return True, None
 
     # 3. Explicitly allowed paths from configuration
     if allowed_paths:
@@ -248,7 +260,10 @@ def main(argv: list[str] | None = None) -> None:
         description="acp-factory permission hook guardrails"
     )
     parser.add_argument(
-        "--resources-dir", default=None, help="Path to external resources dir"
+        "--resources-dir",
+        action="append",
+        default=[],
+        help="Path to external resources dir (repeatable)",
     )
     parser.add_argument(
         "--allow-path", action="append", default=[], help="Allowed external path"
@@ -268,11 +283,14 @@ def main(argv: list[str] | None = None) -> None:
     title = os.environ.get("ACPTERM_PERMISSION_TITLE", "").strip()
     path = os.environ.get("ACPTERM_PERMISSION_PATH", "").strip()
     cwd = os.environ.get("ACPTERM_CWD", "").strip() or str(Path.cwd())
-    res_dir = (
-        args.resources_dir
-        or os.environ.get("FACTORY_RESOURCES_DIR", "").strip()
-        or None
-    )
+    res_dirs: list[str] = list(args.resources_dir)
+    if not res_dirs:
+        env_dirs = _parse_env_json_list("FACTORY_RESOURCES_DIRS")
+        if env_dirs:
+            res_dirs.extend(env_dirs)
+        env_single = os.environ.get("FACTORY_RESOURCES_DIR", "").strip()
+        if env_single and env_single not in res_dirs:
+            res_dirs.append(env_single)
 
     allowed_paths = [
         *args.allow_path,
@@ -292,7 +310,7 @@ def main(argv: list[str] | None = None) -> None:
             cwd,
             allowed_paths=allowed_paths,
             is_read=is_read,
-            resources_dir=res_dir,
+            resource_dirs=res_dirs,
             deny_runs=args.deny_runs,
         )
         if not safe_path:

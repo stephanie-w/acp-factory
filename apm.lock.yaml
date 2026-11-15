@@ -1,0 +1,18 @@
+lockfile_version: '1'
+generated_at: '2026-11-15T16:48:29.311666+00:00'
+apm_version: 0.21.0
+dependencies:
+- repo_url: stephanie-w/coding-ai-resources
+  host: github.com
+  resolved_commit: 7530fc6c6ac887120269266c5ebd9fb2f14d6dea
+  virtual_path: skills/html2md
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/html2md
+  - .agents/skills/html2md/SKILL.md
+  - .agents/skills/html2md/scripts/html2md.py
+  deployed_file_hashes:
+    .agents/skills/html2md/SKILL.md: sha256:8f8a1524c9e9564c3935e11f29fd4b7a6dcd1c7d635a78965bd80b6e24114779
+    .agents/skills/html2md/scripts/html2md.py: sha256:8ee892b3bd6a49a2b08fed144bf6776b9cb535d24968e535c001fb8b061c939c
+  content_hash: sha256:d2ea966c12eef4aba22ccbfe33168af92ee2ccfb5a5a826e69b39ddf1fc90700

@@ -75,18 +75,17 @@ acp-factory --help
 }
 ```
 
-### Step 4: Clone the Shared Prompts & Skills Catalog
-`acp-factory` personas, prompts, and skills are maintained in the shared resources repository:
+### Step 4: Optional External Prompts, Policies & Domain Catalogs
+Core orchestration personas, stage prompts, and stage skills/validators (`issue-triage`, `spec-writer`, `tdd-builder`, `code-reviewer`, `security-auditor`, `retro`) are **bundled inside `acp-factory`** and work out-of-the-box.
 
-```bash
-git clone https://github.com/stephanie-w/coding-ai-resources.git ~/DEV/coding-ai-resources
+If your organization maintains additional shared prompts, policy auditors, or domain catalogs (such as `coding-ai-resources`), you can layer them via `resource_dirs` (or `FACTORY_RESOURCES_DIRS` / `FACTORY_RESOURCES_DIR`):
+
+```toml
+# .factory/config.toml
+resource_dirs = ["~/DEV/org-policies", "~/DEV/coding-ai-resources"]
 ```
 
-Add this environment variable to your shell configuration (`~/.bashrc`, `~/.zshrc`):
-```bash
-export FACTORY_RESOURCES_DIR="$HOME/DEV/coding-ai-resources"
-```
-*(Alternatively, `.factory/config.toml` in your repository can point to `resources_dir = "~/DEV/coding-ai-resources"`).*
+For repository-specific domain skills and instructions, declare them in `apm.yml` and run `apm install --frozen` in `pre` — `acp-factory` auto-discovers `apm`-deployed files from `apm.lock.yaml` (`.agents/skills/`, `.github/instructions/`, `apm_modules/`).
 
 ---
 

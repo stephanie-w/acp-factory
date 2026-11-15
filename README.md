@@ -31,7 +31,7 @@ flowchart TD
 ## Key Capabilities
 
 - **Powered by `acpterm`**: Reuses `acpterm`'s `ACPAgent` connection engine, `~/.acpterm/config.json` agent registry, auth token resolution, permission hooks, Rich streaming output, and Markdown transcript recording.
-- **Per-Stage Agent, Persona & `apm` Skill Customization**: Each stage (`triage`, `spec`, `build`, `review`) configures its own `agent`, `model`, `mode` (`plan` vs `code`), `read_only` enforcement, role `persona` (`.md`), and `skills` (`SKILL.md` installed via `apm` or `.factory/skills/`).
+- **Per-Stage Agent, Persona, Instruction & `apm` Skill Customization**: Each stage (`triage`, `spec`, `build`, `review`) configures its own `agent`, `model`, `mode` (`plan` vs `code`), `read_only` enforcement, role `persona`, `instructions`, and `skills`—backed by package-bundled orchestration defaults, layered `resource_dirs`, and automatic `apm.lock.yaml` discovery for repo domain skills/instructions.
 - **Clean GitHub Integration (Zero Bot Comment Spam)**:
   - The **Issue Body** (`<!-- factory:start -->` block) is updated in-place as the single source of truth for the specification, assumptions, decisions, and any open questions.
   - **Issue Comments** are reserved strictly for humans (answering open questions or providing feedback).
@@ -91,9 +91,8 @@ acp-factory init --multi-stage
 
 This creates:
 - `.factory/config.toml` — Stage definitions (`triage`, `spec`, `build`, `review`) and reusable checks (`lint`, `test`, `review`)
-- `.factory/personas/{triage,architect,implementer,reviewer}.md` — Role personas per stage
-- `.factory/prompts/{TRIAGE,SPEC,BUILD,REVIEW}.md` — Stage prompt contracts
-- `apm.yml` — Agent Package Manager manifest for skills and MCP dependencies
+- `.factory/personas/` and `.factory/prompts/` — Optional local overrides (core orchestration personas, prompts, and skills are bundled in `acp-factory`)
+- `apm.yml` — Agent Package Manager manifest for domain skills, instructions, and MCP dependencies (auto-discovered via `apm.lock.yaml` / `.agents/`)
 
 *(For a simple single-file config, run `acp-factory init` to generate `factory.yaml`.)*
 

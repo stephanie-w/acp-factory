@@ -1,6 +1,5 @@
 # .factory/config.toml — Multi-stage acp-factory configuration
 version = "1"
-resources_dir = "~/DEV/coding-ai-resources"
 
 [agent]
 name = "opencode"
@@ -16,7 +15,7 @@ mode = "plan"
 model = "deepseek/deepseek-flash"
 read_only = true
 persona = "agents/triage.agent.md"
-skills = ["issue-triage", "html2md"]
+skills = ["issue-triage"]
 prompt = "prompts/triage.md"
 checks = ["validate-triage"]
 thought_max_chars = 100
@@ -26,8 +25,9 @@ agent = "agy"
 mode = "plan"
 model = "gemini-3.8-flash-medium"
 read_only = true
+pre = ["apm install --frozen"]
 persona = "agents/architect.agent.md"
-skills = ["spec-writer", "html2md"]
+skills = ["spec-writer"]
 prompt = "prompts/spec.md"
 checks = ["validate-spec"]
 
@@ -35,7 +35,7 @@ checks = ["validate-spec"]
 agent = "opencode"
 model = "deepseek/deepseek-flash"
 read_only = false
-pre = ["uv sync --frozen", "uv run --frozen ruff format", "uv run --frozen ruff check", "uv run --frozen ty check"]
+pre = ["uv sync --frozen", "uv run --frozen ruff format", "uv run --frozen ruff check", "uv run --frozen ty check", "apm install --frozen"]
 persona = "agents/implementer.agent.md"
 skills = ["tdd-builder"]
 prompt = "prompts/build.md"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shlex
 import tomllib
 from pathlib import Path
@@ -10,6 +9,13 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
+
+from .resources import (
+    load_markdown_or_inline as _load_markdown_or_inline,
+)
+from .resources import (
+    resolve_resource_dirs as resolve_resource_dirs,
+)
 
 DEFAULT_CONFIG_FILES = (
     ".factory/config.toml",
@@ -57,6 +63,14 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Paths or APM skill names (SKILL.md) attached to the agent session",
     )
+    instructions: list[str] = Field(
+        default_factory=list,
+        description="Explicit instruction Markdown paths attached to the agent session",
+    )
+    discover_apm_resources: bool | None = Field(
+        default=None,
+        description="Override workspace/APM auto-discovery of skills and instructions",
+    )
     timeout: int = Field(default=600, ge=1, description="Per-turn timeout in seconds")
 
     @model_validator(mode="before")
@@ -103,6 +117,14 @@ class CheckConfig(BaseModel):
     skills: list[str] = Field(
         default_factory=list,
         description="Optional skill paths (SKILL.md) attached during review prompt checks",
+    )
+    instructions: list[str] = Field(
+        default_factory=list,
+        description="Optional instruction Markdown paths attached during review prompt checks",
+    )
+    discover_apm_resources: bool | None = Field(
+        default=None,
+        description="Override workspace/APM auto-discovery for this prompt check",
     )
     timeout: int = Field(
         default=300, ge=1, description="Timeout in seconds for this check"
@@ -158,6 +180,14 @@ class StageConfig(BaseModel):
     skills: list[str] = Field(
         default_factory=list,
         description="List of SKILL.md paths or APM skill identifiers for this stage",
+    )
+    instructions: list[str] = Field(
+        default_factory=list,
+        description="Explicit instruction Markdown paths for this stage",
+    )
+    discover_apm_resources: bool | None = Field(
+        default=None,
+        description="Override workspace/APM auto-discovery for this stage",
     )
     prompt: str | None = Field(
         default=None,
@@ -341,6 +371,21 @@ class FactoryConfig(BaseModel):
             "Can also be provided via the FACTORY_RESOURCES_DIR environment variable."
         ),
     )
+    resource_dirs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of external AI resource catalog directories (orchestration, org policies, domain catalogs). "
+            "Layered after resources_dir and before package-bundled defaults."
+        ),
+    )
+    instructions: list[str] = Field(
+        default_factory=list,
+        description="Top-level instruction Markdown paths attached to all agent sessions",
+    )
+    discover_apm_resources: bool = Field(
+        default=True,
+        description="Auto-discover workspace/APM skills and instructions (.agents/skills/, .apm/, apm_modules/, .github/instructions/)",
+    )
     agent: AgentConfig = Field(default_factory=AgentConfig)
     setup: list[str] = Field(default_factory=list)
     task: str = Field(default="")
@@ -391,8 +436,18 @@ class FactoryConfig(BaseModel):
 
     @property
     def resolved_resources_dir(self) -> Path | None:
-        """Return the resolved external resources catalog directory, if configured or discovered."""
-        return resolve_resources_dir(self.resources_dir, config_dir=self._config_dir)
+        """Return the primary resolved external resources catalog directory, if configured or discovered."""
+        dirs = self.resolved_resource_dirs
+        return dirs[0] if dirs else None
+
+    @property
+    def resolved_resource_dirs(self) -> list[Path]:
+        """Return all resolved external AI resource catalog directories in precedence order."""
+        return resolve_resource_dirs(
+            resources_dir=self.resources_dir,
+            resource_dirs=self.resource_dirs,
+            config_dir=self._config_dir,
+        )
 
     @property
     def effective_max_review_rounds(self) -> int:
@@ -543,6 +598,22 @@ class FactoryConfig(BaseModel):
             resolved.agent.persona = stage.persona
         if stage.skills:
             resolved.agent.skills = list(stage.skills)
+        merged_instructions = list(
+            dict.fromkeys(
+                [
+                    *resolved.instructions,
+                    *resolved.agent.instructions,
+                    *stage.instructions,
+                ]
+            )
+        )
+        if merged_instructions:
+            resolved.agent.instructions = merged_instructions
+        if stage.discover_apm_resources is not None:
+            resolved.discover_apm_resources = stage.discover_apm_resources
+            resolved.agent.discover_apm_resources = stage.discover_apm_resources
+        elif resolved.agent.discover_apm_resources is None:
+            resolved.agent.discover_apm_resources = resolved.discover_apm_resources
         if stage.timeout is not None:
             resolved.agent.timeout = stage.timeout
         if stage.thought_max_chars is not None:
@@ -553,13 +624,13 @@ class FactoryConfig(BaseModel):
             resolved.setup = list(stage.pre)
 
         # 3. Resolve stage prompt file (if specified) + combine with task
-        res_dir = self.resolved_resources_dir
+        res_dirs = self.resolved_resource_dirs
         if stage.prompt:
             prompt_text = _load_markdown_or_inline(
                 stage.prompt,
                 config_dir=self._config_dir,
                 workspace=workspace,
-                resources_dir=res_dir,
+                resource_dirs=res_dirs,
             )
             if resolved.task.strip():
                 resolved.task = (
@@ -584,7 +655,7 @@ class FactoryConfig(BaseModel):
                     chk.prompt,
                     config_dir=self._config_dir,
                     workspace=workspace,
-                    resources_dir=res_dir,
+                    resource_dirs=res_dirs,
                 )
             resolved_checks.append(chk)
 
@@ -639,12 +710,36 @@ class FactoryConfig(BaseModel):
         if repo_stage is None:
             return resolved
 
-        # Overlay repo-local pre setup and checks; central stage is otherwise inherited.
+        # Overlay repo-local pre setup, checks, and optional domain skills/instructions;
+        # central stage governance is otherwise inherited.
         if repo_stage.pre:
             resolved.setup = list(repo_stage.pre)
 
+        if repo_stage.skills:
+            resolved.agent.skills = list(
+                dict.fromkeys([*resolved.agent.skills, *repo_stage.skills])
+            )
+        if repo_stage.instructions or repo_cfg.instructions:
+            resolved.agent.instructions = list(
+                dict.fromkeys(
+                    [
+                        *resolved.agent.instructions,
+                        *repo_cfg.instructions,
+                        *repo_stage.instructions,
+                    ]
+                )
+            )
+        if repo_stage.discover_apm_resources is not None:
+            resolved.discover_apm_resources = repo_stage.discover_apm_resources
+            resolved.agent.discover_apm_resources = repo_stage.discover_apm_resources
+
         if repo_stage.checks:
             resolved_checks: list[CheckConfig] = []
+            merged_res_dirs = list(
+                dict.fromkeys(
+                    [*repo_cfg.resolved_resource_dirs, *self.resolved_resource_dirs]
+                )
+            )
             for item in repo_stage.checks:
                 if isinstance(item, CheckConfig):
                     chk = item.model_copy(deep=True)
@@ -657,8 +752,7 @@ class FactoryConfig(BaseModel):
                         chk.prompt,
                         config_dir=repo_cfg.config_dir,
                         workspace=repo_checkout,
-                        resources_dir=repo_cfg.resolved_resources_dir
-                        or self.resolved_resources_dir,
+                        resource_dirs=merged_res_dirs,
                     )
                 resolved_checks.append(chk)
             resolved.checks = resolved_checks
@@ -732,7 +826,7 @@ class FactoryConfig(BaseModel):
         if setup_cmds:
             updated.setup = list(setup_cmds)
         if checks or review_prompts:
-            res_dir = updated.resolved_resources_dir
+            res_dirs = updated.resolved_resource_dirs
             merged_checks: list[CheckConfig] = []
             for idx, chk_item in enumerate(checks or [], start=1):
                 # Support comma-separated check names (e.g. --check test,review)
@@ -745,7 +839,7 @@ class FactoryConfig(BaseModel):
                                 chk.prompt,
                                 config_dir=updated._config_dir,
                                 workspace=workspace,
-                                resources_dir=res_dir,
+                                resource_dirs=res_dirs,
                             )
                         merged_checks.append(chk)
                 elif chk_item in updated.named_checks:
@@ -755,7 +849,7 @@ class FactoryConfig(BaseModel):
                             chk.prompt,
                             config_dir=updated._config_dir,
                             workspace=workspace,
-                            resources_dir=res_dir,
+                            resource_dirs=res_dirs,
                         )
                     merged_checks.append(chk)
                 else:
@@ -792,111 +886,3 @@ class FactoryConfig(BaseModel):
             updated.dry_run = dry_run
 
         return updated
-
-
-def resolve_resources_dir(
-    resources_dir: str | Path | None = None,
-    *,
-    config_dir: Path | None = None,
-) -> Path | None:
-    """Resolve the external AI resources catalog directory (`coding-ai-resources`).
-
-    Precedence:
-    1. Explicit `resources_dir` argument (or `FactoryConfig.resources_dir`), expanded for `~`
-       and resolved relative to `config_dir` (or cwd).
-    2. `FACTORY_RESOURCES_DIR` environment variable.
-    3. Sibling `coding-ai-resources` checkout adjacent to the `acp-factory` repository.
-    """
-    raw: str | Path | None = resources_dir or os.environ.get("FACTORY_RESOURCES_DIR")
-    if raw:
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute() and config_dir is not None:
-            candidate = (config_dir / candidate).resolve()
-        else:
-            candidate = candidate.resolve()
-        if candidate.is_dir():
-            return candidate
-
-    repo_root = Path(__file__).resolve().parents[2]
-    for candidate_root in (repo_root, *repo_root.parents[:2]):
-        sibling = (candidate_root.parent / "coding-ai-resources").resolve()
-        if sibling.is_dir():
-            return sibling
-    return None
-
-
-def _find_case_insensitive_file(dir_path: Path, filename: str) -> Path | None:
-    """Find a file inside `dir_path` matching `filename` case-insensitively."""
-    if not dir_path.is_dir():
-        return None
-    lower_target = filename.lower()
-    try:
-        for entry in dir_path.iterdir():
-            if entry.is_file() and entry.name.lower() == lower_target:
-                return entry
-    except OSError:
-        return None
-    return None
-
-
-def _load_markdown_or_inline(
-    value: str,
-    *,
-    config_dir: Path | None = None,
-    workspace: Path | None = None,
-    resources_dir: Path | None = None,
-) -> str:
-    """If `value` points to a Markdown/text file on disk, read it; otherwise return inline text."""
-    stripped = value.strip()
-    if "\n" in stripped:
-        return value
-
-    search_roots: list[Path] = []
-    if config_dir is not None:
-        search_roots.append(config_dir)
-    if workspace is not None and workspace not in search_roots:
-        search_roots.append(workspace)
-    resolved_res = resources_dir or resolve_resources_dir(config_dir=config_dir)
-    if resolved_res is not None and resolved_res not in search_roots:
-        search_roots.append(resolved_res)
-    cwd = Path.cwd()
-    if cwd not in search_roots:
-        search_roots.append(cwd)
-
-    candidate_path = Path(stripped).expanduser()
-    if candidate_path.is_absolute():
-        if candidate_path.is_file():
-            return candidate_path.read_text(encoding="utf-8")
-        if stripped.endswith(".md"):
-            raise FileNotFoundError(f"Prompt/persona file not found: {candidate_path}")
-        return value
-
-    # 1. Exact match search
-    for root in search_roots:
-        resolved = (root / candidate_path).resolve()
-        if resolved.is_file():
-            return resolved.read_text(encoding="utf-8")
-        # Also allow short names under agents/ or prompts/ in resources_dir
-        for subdir in ("agents", "prompts", "personas"):
-            sub_resolved = (root / subdir / candidate_path).resolve()
-            if sub_resolved.is_file():
-                return sub_resolved.read_text(encoding="utf-8")
-
-    # 2. Case-insensitive fallback for cross-platform robustness
-    for root in search_roots:
-        target_dir = (root / candidate_path.parent).resolve()
-        matched = _find_case_insensitive_file(target_dir, candidate_path.name)
-        if matched is not None:
-            return matched.read_text(encoding="utf-8")
-        for subdir in ("agents", "prompts", "personas"):
-            sub_dir = (root / subdir / candidate_path.parent).resolve()
-            matched = _find_case_insensitive_file(sub_dir, candidate_path.name)
-            if matched is not None:
-                return matched.read_text(encoding="utf-8")
-
-    if stripped.endswith(".md"):
-        raise FileNotFoundError(
-            f"Prompt/persona Markdown file not found: '{stripped}' "
-            f"(searched in {[str(r) for r in search_roots]})"
-        )
-    return value

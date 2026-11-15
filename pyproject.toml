@@ -53,6 +53,8 @@ extend-exclude = [
     "build",
     "dist",
     "node_modules",
+    ".agents",
+    "apm_modules",
 ]
 
 [tool.ruff.lint]
@@ -82,6 +84,7 @@ unfixable = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "tests/**/*" = ["S", "ANN"]
+"src/acp_factory/resources/skills/**/*" = ["S", "ANN"]
 
 #[tool.ruff.lint.isort]
 #known-first-party = ["acpterm"]
@@ -95,7 +98,7 @@ unfixable = [
 quote-style = "double"
 
 [tool.ty.src]
-exclude = ["demos"]
+exclude = ["demos", ".agents", "apm_modules"]
 
 [tool.ty.rules]
 possibly-missing-attribute = "error"

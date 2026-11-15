@@ -19,11 +19,17 @@ import acpterm.acp_agent as acpterm_agent_mod
 from acpterm.acp_agent import ACPAgent
 from acpterm.config import Config as AcptermConfig
 
-from ..config import (
-    AgentConfig,
-    GuardrailsConfig,
-    _load_markdown_or_inline,
-    resolve_resources_dir,
+from ..config import AgentConfig, GuardrailsConfig
+from ..resources import (
+    parse_frontmatter_summary,
+    resolve_resource_dirs,
+    resolve_resources,
+)
+from ..resources import (
+    resolve_persona_text as resolve_persona_text,
+)
+from ..resources import (
+    resolve_skill_paths as resolve_skill_paths,
 )
 from .events import TurnEventTracker, TurnSummary
 
@@ -51,114 +57,6 @@ def resolve_factory_agent_command(agent_cfg: AgentConfig) -> list[str]:
     return acpterm_cfg.get_agent_command(agent_cfg.name)
 
 
-def resolve_persona_text(
-    persona: str | None,
-    *,
-    workspace: Path,
-    config_dir: Path | None = None,
-    resources_dir: Path | None = None,
-) -> str | None:
-    """Load a stage/agent persona from a Markdown file or return inline persona text."""
-    if not persona or not persona.strip():
-        return None
-    return _load_markdown_or_inline(
-        persona,
-        config_dir=config_dir,
-        workspace=workspace,
-        resources_dir=resources_dir,
-    ).strip()
-
-
-def resolve_skill_paths(
-    skills: list[str],
-    *,
-    workspace: Path,
-    config_dir: Path | None = None,
-    resources_dir: Path | None = None,
-) -> list[Path]:
-    """Resolve configured skill paths or APM skill identifiers to concrete SKILL.md Paths.
-
-    Search order for each skill entry:
-    1. Absolute or `~`-expanded path (file or directory containing SKILL.md)
-    2. Relative to config_dir, workspace, or resources_dir (file or directory containing SKILL.md)
-    3. `.factory/skills/<skill>/SKILL.md`, `skills/<skill>/SKILL.md`, `.agents/skills/<skill>/SKILL.md`,
-       `.apm/skills/<skill>/SKILL.md`, `apm_modules/<skill>/SKILL.md`, or nested under `apm_modules/`
-    """
-    resolved_paths: list[Path] = []
-    search_roots: list[Path] = []
-    if config_dir is not None:
-        search_roots.append(config_dir.resolve())
-    ws_resolved = workspace.resolve()
-    if ws_resolved not in search_roots:
-        search_roots.append(ws_resolved)
-    resolved_res = resources_dir or resolve_resources_dir(config_dir=config_dir)
-    if resolved_res is not None and resolved_res not in search_roots:
-        search_roots.append(resolved_res)
-    bundled_repo_root = Path(__file__).resolve().parents[3]
-    if (
-        bundled_repo_root not in search_roots
-        and (bundled_repo_root / "skills").is_dir()
-    ):
-        search_roots.append(bundled_repo_root)
-
-    for entry in skills:
-        raw = entry.strip()
-        if not raw:
-            continue
-
-        candidate = Path(raw).expanduser()
-        found: Path | None = None
-
-        if candidate.is_absolute():
-            if candidate.is_file():
-                found = candidate
-            elif candidate.is_dir() and (candidate / "SKILL.md").is_file():
-                found = candidate / "SKILL.md"
-        else:
-            for root in search_roots:
-                direct = (root / candidate).resolve()
-                if direct.is_file():
-                    found = direct
-                    break
-                if direct.is_dir() and (direct / "SKILL.md").is_file():
-                    found = direct / "SKILL.md"
-                    break
-
-                # Check standard skill & APM directories
-                for subdir in (
-                    ".factory/skills",
-                    "skills",
-                    ".agents/skills",
-                    ".apm/skills",
-                    "apm_modules",
-                ):
-                    skill_file = (root / subdir / raw / "SKILL.md").resolve()
-                    if skill_file.is_file():
-                        found = skill_file
-                        break
-
-                if found is None:
-                    apm_dir = root / "apm_modules"
-                    if apm_dir.is_dir():
-                        matches = sorted(apm_dir.glob(f"**/skills/{raw}/SKILL.md"))
-                        if not matches:
-                            matches = sorted(apm_dir.glob(f"**/{raw}/SKILL.md"))
-                        if matches:
-                            found = matches[0].resolve()
-                if found is not None:
-                    break
-
-        if found is None:
-            raise FileNotFoundError(
-                f"Skill '{raw}' not found. Expected a SKILL.md file path or skill package "
-                f"in .factory/skills/, skills/, .agents/skills/, apm_modules/, or resources_dir under {workspace}."
-            )
-        if found not in resolved_paths:
-            resolved_paths.append(found)
-
-    return resolved_paths
-
-
 class FactoryACPClient:
     """Thin async ACP client wrapping acpterm.acp_agent.ACPAgent.
 
@@ -173,6 +71,9 @@ class FactoryACPClient:
         *,
         config_dir: Path | None = None,
         resources_dir: Path | None = None,
+        resource_dirs: list[Path] | None = None,
+        instructions: list[str] | None = None,
+        discover_apm_resources: bool | None = None,
         session_name: str | None = None,
         verbose: bool = False,
         silent: bool = False,
@@ -185,8 +86,13 @@ class FactoryACPClient:
     ) -> None:
         self.workspace = workspace.resolve()
         self.config_dir = config_dir.resolve() if config_dir else self.workspace
-        self.resources_dir = resources_dir or resolve_resources_dir(
-            config_dir=self.config_dir
+        self.resource_dirs: list[Path] = resolve_resource_dirs(
+            resources_dir=resources_dir,
+            resource_dirs=resource_dirs,
+            config_dir=self.config_dir,
+        )
+        self.resources_dir: Path | None = (
+            self.resource_dirs[0] if self.resource_dirs else None
         )
         self.agent_config = agent_config
         self.session_name = session_name or f"factory-{uuid.uuid4().hex[:8]}"
@@ -199,18 +105,32 @@ class FactoryACPClient:
         self.deny_runs = deny_runs
         self.thought_max_chars = thought_max_chars
 
-        self.persona_text: str | None = resolve_persona_text(
-            agent_config.persona,
+        effective_discover = (
+            discover_apm_resources
+            if discover_apm_resources is not None
+            else (
+                agent_config.discover_apm_resources
+                if agent_config.discover_apm_resources is not None
+                else True
+            )
+        )
+        merged_instructions = list(
+            dict.fromkeys([*(instructions or []), *agent_config.instructions])
+        )
+        resolved = resolve_resources(
+            persona=agent_config.persona,
+            instructions=merged_instructions,
+            skills=agent_config.skills,
             workspace=self.workspace,
             config_dir=self.config_dir,
-            resources_dir=self.resources_dir,
+            resource_dirs=self.resource_dirs,
+            discover_apm=effective_discover,
         )
-        self.skill_paths: list[Path] = resolve_skill_paths(
-            agent_config.skills,
-            workspace=self.workspace,
-            config_dir=self.config_dir,
-            resources_dir=self.resources_dir,
-        )
+        self.persona_text: str | None = resolved.persona_text
+        self.instruction_paths: list[Path] = resolved.instructions
+        self.explicit_skill_paths: list[Path] = resolved.explicit_skills
+        self.discovered_skill_paths: list[Path] = resolved.discovered_skills
+        self.skill_paths: list[Path] = resolved.skills
         self._persona_injected: bool = False
 
         self.tracker = TurnEventTracker(thought_max_chars=thought_max_chars)
@@ -230,8 +150,8 @@ class FactoryACPClient:
             from acpterm.hooks import HookDefinition
 
             hook_cmd = f'"{sys.executable}" -m acp_factory.runner.guardrails'
-            if self.resources_dir:
-                hook_cmd += f' --resources-dir "{self.resources_dir}"'
+            for res_dir in self.resource_dirs:
+                hook_cmd += f' --resources-dir "{res_dir}"'
             for p in self.guardrails.allowed_paths:
                 hook_cmd += f' --allow-path "{p}"'
             for d in self.guardrails.denied_commands:
@@ -317,29 +237,80 @@ class FactoryACPClient:
             await self.stop()
             raise
 
-    def _decorate_first_turn_prompt(
-        self, prompt: str, attached_skills: list[Path]
+    @staticmethod
+    def _format_resource_entry(path: Path, *, kind: str) -> str:
+        """Format a skill or instruction path with optional YAML frontmatter summary."""
+        meta = parse_frontmatter_summary(path)
+        parts: list[str] = []
+        if kind == "skill" and meta.get("name"):
+            parts.append(f"**{meta['name']}**")
+        if kind == "instruction" and meta.get("applyTo"):
+            parts.append(f"applies to `{meta['applyTo']}`")
+        if meta.get("description"):
+            parts.append(meta["description"])
+        if parts:
+            return f"- `{path}` — {' | '.join(parts)}"
+        return f"- `{path}`"
+
+    @classmethod
+    def _format_skill_block(
+        cls,
+        heading: str,
+        intro: str,
+        skills: list[Path],
+        *,
+        script_label: str = "Validation Script",
     ) -> str:
-        """Prepend persona instructions and active skill references on the initial turn."""
+        """Render a Markdown skill section with frontmatter summaries, templates, and scripts."""
+        lines = [heading, intro]
+        for sp in skills:
+            lines.append(cls._format_resource_entry(sp, kind="skill"))
+            templates_dir = sp.parent / "templates"
+            if templates_dir.is_dir():
+                for tmpl in sorted(templates_dir.glob("*.md")):
+                    lines.append(f"  - Template: `{tmpl}`")
+            scripts_dir = sp.parent / "scripts"
+            if scripts_dir.is_dir():
+                for script in sorted(scripts_dir.glob("*.py")):
+                    lines.append(f"  - {script_label}: `{script}`")
+        return "\n".join(lines)
+
+    def _decorate_first_turn_prompt(
+        self,
+        prompt: str,
+        attached_skills: list[Path],
+        attached_instructions: list[Path] | None = None,
+        discovered_skills: list[Path] | None = None,
+    ) -> str:
+        """Prepend persona, domain instructions, and active/workspace skill references on turn 1."""
         sections: list[str] = []
         if self.persona_text:
             sections.append(f"# Agent Persona & Role\n{self.persona_text}")
+        if attached_instructions:
+            instr_lines = [
+                "# Domain & Policy Instructions",
+                "Read and follow the applicable domain/policy instructions:",
+            ]
+            for ip in attached_instructions:
+                instr_lines.append(self._format_resource_entry(ip, kind="instruction"))
+            sections.append("\n".join(instr_lines))
         if attached_skills:
-            skill_lines = ["# Active Skills"]
-            skill_lines.append(
-                "Read and follow the instructions, templates, and validation scripts in these attached skill packages:"
+            sections.append(
+                self._format_skill_block(
+                    "# Active Skills",
+                    "Read and follow the instructions, templates, and validation scripts in these attached skill packages:",
+                    attached_skills,
+                )
             )
-            for sp in attached_skills:
-                skill_lines.append(f"- `{sp}`")
-                templates_dir = sp.parent / "templates"
-                if templates_dir.is_dir():
-                    for tmpl in sorted(templates_dir.glob("*.md")):
-                        skill_lines.append(f"  - Template: `{tmpl}`")
-                scripts_dir = sp.parent / "scripts"
-                if scripts_dir.is_dir():
-                    for script in sorted(scripts_dir.glob("*.py")):
-                        skill_lines.append(f"  - Validation Script: `{script}`")
-            sections.append("\n".join(skill_lines))
+        if discovered_skills:
+            sections.append(
+                self._format_skill_block(
+                    "# Available Workspace Skills",
+                    "Read and use any skill below only when relevant to the task (based on its description):",
+                    discovered_skills,
+                    script_label="Helper Script",
+                )
+            )
         sections.append(prompt)
         return "\n\n".join(sections)
 
@@ -359,6 +330,9 @@ class FactoryACPClient:
 
         effective_prompt = prompt
         if not self._persona_injected:
+            for ip in self.instruction_paths:
+                if ip not in turn_resources:
+                    turn_resources.append(ip)
             for sp in self.skill_paths:
                 if sp not in turn_resources:
                     turn_resources.append(sp)
@@ -367,9 +341,12 @@ class FactoryACPClient:
                     for tmpl in sorted(templates_dir.glob("*.md")):
                         if tmpl not in turn_resources:
                             turn_resources.append(tmpl)
-            if self.persona_text or self.skill_paths:
+            if self.persona_text or self.skill_paths or self.instruction_paths:
                 effective_prompt = self._decorate_first_turn_prompt(
-                    prompt, self.skill_paths
+                    prompt,
+                    self.explicit_skill_paths,
+                    self.instruction_paths,
+                    self.discovered_skill_paths,
                 )
             self._persona_injected = True
 

@@ -15,5 +15,6 @@ build/
 # acp-factory runtime artifacts & worktrees
 .factory/runs/
 .worktrees/
+.agents/
 demos/
 apm_modules/
