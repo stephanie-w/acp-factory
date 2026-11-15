@@ -343,6 +343,33 @@ def test_history_cmd_fleet_config_override(tmp_path: Path) -> None:
     assert overridden_data[0]["repo_slug"] == "demo/override"
 
 
+def test_history_cmd_no_fleet_overrides_fleet_config(tmp_path: Path) -> None:
+    _write_run(tmp_path / ".factory" / "runs", "local-run", "2026-11-13T16:00:00+00:00")
+    repo_fleet = tmp_path / "repo-fleet"
+    _write_run(
+        repo_fleet / ".factory" / "runs", "fleet-run", "2026-11-13T17:00:00+00:00"
+    )
+    fleet_file = _write_fleet_config(
+        tmp_path / "fleet.toml", {"demo/fleet": str(repo_fleet)}
+    )
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(
+            workspace=tmp_path,
+            fleet=False,
+            fleet_config_file=fleet_file,
+            limit=10,
+            json_output=True,
+        )
+
+    data = json.loads(out.getvalue())
+    assert [r["run_id"] for r in data] == ["local-run"]
+
+
 def test_history_cmd_fleet_json(tmp_path: Path) -> None:
     repo_a = tmp_path / "repo-a"
     repo_b = tmp_path / "repo-b"

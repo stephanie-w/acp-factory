@@ -96,6 +96,24 @@ def _quiet_display(ctx: typer.Context) -> FactoryDisplay | None:
     return None
 
 
+def _resolve_use_fleet(
+    fleet: bool | None,
+    fleet_config_file: Path | None,
+    base_cfg: FactoryConfig,
+) -> bool:
+    """Decide whether fleet mode is active for `next`, `status`, and `history`.
+
+    An explicit `--fleet-config` enables fleet mode unless `--no-fleet` is passed;
+    otherwise an explicit `--fleet`/`--no-fleet` wins, falling back to whether the
+    resolved config already declares a `[fleet]` section.
+    """
+    if fleet_config_file is not None:
+        return fleet is not False
+    if fleet is not None:
+        return fleet
+    return base_cfg.fleet is not None
+
+
 STARTER_CONFIG_YAML = """\
 # factory.yaml — acp-factory configuration
 version: "1"
@@ -937,11 +955,7 @@ def next_cmd(
         eff_max_cost = max_cost if max_cost is not None else budget.get("max_cost")
         eff_max_turns = max_turns if max_turns is not None else budget.get("max_turns")
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-        use_fleet = (
-            fleet is not False
-            if fleet_config_file is not None
-            else (fleet if fleet is not None else (base_cfg.fleet is not None))
-        )
+        use_fleet = _resolve_use_fleet(fleet, fleet_config_file, base_cfg)
 
         if use_fleet:
             from .runner.loop import run_fleet_next
@@ -1100,11 +1114,7 @@ def status_cmd(
 
     async def _show_status() -> None:
         base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-        use_fleet = (
-            fleet is not False
-            if fleet_config_file is not None
-            else (fleet if fleet is not None else (base_cfg.fleet is not None))
-        )
+        use_fleet = _resolve_use_fleet(fleet, fleet_config_file, base_cfg)
 
         if use_fleet:
             from .runner.loop import collect_fleet_status
@@ -1306,11 +1316,7 @@ def history_cmd(
     """
     resolved_workspace = workspace.resolve()
     base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
-    use_fleet = (
-        fleet is not False
-        if fleet_config_file is not None
-        else (fleet if fleet is not None else (base_cfg.fleet is not None))
-    )
+    use_fleet = _resolve_use_fleet(fleet, fleet_config_file, base_cfg)
 
     if use_fleet:
         records = list_fleet_run_history(base_cfg.with_fleet_overlay(fleet_config_file))
