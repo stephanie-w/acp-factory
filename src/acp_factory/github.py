@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,7 +16,9 @@ from .task import (
     StageVerdict,
     TaskContext,
     clean_spec_block,
+    extract_pr_review_section,
     render_issue_body,
+    render_pr_body_with_review,
 )
 
 
@@ -128,7 +131,7 @@ async def _merge_open_pr_feedback(
         "view",
         str(open_pr["number"]),
         "--json",
-        "comments,reviews",
+        "comments,reviews,body",
     ]
     if repo_slug:
         view_cmd.extend(["--repo", repo_slug])
@@ -140,6 +143,9 @@ async def _merge_open_pr_feedback(
         feedback.get("comments") or [],
         feedback.get("reviews") or [],
     )
+    body = feedback.get("body")
+    if isinstance(body, str):
+        task.pr_review_body = extract_pr_review_section(body)
 
 
 async def list_actionable_issues(
@@ -342,6 +348,46 @@ async def update_issue_factory_block(
     return full_body
 
 
+async def update_pr_review_section(
+    task: TaskContext,
+    review_report: str,
+    cwd: Path,
+    *,
+    repo_slug: str | None = None,
+) -> str:
+    """Update the managed review section in the open PR body, preserving all other text.
+
+    The PR body is re-fetched immediately before editing so human edits made during
+    the review run are never overwritten.
+    """
+    list_cmd = [
+        "pr",
+        "list",
+        "--head",
+        task.branch,
+        "--state",
+        "open",
+        "--json",
+        "number,body",
+    ]
+    if repo_slug:
+        list_cmd.extend(["--repo", repo_slug])
+    list_out = await run_gh(list_cmd, cwd=cwd)
+    open_prs = json.loads(list_out) if list_out else []
+    if not isinstance(open_prs, list) or not open_prs:
+        raise GitHubError(f"No open PR found for branch {task.branch}")
+    open_pr = open_prs[0]
+    if not isinstance(open_pr, dict) or "number" not in open_pr:
+        raise GitHubError(f"Malformed PR payload for branch {task.branch}")
+
+    new_body = render_pr_body_with_review(str(open_pr.get("body") or ""), review_report)
+    edit_cmd = ["pr", "edit", str(open_pr["number"]), "--body-file", "-"]
+    if repo_slug:
+        edit_cmd.extend(["--repo", repo_slug])
+    await run_gh(edit_cmd, cwd=cwd, input_text=new_body)
+    return new_body
+
+
 LABEL_COLOR_MAP: dict[str, str] = {
     "factory:triage": "D4C5F9",
     "factory:spec": "C2E0C6",
@@ -353,6 +399,14 @@ LABEL_COLOR_MAP: dict[str, str] = {
     "factory:completed": "0E8A16",
     "factory:needs-human": "D93F0B",
 }
+
+
+def _extract_pr_number(pr_url: str | None) -> str | None:
+    """Extract a PR number from a GitHub pull request URL, or None when malformed."""
+    if not pr_url:
+        return None
+    match = re.search(r"/pull/(\d+)", pr_url)
+    return match.group(1) if match else None
 
 
 def _extract_repo_slug(url: str) -> str | None:
@@ -456,6 +510,27 @@ async def push_and_create_or_update_pr(
     if existing:
         pr_num = str(existing[0]["number"])
         pr_url = str(existing[0]["url"])
+        current_json = await run_gh(
+            [
+                "pr",
+                "view",
+                pr_num,
+                "--json",
+                "body",
+                *(["--repo", repo_slug] if repo_slug else []),
+            ],
+            cwd=cwd,
+        )
+        current = json.loads(current_json) if current_json else {}
+        current_body = (
+            str(current.get("body") or "") if isinstance(current, dict) else ""
+        )
+        review_report = extract_pr_review_section(pr_body)
+        updated_body = (
+            render_pr_body_with_review(current_body, review_report)
+            if current_body and review_report
+            else full_pr_body
+        )
         await run_gh(
             [
                 "pr",
@@ -468,7 +543,7 @@ async def push_and_create_or_update_pr(
                 *(["--repo", repo_slug] if repo_slug else []),
             ],
             cwd=cwd,
-            input_text=full_pr_body,
+            input_text=updated_body,
         )
         task.pr_url = pr_url
         return pr_url
@@ -620,6 +695,8 @@ def build_issue_pr_body(
     body = f"## Summary\n{verdict.summary}\n\n## Specification\n{spec_text}"
     if reviewed_sha:
         body += f"\n\nReviewed-SHA: `{reviewed_sha}`"
+    if verdict.review_report.strip():
+        body = render_pr_body_with_review(body, verdict.review_report)
     return body
 
 
@@ -663,7 +740,8 @@ def build_dry_run_gh_plan(
             f"gh issue edit {task.issue_number}{repo_flag} --body-file {shlex.quote(str(rel_issue_file))}"
         )
 
-    # 2. PR push & create command (if review accepted)
+    # 2. PR body update/create commands (review reports live in the managed PR section)
+    pr_ref = _extract_pr_number(task.pr_url) or task.pr_url
     if verdict.publish_pr:
         pr_title = f"{task.title} (#{task.issue_number})"
         inner_body = build_issue_pr_body(task, verdict, reviewed_sha=reviewed_sha)
@@ -675,9 +753,24 @@ def build_dry_run_gh_plan(
             f"git -C {shlex.quote(str(ws_resolved))} " if outside_workspace else "git "
         )
         commands.append(f"{git_prefix}push -u origin {shlex.quote(task.branch)}")
+        if pr_ref:
+            commands.append(
+                f"gh pr edit {shlex.quote(pr_ref)}{repo_flag} "
+                f"--body-file {shlex.quote(str(rel_pr_file))}"
+            )
+        else:
+            commands.append(
+                f"gh pr create{repo_flag} --head {shlex.quote(task.branch)} "
+                f"--title {shlex.quote(pr_title)} "
+                f"--body-file {shlex.quote(str(rel_pr_file))}"
+            )
+    elif task.pr_url and verdict.review_report.strip():
+        inner_body = build_issue_pr_body(task, verdict, reviewed_sha=reviewed_sha)
+        pr_body_file = out_dir / f"pr-{task.issue_number}-body.md"
+        pr_body_file.write_text(f"{inner_body.strip()}\n", encoding="utf-8")
+        rel_pr_file = _rel_or_abs(pr_body_file, path_base)
         commands.append(
-            f"gh pr create{repo_flag} --head {shlex.quote(task.branch)} "
-            f"--title {shlex.quote(pr_title)} "
+            f"gh pr edit {shlex.quote(pr_ref or '')}{repo_flag} "
             f"--body-file {shlex.quote(str(rel_pr_file))}"
         )
 

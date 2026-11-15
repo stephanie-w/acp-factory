@@ -352,7 +352,7 @@ async def test_fetch_issue_merges_pr_feedback(tmp_path: Path) -> None:
         "view",
         "88",
         "--json",
-        "comments,reviews",
+        "comments,reviews,body",
         "--repo",
         "acme/api",
     ]
@@ -1326,3 +1326,366 @@ async def test_run_gh_factory_token_override(tmp_path: Path) -> None:
         await run_gh(["issue", "view", "1"], cwd=tmp_path)
 
     assert captured.get("env") is None
+
+
+def test_render_pr_body_preserves_external_text() -> None:
+    from acp_factory.task import (
+        FACTORY_REVIEW_END,
+        FACTORY_REVIEW_START,
+        extract_pr_review_section,
+        render_pr_body_with_review,
+    )
+
+    original = "Human-written intro.\n\n## Summary\nKeep this section.\n"
+    rendered = render_pr_body_with_review(original, "## Findings\n- first")
+
+    assert rendered.startswith("Human-written intro.\n\n## Summary\nKeep this section.")
+    assert FACTORY_REVIEW_START in rendered
+    assert FACTORY_REVIEW_END in rendered
+    assert extract_pr_review_section(rendered) == "## Findings\n- first"
+
+    updated = render_pr_body_with_review(rendered, "## Findings\n- second")
+    assert updated.count(FACTORY_REVIEW_START) == 1
+    assert "first" not in updated
+    assert "## Findings\n- second" in extract_pr_review_section(updated)
+    assert "Human-written intro." in updated
+    assert "Keep this section." in updated
+
+    assert extract_pr_review_section("no managed review section") == ""
+
+    empty = render_pr_body_with_review("", "## Findings\n- only")
+    assert extract_pr_review_section(empty) == "## Findings\n- only"
+
+    dangling = render_pr_body_with_review(
+        "Human note.\n<!-- factory:review:start -->\nstale text", "## Findings\n- new"
+    )
+    assert dangling.count(FACTORY_REVIEW_START) == 1
+    assert "stale text" not in dangling
+    assert "Human note." in dangling
+    assert extract_pr_review_section(dangling) == "## Findings\n- new"
+
+    with pytest.raises(ValueError, match="review_report"):
+        render_pr_body_with_review(original, "   ")
+
+
+async def test_pr_review_body_ingestion_and_context(tmp_path: Path) -> None:
+    pr_list = [{"number": 88, "url": "https://github.com/acme/api/pull/88"}]
+    pr_view = {
+        "body": (
+            "Human PR note.\n"
+            "<!-- factory:review:start -->\n"
+            "## Findings\n- Add integration tests.\n"
+            "<!-- factory:review:end -->\n"
+            "Human footer."
+        ),
+        "comments": [],
+        "reviews": [],
+    }
+    calls: list[list[str]] = []
+
+    async def fake_run_gh(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        calls.append(args)
+        if args[:2] == ["issue", "view"]:
+            return json.dumps(_issue_payload())
+        if args[:2] == ["pr", "list"]:
+            return json.dumps(pr_list)
+        if args[:2] == ["pr", "view"]:
+            return json.dumps(pr_view)
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=fake_run_gh)):
+        task = await fetch_issue(42, tmp_path, repo_slug="acme/api")
+
+    assert task.pr_review_body == "## Findings\n- Add integration tests."
+    assert calls[2] == [
+        "pr",
+        "view",
+        "88",
+        "--json",
+        "comments,reviews,body",
+        "--repo",
+        "acme/api",
+    ]
+
+    prompt_ctx = format_task_prompt_context(task)
+    assert "## Latest PR Review Findings" in prompt_ctx
+    assert "## Findings\n- Add integration tests." in prompt_ctx
+    assert "Human PR note." not in prompt_ctx
+
+    task_without_review = TaskContext(issue_number=1, title="No PR review")
+    assert "## Latest PR Review Findings" not in format_task_prompt_context(
+        task_without_review
+    )
+
+
+async def test_update_pr_review_section_refetches_and_preserves(tmp_path: Path) -> None:
+    from acp_factory.github import update_pr_review_section
+    from acp_factory.task import FACTORY_REVIEW_START, extract_pr_review_section
+
+    task = TaskContext(
+        issue_number=42,
+        title="Add category filter",
+        branch="factory/issue-42",
+        pr_url="https://github.com/acme/api/pull/88",
+    )
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def fake_run_gh(
+        args: list[str], cwd: Path, *, input_text: str | None = None
+    ) -> str:
+        calls.append((args, input_text))
+        if args[:2] == ["pr", "list"]:
+            return json.dumps(
+                [
+                    {
+                        "number": 88,
+                        "body": (
+                            "Human PR description.\n"
+                            "<!-- factory:review:start -->\n"
+                            "## Findings\n- old finding\n"
+                            "<!-- factory:review:end -->\n"
+                            "Human footer."
+                        ),
+                    }
+                ]
+            )
+        if args[:2] == ["pr", "edit"]:
+            return ""
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with patch("acp_factory.github.run_gh", new=AsyncMock(side_effect=fake_run_gh)):
+        new_body = await update_pr_review_section(
+            task, "## Findings\n- new finding", tmp_path, repo_slug="acme/api"
+        )
+
+    assert calls[0][0] == [
+        "pr",
+        "list",
+        "--head",
+        "factory/issue-42",
+        "--state",
+        "open",
+        "--json",
+        "number,body",
+        "--repo",
+        "acme/api",
+    ]
+    assert calls[1][0] == [
+        "pr",
+        "edit",
+        "88",
+        "--body-file",
+        "-",
+        "--repo",
+        "acme/api",
+    ]
+    assert calls[1][1] == new_body
+    assert "Human PR description." in new_body
+    assert "Human footer." in new_body
+    assert "old finding" not in new_body
+    assert new_body.count(FACTORY_REVIEW_START) == 1
+    assert extract_pr_review_section(new_body) == "## Findings\n- new finding"
+
+
+async def test_review_updates_pr_body_when_pr_exists(tmp_path: Path) -> None:
+    task = TaskContext(
+        issue_number=21,
+        title="Add filter",
+        original_body="orig",
+        factory_block=replace_factory_findings(
+            "## Specification\n- Add filter.",
+            "## Findings\n- stale fallback finding",
+            round_num=1,
+            max_rounds=3,
+        ),
+        labels=[LABEL_REVIEW],
+        pr_url="https://github.com/acme/api/pull/88",
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.3,
+        last_response_text="## Findings\n- Add tests.\nSTATUS: REVISION_NEEDED",
+    )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.run_factory", new=AsyncMock(return_value=outcome)
+        ),
+        patch(
+            "acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()
+        ) as mock_issue,
+        patch(
+            "acp_factory.runner.loop.update_pr_review_section", new=AsyncMock()
+        ) as mock_pr_review,
+        patch("acp_factory.runner.loop.transition_issue_label", new=AsyncMock()),
+        patch(
+            "acp_factory.runner.loop.push_and_create_or_update_pr", new=AsyncMock()
+        ) as mock_pr,
+    ):
+        res = await run_issue_stage(tmp_path, 21)
+
+    assert res.stage_verdict is not None
+    assert res.stage_verdict.target_label == LABEL_BUILD
+    mock_pr_review.assert_awaited_once()
+    assert "Add tests." in mock_pr_review.call_args.args[1]
+    assert mock_pr_review.call_args.kwargs["cwd"] == tmp_path.resolve()
+
+    issue_block = mock_issue.call_args.args[1]
+    assert "factory:findings" not in issue_block
+    assert "Add tests." not in issue_block
+    assert "stale fallback finding" not in issue_block
+    mock_pr.assert_not_awaited()
+
+
+async def test_review_accept_with_existing_pr_embeds_section_without_double_edit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".worktrees" / "issue-22").mkdir(parents=True)
+    task = TaskContext(
+        issue_number=22,
+        title="Add filter",
+        original_body="orig",
+        factory_block="## Specification\n- Add filter.",
+        labels=[LABEL_REVIEW],
+        pr_url="https://github.com/acme/api/pull/88",
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.3,
+        last_response_text="Looks good.\nSTATUS: ACCEPTED",
+    )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.run_factory", new=AsyncMock(return_value=outcome)
+        ),
+        patch(
+            "acp_factory.runner.loop.get_head_sha",
+            new=AsyncMock(return_value="pre-sha"),
+        ),
+        patch(
+            "acp_factory.runner.loop.is_worktree_clean",
+            new=AsyncMock(return_value=True),
+        ),
+        patch("acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()),
+        patch(
+            "acp_factory.runner.loop.update_pr_review_section", new=AsyncMock()
+        ) as mock_pr_review,
+        patch(
+            "acp_factory.runner.loop.push_and_create_or_update_pr", new=AsyncMock()
+        ) as mock_pr,
+        patch("acp_factory.runner.loop.transition_issue_label", new=AsyncMock()),
+    ):
+        res = await run_issue_stage(tmp_path, 22)
+
+    assert res.stage_verdict is not None
+    assert res.stage_verdict.target_label == LABEL_PR_READY
+    mock_pr_review.assert_not_awaited()
+    mock_pr.assert_awaited_once()
+    pr_body = mock_pr.call_args.kwargs["pr_body"]
+    assert "<!-- factory:review:start -->" in pr_body
+    assert "Looks good." in pr_body
+
+
+async def test_review_maintains_issue_meta(tmp_path: Path) -> None:
+    from acp_factory.acp.events import UsageTotals
+
+    (tmp_path / ".worktrees" / "issue-23").mkdir(parents=True)
+    task = TaskContext(
+        issue_number=23,
+        title="Add filter",
+        original_body="orig",
+        factory_block=set_factory_meta(
+            "## Specification\n- Add filter.",
+            stage="review",
+            review_round="1",
+        ),
+        labels=[LABEL_REVIEW],
+        pr_url="https://github.com/acme/api/pull/88",
+    )
+    outcome = FactoryRunOutcome(
+        succeeded=True,
+        exit_code=0,
+        attempts_used=1,
+        total_duration_seconds=0.3,
+        last_response_text="## Findings\n- Still missing tests.\nSTATUS: REVISION_NEEDED",
+        usage=UsageTotals(tokens=1234, cost_usd=0.5, turns=2),
+    )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.run_factory", new=AsyncMock(return_value=outcome)
+        ),
+        patch(
+            "acp_factory.runner.loop.get_head_sha",
+            new=AsyncMock(return_value="pre-sha"),
+        ),
+        patch(
+            "acp_factory.runner.loop.is_worktree_clean",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()
+        ) as mock_issue,
+        patch("acp_factory.runner.loop.update_pr_review_section", new=AsyncMock()),
+        patch("acp_factory.runner.loop.transition_issue_label", new=AsyncMock()),
+    ):
+        await run_issue_stage(tmp_path, 23)
+
+    issue_block = mock_issue.call_args.args[1]
+    meta = parse_factory_meta(issue_block)
+    assert meta["review_round"] == "2"
+    assert meta["last_reviewed_sha"] == "pre-sha"
+    assert meta["tokens"] == "1234"
+    assert meta["cost"] == "0.5"
+    assert meta["turns"] == "2"
+    assert "factory:findings" not in issue_block
+    assert "Still missing tests." not in issue_block
+
+
+def test_dry_run_pr_edit_plan(tmp_path: Path) -> None:
+    from acp_factory.github import build_dry_run_gh_plan
+
+    task = TaskContext(
+        issue_number=35,
+        title="Add filter",
+        original_body="orig",
+        url="https://github.com/acme/api/issues/35",
+        factory_block="## Specification\n- Add filter.",
+        labels=[LABEL_REVIEW],
+        pr_url="https://github.com/acme/api/pull/88",
+    )
+    verdict = parse_stage_verdict(
+        "review",
+        "## Findings\n- Add tests.\nSTATUS: REVISION_NEEDED",
+        current_factory_block=task.factory_block,
+        reviewed_sha="pre-sha",
+    )
+
+    plan = build_dry_run_gh_plan(
+        task,
+        verdict,
+        workspace=tmp_path,
+        run_dir=tmp_path / ".factory" / "runs" / "dry-run-test",
+        reviewed_sha="pre-sha",
+    )
+
+    assert plan.pr_body_file is not None
+    assert plan.pr_body_file.exists()
+    pr_body = plan.pr_body_file.read_text(encoding="utf-8")
+    assert "<!-- factory:review:start -->" in pr_body
+    assert "- Add tests." in pr_body
+    assert any(
+        command.startswith("gh pr edit 88") and "--body-file" in command
+        for command in plan.commands
+    )
+    assert any("pr-35-body.md" in command for command in plan.commands)

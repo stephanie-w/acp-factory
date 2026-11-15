@@ -34,6 +34,14 @@ _FACTORY_FINDINGS_RE = re.compile(
 )
 _FACTORY_FINDINGS_START_RE = re.compile(re.escape(FACTORY_FINDINGS_START))
 
+FACTORY_REVIEW_START = "<!-- factory:review:start -->"
+FACTORY_REVIEW_END = "<!-- factory:review:end -->"
+_FACTORY_REVIEW_RE = re.compile(
+    rf"{re.escape(FACTORY_REVIEW_START)}(.*?){re.escape(FACTORY_REVIEW_END)}",
+    re.DOTALL,
+)
+_FACTORY_REVIEW_START_RE = re.compile(re.escape(FACTORY_REVIEW_START))
+
 MAX_REVIEW_ROUNDS = 3
 
 LABEL_TRIAGE = "factory:triage"
@@ -252,6 +260,38 @@ def extract_factory_findings(factory_block: str) -> str:
     return factory_block[match.start(1) : match.end(1)].strip()
 
 
+def extract_pr_review_section(pr_body: str) -> str:
+    """Return the content between the managed PR review markers, without the markers."""
+    match = _FACTORY_REVIEW_RE.search(_mask_code_blocks(pr_body))
+    if not match:
+        return ""
+    return pr_body[match.start(1) : match.end(1)].strip()
+
+
+def render_pr_body_with_review(pr_body: str, review_report: str) -> str:
+    """Splice `review_report` into the managed PR review section, preserving all other text.
+
+    An existing managed section is replaced in place. When the body has no complete
+    section, a dangling start marker (and everything after it) is discarded before
+    appending a fresh managed section, so stale review text cannot linger.
+    """
+    report = review_report.strip()
+    if not report:
+        raise ValueError("review_report must be non-empty")
+    section = f"{FACTORY_REVIEW_START}\n{report}\n{FACTORY_REVIEW_END}"
+
+    masked = _mask_code_blocks(pr_body)
+    match = _FACTORY_REVIEW_RE.search(masked)
+    if match is not None:
+        return f"{pr_body[: match.start()]}{section}{pr_body[match.end() :]}"
+
+    dangling = _FACTORY_REVIEW_START_RE.search(masked)
+    base = pr_body[: dangling.start()].rstrip() if dangling is not None else pr_body
+    if not base.strip():
+        return section
+    return f"{base.rstrip()}\n\n{section}\n"
+
+
 def clean_spec_block(factory_block: str) -> str:
     """Return the specification content with internal meta, findings, and banner removed."""
     return strip_attribution_banner(
@@ -321,6 +361,7 @@ class TaskContext(BaseModel):
     branch: str = ""
     worktree_path: Path | None = None
     pr_url: str | None = None
+    pr_review_body: str = ""
 
     def model_post_init(self, __context: object) -> None:
         if not self.branch:
@@ -466,6 +507,11 @@ def format_task_prompt_context(task: TaskContext) -> str:
         lines.append(task.factory_block)
         lines.append("")
 
+    if task.pr_review_body.strip():
+        lines.append("## Latest PR Review Findings")
+        lines.append(task.pr_review_body.strip())
+        lines.append("")
+
     if task.comments:
         lines.append("## Human Comments (Chronological)")
         issue_idx = 0
@@ -499,6 +545,7 @@ class StageVerdict(BaseModel):
     updated_factory_block: str
     summary: str = ""
     publish_pr: bool = False
+    review_report: str = ""
 
 
 _STATUS_LINE_RE = re.compile(
@@ -636,6 +683,7 @@ def parse_stage_verdict(
                 updated_factory_block=clean_block,
                 summary=cleaned_body or "Review accepted -> PR ready for Human Gate 2",
                 publish_pr=True,
+                review_report=cleaned_body,
             )
 
         if raw_token in ("HUMAN_DECISION_NEEDED", "NEEDS_HUMAN", "STOP"):
@@ -652,6 +700,7 @@ def parse_stage_verdict(
                 target_label=LABEL_NEEDS_HUMAN,
                 updated_factory_block=merged_block,
                 summary="Review requires human decision",
+                review_report=cleaned_body,
             )
 
         # Default for FAIL / REVISION_NEEDED: replace findings in-place, track round,
@@ -684,6 +733,7 @@ def parse_stage_verdict(
                     f"Review loop hit the {max_review_rounds}-round circuit breaker -> "
                     "waiting for human decision"
                 ),
+                review_report=cleaned_body,
             )
 
         block = set_factory_meta(
@@ -698,6 +748,7 @@ def parse_stage_verdict(
             target_label=LABEL_BUILD,
             updated_factory_block=block,
             summary="Review requested revisions -> returning to factory:build",
+            review_report=cleaned_body,
         )
 
     return StageVerdict(

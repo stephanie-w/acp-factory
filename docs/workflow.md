@@ -91,7 +91,7 @@ stateDiagram-v2
 
 > **Fail-fast guard:** If a stage run's agent produces no output (the session aborts or fails before emitting any messages), the run fails immediately and the Issue transitions to `factory:needs-human` instead of advancing.
 
-> **Human Gate 2 feedback ingestion:** When a human requests changes on the Pull Request and sends the issue back to `factory:build`, the orchestrator checks for an open PR on `factory/issue-<id>`. If found, it ingests the PR conversation comments (`gh pr view --json comments`) and review submissions such as `CHANGES_REQUESTED` (`gh pr view --json reviews`) into the task context. Build and review agents therefore see the reviewer's PR feedback, rendered chronologically alongside Issue comments, without relying on a separate Issue comment.
+> **Human Gate 2 feedback ingestion:** When a human requests changes on the Pull Request and sends the issue back to `factory:build`, the orchestrator checks for an open PR on `factory/issue-<id>`. If found, it ingests the PR conversation comments (`gh pr view --json comments`), review submissions such as `CHANGES_REQUESTED` (`gh pr view --json reviews`), and the managed review section from the PR body (`gh pr view --json body`) into the task context. Build and review agents therefore see the reviewer's PR feedback, rendered chronologically alongside Issue comments and under `## Latest PR Review Findings`, without relying on a separate Issue comment.
 
 ### Stage Reference
 
@@ -116,9 +116,10 @@ stateDiagram-v2
 4. **`review` (`factory:review`)**:
    - **Mode**: Read-only (`read_only = true`), using a skeptical Reviewer persona and `llm_judge` skill (optionally with a distinct model or agent for cross-model verification).
    - **Action**: Reviews the local branch diff, commit messages, and test coverage against the spec in the Issue Body.
-   - **Transition**:
-     - If **accepted**: Orchestrator pushes `factory/issue-<id>`, opens/updates the GitHub Pull Request (`Closes #<id>`), and sets `factory:pr-ready` (**Human Gate 2**).
-     - If **revision needed**: Updates review findings in the Issue Body and sets `factory:build` for another build round (up to 3 review rounds).
+    - **Transition**:
+      - If **accepted**: Orchestrator pushes `factory/issue-<id>`, opens/updates the GitHub Pull Request (`Closes #<id>`), writes the review report into the PR body's managed `<!-- factory:review:start --> ... <!-- factory:review:end -->` section, and sets `factory:pr-ready` (**Human Gate 2**).
+      - If **revision needed**: Writes the review findings into the managed `<!-- factory:review:start/end -->` section of the **PR body** (preserving human-written text outside the markers) and sets `factory:build` for another build round (up to 3 review rounds). If no PR exists yet, findings fall back to the Issue Body's `<!-- factory:findings:start/end -->` block so the builder still receives feedback; once a PR exists, any stale Issue findings block is stripped.
+      - The Issue Body's `<!-- factory:meta -->` comment continues to track `stage`, `review_round`, `last_reviewed_sha`, `tokens`, `cost`, and `turns` for every review outcome.
 
 5. **`done` (`factory:done` or Issue `CLOSED`)**:
    - **Mode**: Orchestrator cleanup (no automatic PR merging).
