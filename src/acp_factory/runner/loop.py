@@ -631,6 +631,7 @@ async def run_factory(
             verbose=verbose,
             extra_env=config.env or None,
             strip_env=config.strip_env or None,
+            thought_max_chars=config.thought_max_chars,
         ) as acp_client:
             session_id = getattr(acp_client, "session_id", None)
             prompt = build_initial_prompt(

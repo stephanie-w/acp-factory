@@ -151,6 +151,39 @@ stateDiagram-v2
    - Target workspaces bring their own `apm.yml` and run `apm install` as a `pre` / `setup` command in `.factory/config.toml` (deploying project skills into `.agents/skills/` or `apm_modules/`).
    - `resolve_skill_paths` searches the target workspace first (`.factory/skills/`, `skills/`, `.agents/skills/`, `.apm/skills/`, `apm_modules/`) and falls back to `acp-factory`'s bundled `skills/` directory so built-in skills work out-of-the-box on any repository.
 
+### B. Stage Configuration Reference
+
+Each `[stages.<name>]` section accepts the following stage-specific overrides:
+
+| Key | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `agent` | string | inherited | acpterm agent alias for this stage. |
+| `command` | string or list | inherited | Explicit agent command. |
+| `model` | string | inherited | LLM model override. |
+| `mode` | string | inherited | Agent mode (e.g. `plan`, `code`). |
+| `read_only` | bool | inherited | Enforce read-only mode. |
+| `persona` | string | inherited | Persona Markdown path or inline text. |
+| `skills` | list | inherited | Skill paths or APM skill names. |
+| `prompt` | string | inherited | Stage prompt Markdown path or inline text. |
+| `pre` | list | inherited | Pre-stage setup commands. |
+| `checks` | list | inherited | Check names or inline check definitions. |
+| `timeout` | int | inherited | Per-turn timeout in seconds. |
+| `env` | table | inherited | Stage-specific environment variables. |
+| `strip_env` | list | inherited | Additional environment variable names to strip. |
+| `thought_max_chars` | int or null | `null` | Agent thought visibility/length in transcripts. `0` omits thoughts from `transcript.md` and `transcript.summary.json`; `N > 0` truncates to `N` characters; unset keeps full thoughts in `transcript.md`/`transcript.json` and the default 500-character `thought_preview`. Full reasoning is always preserved in `transcript.json` for `retro`. |
+
+A top-level `thought_max_chars` acts as the global default and is overridden by any stage-level value:
+
+```toml
+thought_max_chars = 500
+
+[stages.build]
+thought_max_chars = 0
+
+[stages.review]
+thought_max_chars = 1000
+```
+
 ---
 
 ## 4. Standalone Branch Review & Pull Request Creation (`acp-factory review`)

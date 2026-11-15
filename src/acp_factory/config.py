@@ -182,6 +182,15 @@ class StageConfig(BaseModel):
         default_factory=list,
         description="Stage-specific additional environment variable names to strip from workspace subprocesses",
     )
+    thought_max_chars: int | None = Field(
+        default=None,
+        ge=0,
+        strict=True,
+        description=(
+            "Maximum agent thought characters in markdown/condensed transcripts. "
+            "0 omits thoughts; unset preserves full markdown/history and the default summary preview."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -364,6 +373,15 @@ class FactoryConfig(BaseModel):
         default_factory=list,
         description="Additional environment variable names to strip from workspace subprocesses.",
     )
+    thought_max_chars: int | None = Field(
+        default=None,
+        ge=0,
+        strict=True,
+        description=(
+            "Default maximum agent thought characters in markdown/condensed transcripts. "
+            "Stage-level values override this."
+        ),
+    )
 
     _config_dir: Path | None = PrivateAttr(default=None)
 
@@ -527,6 +545,8 @@ class FactoryConfig(BaseModel):
             resolved.agent.skills = list(stage.skills)
         if stage.timeout is not None:
             resolved.agent.timeout = stage.timeout
+        if stage.thought_max_chars is not None:
+            resolved.thought_max_chars = stage.thought_max_chars
 
         # 2. Merge pre-setup commands
         if stage.pre:

@@ -112,6 +112,68 @@ def test_turn_summary_to_condensed_dict_truncation() -> None:
     assert "[truncated" in tc["raw_output"]["log"]
 
 
+def test_thought_max_chars_zero() -> None:
+    """AC-3: zero omits thoughts from markdown/summary, but transcript.json stays full."""
+    thought = "Internal reasoning that must not leak into output artifacts."
+    tracker = TurnEventTracker(initial_prompt="Initial prompt", thought_max_chars=0)
+    tracker.begin_turn("Turn 1")
+    tracker.recorder.add_thought(thought)
+    tracker.recorder.add_message("Done.")
+
+    summary = tracker.end_turn("end_turn")
+
+    assert "## Thinking" not in summary.transcript_markdown
+    assert summary.to_dict()["thought_text"] == thought
+    assert summary.to_condensed_dict()["thought_preview"] == ""
+    assert summary.thought_text == thought
+    assert tracker.recorder.thoughts == [thought]
+
+
+def test_thought_max_chars_truncated() -> None:
+    """AC-4: a positive cap truncates markdown and summary, but not transcript.json."""
+    thought = "A" * 40 + "B" * 40
+    tracker = TurnEventTracker(initial_prompt="Initial prompt", thought_max_chars=50)
+    tracker.begin_turn("Turn 1")
+    tracker.recorder.add_thought(thought)
+
+    summary = tracker.end_turn("end_turn")
+    truncated_prefix = "A" * 40 + "B" * 10
+
+    markdown = summary.transcript_markdown
+    assert "## Thinking" in markdown
+    assert truncated_prefix in markdown
+    assert "B" * 40 not in markdown
+    assert "[truncated 30 chars]" in markdown
+
+    assert summary.to_dict()["thought_text"] == thought
+    preview = summary.to_condensed_dict()["thought_preview"]
+    assert preview.startswith(truncated_prefix)
+    assert "[truncated 30 chars]" in preview
+    assert summary.thought_text == thought
+    assert tracker.recorder.thoughts == [thought]
+
+
+def test_thought_max_chars_none_default() -> None:
+    """AC-5: unset keeps full markdown/JSON thoughts and the 500-char summary preview."""
+    thought = "T" * 600
+    tracker = TurnEventTracker(initial_prompt="Initial prompt")
+    tracker.begin_turn("Turn 1")
+    tracker.recorder.add_thought(thought)
+
+    summary = tracker.end_turn("end_turn")
+
+    markdown = summary.transcript_markdown
+    assert "## Thinking" in markdown
+    assert thought in markdown
+    assert "[truncated" not in markdown
+
+    assert summary.to_dict()["thought_text"] == thought
+    preview = summary.to_condensed_dict()["thought_preview"]
+    assert preview.startswith("T" * 500)
+    assert "[truncated 100 chars]" in preview
+    assert summary.thought_text == thought
+
+
 def test_turn_event_tracker_lifecycle() -> None:
     tracker = TurnEventTracker(initial_prompt="Initial prompt")
     tracker.begin_turn("Turn 1 prompt")
