@@ -1944,3 +1944,47 @@ def test_build_issue_pr_body_accepted_does_not_duplicate_review_report() -> None
     assert pr_body.count("### Findings") == 1
     assert "Review accepted -> PR ready for Human Gate 2" in pr_body
     assert extract_pr_review_section(pr_body) == report_body
+
+
+def test_render_neutralizes_spurious_prose_hash_refs_only_in_managed_prose() -> None:
+    from acp_factory.task import (
+        extract_pr_description_section,
+        extract_pr_review_section,
+        render_issue_body,
+        render_pr_body_with_review,
+        render_pr_description_section,
+    )
+
+    human_original = "Human note mentioning Behavior #1 and Issue #29."
+    factory_block = (
+        "See Behavior #1, Step #2, and AC #3.\n"
+        "Preserve Issue #29, PR #41, Closes #29, and owner/repo#41.\n"
+        "Preserve inline `Behavior #1` and fenced:\n"
+        "```\n"
+        "Finding #4\n"
+        "```\n"
+    )
+    rendered_issue = render_issue_body(human_original, factory_block)
+    assert human_original in rendered_issue
+    assert "See Behavior 1, Step 2, and AC 3." in rendered_issue
+    assert (
+        "Preserve Issue #29, PR #41, Closes #29, and owner/repo#41." in rendered_issue
+    )
+    assert "`Behavior #1`" in rendered_issue
+    assert "```\nFinding #4\n```" in rendered_issue
+
+    desc = render_pr_description_section(
+        "Implements Behavior #1 and Criterion #2 (see PR #41)."
+    )
+    assert extract_pr_description_section(desc) == (
+        "Implements Behavior 1 and Criterion 2 (see PR #41)."
+    )
+
+    pr_body = render_pr_body_with_review(
+        "Human PR text: Behavior #1",
+        "1. The spec's Behavior #1 conflicts with Finding #2; see Issue #29 and `Step #3`.",
+    )
+    assert "Human PR text: Behavior #1" in pr_body
+    assert extract_pr_review_section(pr_body) == (
+        "1. The spec's Behavior 1 conflicts with Finding 2; see Issue #29 and `Step #3`."
+    )

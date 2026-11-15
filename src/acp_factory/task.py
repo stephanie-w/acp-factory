@@ -94,6 +94,27 @@ _CODE_BLOCK_RE = re.compile(
     r"(?P<fence>`{3,}|~{3,})[\s\S]*?(?P=fence)",
 )
 
+_PROSE_HASH_REF_RE = re.compile(
+    r"(?P<code_fence>`{3,}|~{3,})[\s\S]*?(?P=code_fence)"
+    r"|(?P<inline_code>`+)[^`\n]*?(?P=inline_code)"
+    r"|(?P<label>\b(?:ac|assumption|attempt|behavior|case|check|column|criteria|criterion|"
+    r"decision|example|finding|item|line|option|part|phase|point|requirement|round|rule|"
+    r"section|stage|step|test)s?)\s+#(?P<num>\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _neutralize_prose_hash_refs(text: str) -> str:
+    """Strip `#` from prose ordinal labels like `Behavior #1` so GitHub does not auto-link them."""
+
+    def _replace(match: re.Match[str]) -> str:
+        label = match.group("label")
+        if label is None:
+            return match.group(0)
+        return f"{label} {match.group('num')}"
+
+    return _PROSE_HASH_REF_RE.sub(_replace, text)
+
 
 def _mask_code_blocks(text: str) -> str:
     """Replace content inside markdown code fences with spaces to preserve character offsets."""
@@ -292,7 +313,7 @@ def _sanitize_review_report(report: str) -> str:
             else "<!-- factory:review:end (escaped) -->"
         )
         report = f"{report[:start]}{escaped}{report[end:]}"
-    return report
+    return _neutralize_prose_hash_refs(report)
 
 
 def render_pr_body_with_review(pr_body: str, review_report: str) -> str:
@@ -356,7 +377,7 @@ def extract_pr_description_section(pr_body: str) -> str:
 
 def render_pr_description_section(description: str) -> str:
     """Wrap factory-managed PR description text in its managed markers."""
-    clean = description.strip()
+    clean = _neutralize_prose_hash_refs(description.strip())
     if not clean:
         raise ValueError("description must be non-empty")
     return f"{FACTORY_PR_DESCRIPTION_START}\n{clean}\n{FACTORY_PR_DESCRIPTION_END}"
@@ -565,7 +586,7 @@ def split_issue_body(full_body: str) -> tuple[str, str]:
 def render_issue_body(original_body: str, factory_block: str) -> str:
     """Combine `original_body` and `factory_block` using `<!-- factory:start/end -->` markers."""
     clean_orig = original_body.strip()
-    clean_block = factory_block.strip()
+    clean_block = _neutralize_prose_hash_refs(factory_block.strip())
     if not clean_block:
         return clean_orig
 
