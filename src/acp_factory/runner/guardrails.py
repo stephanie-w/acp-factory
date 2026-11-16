@@ -285,12 +285,9 @@ def main(argv: list[str] | None = None) -> None:
     cwd = os.environ.get("ACPTERM_CWD", "").strip() or str(Path.cwd())
     res_dirs: list[str] = list(args.resources_dir)
     if not res_dirs:
-        env_dirs = _parse_env_json_list("FACTORY_RESOURCES_DIRS")
-        if env_dirs:
-            res_dirs.extend(env_dirs)
-        env_single = os.environ.get("FACTORY_RESOURCES_DIR", "").strip()
-        if env_single and env_single not in res_dirs:
-            res_dirs.append(env_single)
+        from ..resources.resolver import _parse_env_resource_dirs
+
+        res_dirs.extend(_parse_env_resource_dirs())
 
     allowed_paths = [
         *args.allow_path,

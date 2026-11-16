@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -366,6 +367,10 @@ def test_apm_lock_deployed_files_target_agnostic_and_deduplicated(
         ws / "apm_modules" / "org" / "pkg" / "instructions" / "style.instructions.md"
     ).write_text("# Raw Instruction", encoding="utf-8")
 
+    # Arbitrary workspace paths outside known APM directories must be ignored
+    (ws / "src" / "evil").mkdir(parents=True)
+    (ws / "src" / "evil" / "SKILL.md").write_text("# Evil", encoding="utf-8")
+
     (ws / "apm.lock.yaml").write_text(
         """lockfile_version: '1'
 dependencies:
@@ -373,6 +378,7 @@ dependencies:
     deployed_files:
       - .claude/skills/domain-skill/SKILL.md
       - .cursor/instructions/style.instructions.md
+      - src/evil/SKILL.md
 """,
         encoding="utf-8",
     )
@@ -384,3 +390,28 @@ dependencies:
     )
     assert resolved.skills == [deployed_skill]
     assert resolved.instructions == [deployed_instr]
+
+
+def test_guardrails_main_parses_pathsep_factory_resources_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guardrails hook parses os.pathsep-delimited FACTORY_RESOURCES_DIRS identically to resolver."""
+    from acp_factory.runner.guardrails import main as guardrails_main
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    res_a = tmp_path / "res_a"
+    res_b = tmp_path / "res_b"
+    res_a.mkdir()
+    res_b.mkdir()
+    target_b = res_b / "policy.md"
+    target_b.write_text("Policy", encoding="utf-8")
+
+    monkeypatch.setenv("ACPTERM_PERMISSION_KIND", "read")
+    monkeypatch.setenv("ACPTERM_PERMISSION_PATH", str(target_b))
+    monkeypatch.setenv("ACPTERM_CWD", str(ws))
+    monkeypatch.setenv("FACTORY_RESOURCES_DIRS", f"{res_a}{os.pathsep}{res_b}")
+
+    with pytest.raises(SystemExit) as exc_info:
+        guardrails_main([])
+    assert exc_info.value.code == 0

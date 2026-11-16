@@ -260,8 +260,25 @@ def resolve_persona_text(
     ).strip()
 
 
+_APM_DEPLOYED_PREFIXES = frozenset(
+    {
+        ".agents",
+        ".apm",
+        ".claude",
+        ".cursor",
+        ".codex",
+        ".gemini",
+        ".github",
+        ".kiro",
+        ".opencode",
+        ".windsurf",
+        "apm_modules",
+    }
+)
+
+
 def _iter_apm_lock_deployed_files(workspace: Path) -> list[Path]:
-    """Return existing deployed file paths recorded in `apm.lock.yaml`, if present."""
+    """Return existing deployed file paths recorded in `apm.lock.yaml` under known APM dirs."""
     ws = workspace.resolve()
     lock_file = ws / "apm.lock.yaml"
     if not lock_file.is_file():
@@ -288,7 +305,10 @@ def _iter_apm_lock_deployed_files(workspace: Path) -> list[Path]:
             if not isinstance(rel, str) or not rel.strip():
                 continue
             candidate = (ws / rel.strip()).resolve()
-            if candidate.is_relative_to(ws) and candidate.is_file():
+            if not (candidate.is_relative_to(ws) and candidate.is_file()):
+                continue
+            rel_parts = candidate.relative_to(ws).parts
+            if rel_parts and rel_parts[0] in _APM_DEPLOYED_PREFIXES:
                 deployed.append(candidate)
     return deployed
 
