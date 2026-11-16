@@ -246,6 +246,9 @@ def compute_transcript_stats(data: dict[str, Any], *, top: int = 10) -> dict[str
             }
         )
 
+    for bucket in by_kind_map.values():
+        bucket["estimated_tokens"] = bucket["total_output_chars"] // 4
+
     by_kind = sorted(by_kind_map.values(), key=lambda x: x["count"], reverse=True)
     timed = [c for c in call_rows if c["duration_seconds"] is not None]
     slowest_calls = sorted(
@@ -262,18 +265,22 @@ def compute_transcript_stats(data: dict[str, Any], *, top: int = 10) -> dict[str
     if cost_usd == 0.0 and isinstance(summary_block.get("cost_usd"), (int, float)):
         cost_usd = float(summary_block["cost_usd"])
 
-    text_chars = sum(
-        len(str(data.get(k) or ""))
-        for k in (
-            "prompt",
-            "prompt_preview",
-            "thought_text",
-            "thought_preview",
-            "response_text",
-            "response_preview",
-        )
+    prompt_chars = len(str(data.get("prompt") or data.get("prompt_preview") or ""))
+    thought_chars = len(
+        str(data.get("thought_text") or data.get("thought_preview") or "")
     )
-    estimated_tokens = (text_chars + total_output_chars) // 4
+    response_chars = len(
+        str(data.get("response_text") or data.get("response_preview") or "")
+    )
+    estimated_tokens_breakdown = {
+        "prompt": prompt_chars // 4,
+        "thought": thought_chars // 4,
+        "response": response_chars // 4,
+        "tool_output": total_output_chars // 4,
+    }
+    estimated_tokens = (
+        prompt_chars + thought_chars + response_chars + total_output_chars
+    ) // 4
 
     return {
         "duration_seconds": data.get("duration_seconds")
@@ -281,6 +288,7 @@ def compute_transcript_stats(data: dict[str, Any], *, top: int = 10) -> dict[str
         "tokens": tokens,
         "cost_usd": round(cost_usd, 6),
         "estimated_tokens": estimated_tokens,
+        "estimated_tokens_breakdown": estimated_tokens_breakdown,
         "tool_call_count": len(tool_calls),
         "failed_count": failed_count,
         "total_output_chars": total_output_chars,
@@ -300,7 +308,9 @@ def compute_runs_stats(
 
     total_duration = 0.0
     total_tokens = 0
+    total_estimated_tokens = 0
     total_cost = 0.0
+    telemetry_runs = 0
     succeeded_runs = 0
     failed_runs = 0
     stage_map: dict[str, dict[str, Any]] = {}
@@ -329,43 +339,21 @@ def compute_runs_stats(
             failed_runs += 1
 
         usage = rec.get("usage") or {}
-        if usage.get("telemetry_available") is True:
+        telemetry = usage.get("telemetry_available") is True
+        run_tokens = 0
+        run_cost = 0.0
+        if telemetry:
+            telemetry_runs += 1
             tok = usage.get("total_tokens")
             cost = usage.get("total_cost_usd")
             if isinstance(tok, (int, float)) and not isinstance(tok, bool):
-                total_tokens += int(tok)
+                run_tokens = int(tok)
+                total_tokens += run_tokens
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-                total_cost += float(cost)
+                run_cost = float(cost)
+                total_cost += run_cost
 
-        total_duration += dur_val
-        sb = stage_map.setdefault(
-            stage,
-            {
-                "stage": stage,
-                "runs": 0,
-                "succeeded": 0,
-                "total_duration_seconds": 0.0,
-                "total_attempts": 0,
-            },
-        )
-        sb["runs"] += 1
-        if succ is True:
-            sb["succeeded"] += 1
-        sb["total_duration_seconds"] += dur_val
-        sb["total_attempts"] += attempts_val
-
-        run_rows.append(
-            {
-                "run_id": run_id,
-                "stage": stage,
-                "model": str(rec.get("model") or "-"),
-                "issue_number": rec.get("issue_number"),
-                "attempts_used": attempts_val,
-                "duration_seconds": round(dur_val, 3),
-                "succeeded": succ,
-            }
-        )
-
+        run_estimated_tokens = 0
         run_dir = runs_dir / run_id
         if run_dir.is_dir():
             for attempt_dir in sorted(run_dir.glob("attempt-*")):
@@ -378,6 +366,7 @@ def compute_runs_stats(
                     logger.debug("Skipping unreadable transcript %s: %s", t_path, exc)
                     continue
                 t_stats = compute_transcript_stats(t_data, top=top)
+                run_estimated_tokens += int(t_stats["estimated_tokens"])
                 for row in t_stats["slowest_calls"]:
                     all_calls.append(
                         {"run_id": run_id, "attempt": attempt_dir.name, **row}
@@ -388,6 +377,49 @@ def compute_runs_stats(
                             {"run_id": run_id, "attempt": attempt_dir.name, **row}
                         )
 
+        total_estimated_tokens += run_estimated_tokens
+        total_duration += dur_val
+        sb = stage_map.setdefault(
+            stage,
+            {
+                "stage": stage,
+                "runs": 0,
+                "succeeded": 0,
+                "total_duration_seconds": 0.0,
+                "total_attempts": 0,
+                "total_tokens": 0,
+                "total_estimated_tokens": 0,
+                "total_cost_usd": 0.0,
+                "telemetry_runs": 0,
+            },
+        )
+        sb["runs"] += 1
+        if succ is True:
+            sb["succeeded"] += 1
+        sb["total_duration_seconds"] += dur_val
+        sb["total_attempts"] += attempts_val
+        sb["total_tokens"] += run_tokens
+        sb["total_estimated_tokens"] += run_estimated_tokens
+        sb["total_cost_usd"] += run_cost
+        if telemetry:
+            sb["telemetry_runs"] += 1
+
+        run_rows.append(
+            {
+                "run_id": run_id,
+                "stage": stage,
+                "model": str(rec.get("model") or "-"),
+                "issue_number": rec.get("issue_number"),
+                "attempts_used": attempts_val,
+                "duration_seconds": round(dur_val, 3),
+                "tokens": run_tokens,
+                "estimated_tokens": run_estimated_tokens,
+                "cost_usd": round(run_cost, 6),
+                "telemetry_available": telemetry,
+                "succeeded": succ,
+            }
+        )
+
     by_stage = [
         {
             "stage": sb["stage"],
@@ -395,12 +427,25 @@ def compute_runs_stats(
             "succeeded": sb["succeeded"],
             "avg_duration_seconds": round(sb["total_duration_seconds"] / sb["runs"], 2),
             "avg_attempts": round(sb["total_attempts"] / sb["runs"], 2),
+            "total_tokens": sb["total_tokens"],
+            "avg_tokens": round(sb["total_tokens"] / sb["runs"]),
+            "total_estimated_tokens": sb["total_estimated_tokens"],
+            "avg_estimated_tokens": round(sb["total_estimated_tokens"] / sb["runs"]),
+            "total_cost_usd": round(sb["total_cost_usd"], 6),
+            "telemetry_runs": sb["telemetry_runs"],
         }
         for sb in sorted(stage_map.values(), key=lambda x: x["runs"], reverse=True)
     ]
 
     slowest_runs = sorted(
         run_rows, key=lambda r: float(r["duration_seconds"]), reverse=True
+    )[:top]
+    top_token_runs = sorted(
+        run_rows,
+        key=lambda r: (
+            int(r["tokens"]) if int(r["tokens"]) > 0 else int(r["estimated_tokens"])
+        ),
+        reverse=True,
     )[:top]
     timed_calls = [c for c in all_calls if c.get("duration_seconds") is not None]
     slowest_calls = sorted(
@@ -419,9 +464,16 @@ def compute_runs_stats(
         if records
         else 0.0,
         "total_tokens": total_tokens,
+        "total_estimated_tokens": total_estimated_tokens,
+        "avg_tokens_per_run": round(total_tokens / len(records)) if records else 0,
+        "avg_estimated_tokens_per_run": round(total_estimated_tokens / len(records))
+        if records
+        else 0,
+        "telemetry_runs": telemetry_runs,
         "total_cost_usd": round(total_cost, 6),
         "by_stage": by_stage,
         "slowest_runs": slowest_runs,
+        "top_token_runs": top_token_runs,
         "slowest_calls": slowest_calls,
         "largest_calls": largest_calls,
     }

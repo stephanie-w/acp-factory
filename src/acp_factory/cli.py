@@ -1695,6 +1695,7 @@ def stats_cmd(
 
         dur = stats.get("duration_seconds")
         dur_str = f"{dur:.2f}s" if isinstance(dur, (int, float)) else "-"
+        bd = stats["estimated_tokens_breakdown"]
         console.print(
             f"[dim]Transcript:[/dim] {transcript_path}\n"
             f"[bold]Turn Duration:[/bold] {dur_str} | "
@@ -1703,7 +1704,11 @@ def stats_cmd(
             f"[bold]Output:[/bold] {stats['total_output_chars']:,} chars\n"
             f"[bold]Tokens:[/bold] {stats['tokens']:,} "
             f"[dim](~{stats['estimated_tokens']:,} est.)[/dim] | "
-            f"[bold]Cost:[/bold] ${stats['cost_usd']:.4f}"
+            f"[bold]Cost:[/bold] ${stats['cost_usd']:.4f}\n"
+            f"[dim]~Est. Breakdown: prompt {bd['prompt']:,} | "
+            f"thought {bd['thought']:,} | "
+            f"response {bd['response']:,} | "
+            f"tool output {bd['tool_output']:,}[/dim]"
         )
 
         kind_table = Table(title="Tool Calls by Kind")
@@ -1713,6 +1718,7 @@ def stats_cmd(
         kind_table.add_column("Total Dur", justify="right")
         kind_table.add_column("Max Dur", justify="right")
         kind_table.add_column("Output Chars", justify="right")
+        kind_table.add_column("~Est. Tok", justify="right", style="dim")
         for row in stats["by_kind"]:
             tot_d = (
                 f"{row['total_duration_seconds']:.2f}s" if row["timed_count"] else "-"
@@ -1729,6 +1735,7 @@ def stats_cmd(
                 tot_d,
                 max_d,
                 f"{row['total_output_chars']:,}",
+                f"~{row['estimated_tokens']:,}",
             )
         console.print(kind_table)
 
@@ -1776,13 +1783,27 @@ def stats_cmd(
         console.print("[dim]No factory runs found under `.factory/runs/`.[/dim]")
         return
 
+    def _tok_cell(tokens: int, est_tokens: int) -> str:
+        return f"{tokens:,}" if tokens > 0 else f"~{est_tokens:,}"
+
+    def _result_icon(succeeded: bool | None) -> str:
+        if succeeded is True:
+            return "[green]✓[/green]"
+        if succeeded is False:
+            return "[red]✗[/red]"
+        return "-"
+
+    avg_tok = _tok_cell(agg["avg_tokens_per_run"], agg["avg_estimated_tokens_per_run"])
     console.print(
         f"[bold]Runs:[/bold] {agg['total_runs']} "
         f"([green]{agg['succeeded_runs']} passed[/green], "
         f"[red]{agg['failed_runs']} failed[/red]) | "
         f"[bold]Total Dur:[/bold] {agg['total_duration_seconds']:.1f}s "
-        f"(avg {agg['avg_duration_seconds']:.1f}s) | "
-        f"[bold]Tokens:[/bold] {agg['total_tokens']:,} | "
+        f"(avg {agg['avg_duration_seconds']:.1f}s)\n"
+        f"[bold]Tokens:[/bold] {agg['total_tokens']:,} "
+        f"[dim](~{agg['total_estimated_tokens']:,} est.)[/dim] | "
+        f"[bold]Avg/run:[/bold] {avg_tok} | "
+        f"[bold]Telemetry:[/bold] {agg['telemetry_runs']}/{agg['total_runs']} runs | "
         f"[bold]Cost:[/bold] ${agg['total_cost_usd']:.4f}"
     )
 
@@ -1792,6 +1813,9 @@ def stats_cmd(
     stage_table.add_column("Passed", justify="right")
     stage_table.add_column("Avg Dur", justify="right")
     stage_table.add_column("Avg Attempts", justify="right")
+    stage_table.add_column("Tokens", justify="right", style="magenta")
+    stage_table.add_column("Avg Tok", justify="right", style="dim")
+    stage_table.add_column("Cost", justify="right", style="green")
     for sb in agg["by_stage"]:
         stage_table.add_row(
             sb["stage"],
@@ -1799,6 +1823,9 @@ def stats_cmd(
             str(sb["succeeded"]),
             f"{sb['avg_duration_seconds']:.1f}s",
             f"{sb['avg_attempts']:.2f}",
+            _tok_cell(sb["total_tokens"], sb["total_estimated_tokens"]),
+            _tok_cell(sb["avg_tokens"], sb["avg_estimated_tokens"]),
+            f"${sb['total_cost_usd']:.4f}",
         )
     console.print(stage_table)
 
@@ -1808,21 +1835,41 @@ def stats_cmd(
         runs_table.add_column("Stage", style="cyan", no_wrap=True)
         runs_table.add_column("Model")
         runs_table.add_column("Dur", justify="right", style="yellow")
+        runs_table.add_column("Tokens", justify="right", style="magenta")
+        runs_table.add_column("Cost", justify="right", style="green")
         runs_table.add_column("Result", no_wrap=True)
         for r in agg["slowest_runs"]:
-            res_icon = (
-                "[green]✓[/green]"
-                if r["succeeded"] is True
-                else ("[red]✗[/red]" if r["succeeded"] is False else "-")
-            )
             runs_table.add_row(
                 r["run_id"],
                 r["stage"],
                 r["model"],
                 f"{r['duration_seconds']:.1f}s",
-                res_icon,
+                _tok_cell(r["tokens"], r["estimated_tokens"]),
+                f"${r['cost_usd']:.4f}",
+                _result_icon(r["succeeded"]),
             )
         console.print(runs_table)
+
+    if agg["top_token_runs"]:
+        tok_table = Table(title=f"Top {len(agg['top_token_runs'])} Highest-Token Runs")
+        tok_table.add_column("Run ID", style="dim")
+        tok_table.add_column("Stage", style="cyan", no_wrap=True)
+        tok_table.add_column("Model")
+        tok_table.add_column("Tokens", justify="right", style="magenta")
+        tok_table.add_column("~Est. Tok", justify="right", style="dim")
+        tok_table.add_column("Cost", justify="right", style="green")
+        tok_table.add_column("Result", no_wrap=True)
+        for r in agg["top_token_runs"]:
+            tok_table.add_row(
+                r["run_id"],
+                r["stage"],
+                r["model"],
+                f"{r['tokens']:,}" if r["tokens"] > 0 else "-",
+                f"~{r['estimated_tokens']:,}",
+                f"${r['cost_usd']:.4f}",
+                _result_icon(r["succeeded"]),
+            )
+        console.print(tok_table)
 
     if agg["slowest_calls"]:
         calls_table = Table(title=f"Top {len(agg['slowest_calls'])} Slowest Tool Calls")
@@ -1846,6 +1893,7 @@ def stats_cmd(
         big_table.add_column("Attempt", style="dim")
         big_table.add_column("Kind", style="cyan", no_wrap=True)
         big_table.add_column("Chars", justify="right", style="magenta")
+        big_table.add_column("~Est. Tok", justify="right", style="dim")
         big_table.add_column("Title")
         for c in agg["largest_calls"]:
             big_table.add_row(
@@ -1853,6 +1901,7 @@ def stats_cmd(
                 c["attempt"],
                 c["kind"],
                 f"{c['output_chars']:,}",
+                f"~{c['output_chars'] // 4:,}",
                 c["title"],
             )
         console.print(big_table)

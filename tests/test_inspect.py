@@ -183,6 +183,12 @@ def test_cli_stats_single_and_aggregate(tmp_path: Path) -> None:
     assert single["tokens"] == 1200
     assert single["cost_usd"] == 0.0125
     assert single["estimated_tokens"] > 0
+    assert set(single["estimated_tokens_breakdown"]) == {
+        "prompt",
+        "thought",
+        "response",
+        "tool_output",
+    }
     assert single["slowest_calls"][0]["index"] == 0
     assert single["slowest_calls"][0]["duration_seconds"] == 4.25
 
@@ -191,9 +197,84 @@ def test_cli_stats_single_and_aggregate(tmp_path: Path) -> None:
     agg = json.loads(res_agg.stdout)
     assert agg["total_runs"] == 1
     assert agg["succeeded_runs"] == 1
+    assert agg["total_estimated_tokens"] == single["estimated_tokens"]
+    assert agg["telemetry_runs"] == 0
+    assert agg["top_token_runs"][0]["run_id"] == "20261115-120000-abcdef"
     assert agg["slowest_calls"][0]["duration_seconds"] == 4.25
 
     res_table = runner.invoke(app, ["stats", "--workspace", str(tmp_path)])
     assert res_table.exit_code == 0
     assert "Stats by Stage" in res_table.stdout
     assert "Top 1 Slowest Runs" in res_table.stdout
+    assert "Top 1 Highest-Token Runs" in res_table.stdout
+    assert "Telemetry:" in res_table.stdout
+
+
+def test_cli_stats_token_usage_telemetry_and_fallback(tmp_path: Path) -> None:
+    """Aggregate stats tracks reported tokens, cost, telemetry count, and ~est. fallback."""
+    t1 = _write_sample_run(
+        tmp_path, "20261115-120000-runone", started_at="2026-11-15T12:00:00Z"
+    )
+    (t1.parent.parent / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "20261115-120000-runone",
+                "started_at": "2026-11-15T12:00:00Z",
+                "stage": "build",
+                "model": "claude-sonnet",
+                "succeeded": True,
+                "duration_seconds": 10.0,
+                "attempts_used": 1,
+                "usage": {
+                    "total_tokens": 5000,
+                    "total_cost_usd": 0.05,
+                    "telemetry_available": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    t2 = _write_sample_run(
+        tmp_path, "20261115-130000-runtwo", started_at="2026-11-15T13:00:00Z"
+    )
+    (t2.parent.parent / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "20261115-130000-runtwo",
+                "started_at": "2026-11-15T13:00:00Z",
+                "stage": "triage",
+                "model": "deepseek-flash",
+                "succeeded": True,
+                "duration_seconds": 5.0,
+                "attempts_used": 1,
+                "usage": {
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0,
+                    "telemetry_available": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["stats", "--workspace", str(tmp_path), "--json"])
+    assert res.exit_code == 0
+    agg = json.loads(res.stdout)
+
+    assert agg["total_runs"] == 2
+    assert agg["telemetry_runs"] == 1
+    assert agg["total_tokens"] == 5000
+    assert agg["avg_tokens_per_run"] == 2500
+    assert agg["total_estimated_tokens"] > 0
+    assert agg["total_cost_usd"] == 0.05
+
+    by_stage = {row["stage"]: row for row in agg["by_stage"]}
+    assert by_stage["build"]["total_tokens"] == 5000
+    assert by_stage["build"]["total_cost_usd"] == 0.05
+    assert by_stage["triage"]["total_tokens"] == 0
+    assert by_stage["triage"]["total_estimated_tokens"] > 0
+
+    assert agg["top_token_runs"][0]["run_id"] == "20261115-120000-runone"
+    assert agg["top_token_runs"][1]["run_id"] == "20261115-130000-runtwo"
