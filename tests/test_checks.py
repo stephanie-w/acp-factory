@@ -710,11 +710,12 @@ def test_workspace_env_git_identity(tmp_path: Path) -> None:
 
 
 def test_workspace_env_token_override(tmp_path: Path) -> None:
+    # Host personal tokens are stripped by default; only the factory bot token is promoted.
     with patch.dict(
         "os.environ", {"GH_TOKEN": "human-token", "PATH": "/usr/bin"}, clear=True
     ):
         inherited = build_workspace_env(tmp_path)
-    assert inherited["GH_TOKEN"] == "human-token"
+    assert "GH_TOKEN" not in inherited
 
     with patch.dict(
         "os.environ",
@@ -727,13 +728,86 @@ def test_workspace_env_token_override(tmp_path: Path) -> None:
     ):
         overridden = build_workspace_env(tmp_path)
     assert overridden["GH_TOKEN"] == "bot-token"
+    assert "FACTORY_GH_TOKEN" not in overridden
 
-    # An empty FACTORY_GH_TOKEN must not clobber an intentional empty/inherited value.
+    # An explicit keep_env opt-in preserves the host token.
+    with patch.dict(
+        "os.environ", {"GH_TOKEN": "human-token", "PATH": "/usr/bin"}, clear=True
+    ):
+        kept = build_workspace_env(tmp_path, keep_env=["GH_TOKEN"])
+    assert kept["GH_TOKEN"] == "human-token"
+
+    # An empty FACTORY_GH_TOKEN must not create a GH_TOKEN value.
     with patch.dict(
         "os.environ", {"FACTORY_GH_TOKEN": "", "PATH": "/usr/bin"}, clear=True
     ):
         blank = build_workspace_env(tmp_path)
     assert "GH_TOKEN" not in blank
+
+
+@pytest.mark.parametrize(
+    "sensitive_key",
+    [
+        "GITHUB_TOKEN",
+        "OPENAI_API_KEY",
+        "OPENAI_APIKEY",
+        "MY_SECRET",
+        "DB_PASSWORD",
+        "DB_PASSWD",
+        "GCP_CREDENTIAL",
+        "AWS_SECRET_ACCESS_KEY",
+        "SSH_PRIVATE_KEY",
+        "ACCESS_KEY_ID",
+    ],
+)
+def test_build_workspace_env_sensitive_pattern_stripping(
+    tmp_path: Path, sensitive_key: str
+) -> None:
+    mock_env = {
+        sensitive_key: "host-secret-value",
+        "USER": "developer",
+        "PATH": "/usr/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path)
+
+    assert sensitive_key not in env
+    assert env.get("USER") == "developer"
+
+
+def test_build_workspace_env_keep_env_override(tmp_path: Path) -> None:
+    mock_env = {
+        "PYTHONPATH": "/opt/custom_python",
+        "OPENAI_API_KEY": "sk-host",
+        "GITHUB_TOKEN": "gh-host",
+        "PATH": "/usr/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path, keep_env=["PYTHONPATH", "OPENAI_API_KEY"])
+
+    assert env.get("PYTHONPATH") == "/opt/custom_python"
+    assert env.get("OPENAI_API_KEY") == "sk-host"
+    assert "GITHUB_TOKEN" not in env
+
+
+def test_build_workspace_env_strip_overrides_keep(tmp_path: Path) -> None:
+    mock_env = {
+        "OPENAI_API_KEY": "sk-host",
+        "NODE_OPTIONS": "--inspect",
+        "PATH": "/usr/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(
+            tmp_path,
+            keep_env=["OPENAI_API_KEY", "NODE_OPTIONS"],
+            strip_env=["OPENAI_API_KEY"],
+        )
+
+    assert "OPENAI_API_KEY" not in env
+    assert env.get("NODE_OPTIONS") == "--inspect"
 
 
 def test_build_workspace_env_custom_strip_and_extra_env(tmp_path: Path) -> None:

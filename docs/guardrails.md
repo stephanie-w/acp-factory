@@ -47,11 +47,25 @@ For `execute` / `command` / `bash` requests, commands are checked against:
 
 ## 3. Subprocess Environment Isolation (`runner/checks.py`)
 
-To prevent the orchestrator's own virtualenv or runtime from leaking into target repositories, `build_workspace_env()` strips `DEFAULT_HOST_ENV_STRIP` variables before spawning setup commands, checks, or ACP agents:
+To prevent the orchestrator's own virtualenv, runtime, or host credentials from leaking into target repositories, `build_workspace_env()` strips `DEFAULT_HOST_ENV_STRIP` variables and any host variable whose name matches `DEFAULT_SENSITIVE_ENV_PATTERNS` before spawning setup commands, checks, or ACP agents:
 
 - **Python / Conda:** `VIRTUAL_ENV`, `VIRTUAL_ENV_PROMPT`, `PYTHONPATH`, `PYTHONHOME`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`, `CONDA_PROMPT_MODIFIER`
 - **Node / npm:** `NODE_PATH`, `NODE_OPTIONS`, `INIT_CWD`, `npm_config_prefix`
 - **Ruby / Bundler:** `BUNDLE_GEMFILE`, `BUNDLE_BIN_PATH`, `GEM_HOME`, `GEM_PATH`, `RUBYOPT`
+- **Sensitive credential patterns (case-insensitive):** `TOKEN`, `API_?KEY`, `SECRET`, `PASS(?:WORD|WD)`, `CREDENTIAL`, `^AWS_`, `PRIVATE_?KEY`, `ACCESS_?KEY`
+
+### Allowlisting with `keep_env`
+
+Sensitive-pattern and `DEFAULT_HOST_ENV_STRIP` variables are stripped unless their exact name is listed in `keep_env` (global or per-stage, merged in insertion order). `strip_env` always takes precedence over `keep_env`, and explicit `env` / `extra_env` values are applied after filtering.
+
+```toml
+keep_env = ["OPENAI_API_KEY", "AWS_DEFAULT_REGION"]
+
+[stages.build]
+keep_env = ["CUSTOM_TEST_TOKEN"]
+```
+
+Host `GH_TOKEN` is stripped by default. When `FACTORY_GH_TOKEN` is set it is promoted to `GH_TOKEN` for `gh` subprocesses and the internal `FACTORY_GH_TOKEN` variable is not exposed; use `keep_env = ["GH_TOKEN"]` only to intentionally forward a personal token.
 
 ---
 

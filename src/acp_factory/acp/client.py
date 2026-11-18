@@ -80,6 +80,7 @@ class FactoryACPClient:
         read_only: bool | None = None,
         extra_env: dict[str, str] | None = None,
         strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
+        keep_env: list[str] | set[str] | tuple[str, ...] | None = None,
         guardrails: GuardrailsConfig | None = None,
         deny_runs: bool = False,
         thought_max_chars: int | None = None,
@@ -101,6 +102,7 @@ class FactoryACPClient:
         self.read_only = agent_config.read_only if read_only is None else read_only
         self.extra_env = extra_env
         self.strip_env = strip_env
+        self.keep_env = keep_env
         self.guardrails = guardrails or GuardrailsConfig()
         self.deny_runs = deny_runs
         self.thought_max_chars = thought_max_chars
@@ -207,6 +209,7 @@ class FactoryACPClient:
                     resources_dir=self.resources_dir,
                     extra_env=self.extra_env,
                     strip_env=self.strip_env,
+                    keep_env=self.keep_env,
                 ),
                 cwd=str(self.workspace),
                 stderr=stderr,
