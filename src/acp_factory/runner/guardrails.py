@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -94,6 +95,259 @@ _SAFE_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"}
 _ENV_FILE_CMD_RE = re.compile(
     r"(?:^|[\s/'\"=])\.env(?:\.(?!example\b|sample\b|template\b)[a-zA-Z0-9_.-]+)?(?=$|[\s'\";|&>])"
 )
+
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_PYTHON_NAME_RE = re.compile(r"(?:python|pythonw|pypy)\d*(?:\.\d+)*$")
+_SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash", "ash", "ksh", "fish"})
+_SHELL_CONTROL_CHARS = frozenset("|&;()")
+_ENV_OPTIONS_WITH_VALUE = frozenset({"-u", "--unset", "-C", "--chdir"})
+_ENV_OPTIONS_WITH_STRING = frozenset({"-S", "--split-string"})
+_ENV_INLINE_STRING_PREFIXES = ("--unset=", "--chdir=", "--split-string=")
+_UV_RUN_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "-p",
+        "--python",
+        "-w",
+        "--with",
+        "--group",
+        "--project",
+        "--directory",
+        "--env-file",
+        "--extra",
+        "--index",
+        "--index-url",
+        "--reinstall-package",
+        "--resolution",
+        "--prerelease",
+        "--exclude-newer",
+    }
+)
+
+
+def _is_assignment(arg: str) -> bool:
+    """Return True for shell ``NAME=value`` environment assignments."""
+    return _ASSIGNMENT_RE.match(arg) is not None
+
+
+def _is_quote_noise(arg: str) -> bool:
+    """Return True for fragments left behind by malformed or unbalanced quoting."""
+    return bool(arg) and all(char in "'\"" for char in arg)
+
+
+def _command_name(arg: str) -> str:
+    """Return the lowercase basename of an executable argument."""
+    return arg.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _environment_dump_reason(tool: str) -> str:
+    return f"Environment-dumping command '{tool}' is blocked"
+
+
+def _tokenize_command(cmd_str: str) -> list[str]:
+    """Tokenize a shell command, falling back to whitespace splitting on bad quoting."""
+    try:
+        lexer = shlex.shlex(cmd_str, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        return cmd_str.split()
+
+
+def _is_redirection(arg: str) -> bool:
+    """Return True for shell redirection operators such as ``>``, ``>>``, or ``2>&1``."""
+    return (
+        bool(arg)
+        and any(char in "<>" for char in arg)
+        and all(char in "<>&|" for char in arg)
+    )
+
+
+def _strip_redirections(tokens: Sequence[str]) -> list[str]:
+    """Drop redirection operators and destinations so filenames are not read as commands."""
+    cleaned: list[str] = []
+    index = 0
+    while index < len(tokens):
+        arg = tokens[index]
+        if (
+            arg.isdigit()
+            and index + 1 < len(tokens)
+            and _is_redirection(tokens[index + 1])
+        ):
+            index += 2
+        elif _is_redirection(arg):
+            index += 1
+        else:
+            cleaned.append(arg)
+            index += 1
+            continue
+        if index < len(tokens):
+            index += 1
+    return cleaned
+
+
+def _iter_command_segments(tokens: Sequence[str]) -> list[list[str]]:
+    """Split tokens into simple-command segments at shell control operators."""
+    segments: list[list[str]] = []
+    segment: list[str] = []
+    for arg in tokens:
+        if arg and all(char in _SHELL_CONTROL_CHARS for char in arg):
+            if segment:
+                segments.append(segment)
+                segment = []
+            continue
+        segment.append(arg)
+    if segment:
+        segments.append(segment)
+    return segments
+
+
+def _check_env_invocation(args: Sequence[str]) -> str | None:
+    """Block ``env`` invocations that dump the environment instead of launching a command."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if _is_quote_noise(arg) or arg == "--":
+            index += 1
+            continue
+        if arg in _ENV_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if arg in _ENV_OPTIONS_WITH_STRING:
+            if index + 1 >= len(args):
+                return _environment_dump_reason("env")
+            return _check_env_dump_command(args[index + 1])
+        if arg.startswith(_ENV_INLINE_STRING_PREFIXES):
+            if arg.startswith("--split-string="):
+                return _check_env_dump_command(arg.split("=", 1)[1])
+            index += 1
+            continue
+        if arg.startswith("-") and arg != "-":
+            index += 1
+            continue
+        if _is_assignment(arg):
+            index += 1
+            continue
+        return _check_command_tokens(args[index:])
+    return _environment_dump_reason("env")
+
+
+def _check_printenv_invocation(args: Sequence[str]) -> str | None:
+    """Block ``printenv`` unless it queries specific variables."""
+    variables = 0
+    for arg in args:
+        if arg in ("--help", "--version"):
+            return None
+        if arg == "--" or _is_quote_noise(arg):
+            continue
+        if arg.startswith("-") and arg != "-":
+            continue
+        variables += 1
+    if variables == 0:
+        return _environment_dump_reason("printenv")
+    return None
+
+
+def _check_export_invocation(args: Sequence[str]) -> str | None:
+    """Block ``export``/``export -p`` forms that print the environment."""
+    if any(arg in ("-p", "--print") for arg in args):
+        return _environment_dump_reason("export")
+    for arg in args:
+        if arg == "--" or _is_quote_noise(arg):
+            continue
+        if arg.startswith("-") and arg != "-":
+            continue
+        return None
+    return _environment_dump_reason("export")
+
+
+def _check_python_inline(tokens: Sequence[str], interpreter_index: int) -> str | None:
+    """Block inline Python ``-c`` probes that reference ``os.environ``/``os.environb``."""
+    index = interpreter_index + 1
+    while index < len(tokens):
+        arg = tokens[index]
+        if arg == "-c":
+            code = " ".join(tokens[index + 1 :])
+            if "os.environ" in code:
+                return "Inline Python environment dump via 'os.environ' is blocked"
+            return None
+        if arg == "-m" or not arg.startswith("-"):
+            return None
+        if arg in ("-W", "-X"):
+            index += 2
+            continue
+        index += 1
+    return None
+
+
+def _uv_python_index(tokens: Sequence[str], uv_index: int) -> int | None:
+    """Return the token index of the Python interpreter passed to ``uv run``."""
+    args = tokens[uv_index + 1 :]
+    if not args or args[0] != "run":
+        return None
+    index = 1
+    while index < len(args):
+        arg = args[index]
+        if arg in _UV_RUN_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        break
+    if index < len(args) and _PYTHON_NAME_RE.fullmatch(_command_name(args[index])):
+        return uv_index + 1 + index
+    return None
+
+
+def _check_shell_wrapper(args: Sequence[str]) -> str | None:
+    """Inspect the command string passed to a shell wrapper's ``-c`` option."""
+    for index, arg in enumerate(args):
+        if arg == "-c":
+            if index + 1 < len(args):
+                return _check_env_dump_command(args[index + 1])
+            return None
+        if not arg.startswith("-"):
+            return None
+    return None
+
+
+def _check_command_tokens(tokens: Sequence[str]) -> str | None:
+    """Inspect a single simple command for environment-dumping invocations."""
+    index = 0
+    while index < len(tokens) and _is_assignment(tokens[index]):
+        index += 1
+    if index >= len(tokens):
+        return None
+
+    name = _command_name(tokens[index])
+    args = tokens[index + 1 :]
+    if name == "env":
+        return _check_env_invocation(args)
+    if name == "printenv":
+        return _check_printenv_invocation(args)
+    if name == "export":
+        return _check_export_invocation(args)
+    if _PYTHON_NAME_RE.fullmatch(name):
+        return _check_python_inline(tokens, index)
+    if name == "uv":
+        python_index = _uv_python_index(tokens, index)
+        if python_index is not None:
+            return _check_python_inline(tokens, python_index)
+        return None
+    if name in _SHELL_WRAPPERS:
+        return _check_shell_wrapper(args)
+    return None
+
+
+def _check_env_dump_command(cmd_str: str) -> str | None:
+    """Return a denial reason when a command dumps the process environment."""
+    tokens = _strip_redirections(_tokenize_command(cmd_str))
+    for segment in _iter_command_segments(tokens):
+        reason = _check_command_tokens(segment)
+        if reason:
+            return reason
+    return None
 
 
 def _is_env_secret_path(target_resolved: Path) -> bool:
@@ -219,6 +473,10 @@ def is_command_safe(
     for pattern in SENSITIVE_HOST_PATHS:
         if pattern.search(cmd_str):
             return False, f"Command targets sensitive host path: '{cmd_str}'"
+
+    env_dump_reason = _check_env_dump_command(cmd_str)
+    if env_dump_reason:
+        return False, f"Command blocked by guardrail: {env_dump_reason} ('{cmd_str}')"
 
     if custom_denied:
         for denied in custom_denied:

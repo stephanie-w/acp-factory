@@ -30,6 +30,7 @@ For `execute` / `command` / `bash` requests, commands are checked against:
   - `/etc/shadow`, `/etc/passwd`, `/etc/sudoers`
   - `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.config/gcloud`
 - **Dotenv secret files:** `.env` and `.env.*` (e.g., `.env.local`, `.env.production`) are blocked for both path access and shell commands, while safe templates (`.env.example`, `.env.sample`, `.env.template`) remain allowed.
+- **Environment-dumping commands:** Bare `env` / `/usr/bin/env` (no target command), bare `printenv` / `/usr/bin/printenv` (no specific variable names), `export` / `export -p`, and inline Python `-c` probes referencing `os.environ` / `os.environb` are blocked. Launcher forms such as `env FOO=bar pytest`, specific-variable queries such as `printenv USER`, assignments such as `export FOO=bar`, and repository searches such as `rg os.environ` remain allowed.
 - **Custom denied patterns:** Case-insensitive substring matches from `[guardrails].denied_commands` (`--deny-cmd` / `FACTORY_GUARDRAILS_DENIED_COMMANDS`).
 - **Run artifact commands (`--deny-runs`):** Shell commands referencing `.factory/runs`, `.factory/latest-report.md`, or `.factory/latest-build-notes.md` are blocked outside `retro`.
 
