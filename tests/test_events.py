@@ -333,7 +333,10 @@ def _persist(
     response_text: str = "",
     succeeded: bool = True,
     attempts_used: int = 1,
+    turn_transcripts: list[str] | None = None,
 ) -> Path | None:
+    if turn_transcripts is None:
+        turn_transcripts = ["# Attempt 1 Markdown"] if attempts_used > 0 else []
     return _persist_run_artifacts(
         workspace,
         run_id,
@@ -342,7 +345,7 @@ def _persist(
         attempts_used=attempts_used,
         total_duration=0.5,
         setup_logs=[],
-        turn_transcripts=[],
+        turn_transcripts=turn_transcripts,
         check_history=[],
         failure_reason=None,
         last_response_text=response_text,
@@ -521,6 +524,28 @@ def test_persist_run_artifacts_dry_run_or_setup_failure(
 
     assert run_dir is not None
     assert not (tmp_path / ".factory" / "runs" / "latest").exists()
+
+
+def test_persist_run_artifacts_keeps_latest_when_first_turn_produced_no_transcript(
+    tmp_path: Path,
+) -> None:
+    """AC-3: a first-turn timeout (attempts_used=1, no transcript) leaves latest intact."""
+    runs_dir = tmp_path / ".factory" / "runs"
+    (runs_dir / "run-old").mkdir(parents=True)
+    latest = runs_dir / "latest"
+    latest.symlink_to("run-old", target_is_directory=True)
+    config = FactoryConfig(task="Run stage", active_stage="triage")
+
+    run_dir = _persist(
+        tmp_path,
+        config=config,
+        run_id="run-timeout",
+        attempts_used=1,
+        turn_transcripts=[],
+    )
+
+    assert run_dir is not None
+    assert os.readlink(latest) == "run-old"
 
 
 @pytest.mark.parametrize(

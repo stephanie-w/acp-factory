@@ -545,7 +545,8 @@ def _persist_run_artifacts(
     }
     (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
-    if not config.dry_run and attempts_used > 0:
+    has_transcripts = bool(turn_transcripts or turn_summaries or turn_condensed)
+    if not config.dry_run and has_transcripts:
         _update_latest_run_symlink(factory_dir, run_id)
 
     if config.active_stage == "review" and last_response_text.strip():
