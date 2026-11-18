@@ -200,6 +200,88 @@ def test_client_lazy_loads_frontmatter_summaries_and_resources(tmp_path: Path) -
     assert "INSTR_BODY_DO_NOT_INLINE" not in decorated
 
 
+async def test_send_prompt_turn_resources_omits_discovered_skills_and_templates(
+    tmp_path: Path,
+) -> None:
+    """Turn 1 attaches instructions + explicit skills only; discovered skills and templates stay on-demand."""
+    ws = tmp_path / "repo"
+    discovered_skill = ws / ".agents" / "skills" / "domain-extra" / "SKILL.md"
+    discovered_skill.parent.mkdir(parents=True)
+    discovered_skill.write_text(
+        "---\nname: domain-extra\ndescription: Extra domain rules\n---\n# Body",
+        encoding="utf-8",
+    )
+    discovered_template = discovered_skill.parent / "templates" / "discovered.md"
+    discovered_template.parent.mkdir(parents=True)
+    discovered_template.write_text("# Discovered template", encoding="utf-8")
+
+    instruction = ws / ".github" / "instructions" / "api.instructions.md"
+    instruction.parent.mkdir(parents=True)
+    instruction.write_text(
+        "---\napplyTo: 'src/api/**'\ndescription: API conventions\n---\n# Rules",
+        encoding="utf-8",
+    )
+
+    caller_resource = ws / "notes.md"
+    caller_resource.write_text("# Caller notes", encoding="utf-8")
+
+    client = FactoryACPClient(
+        workspace=ws,
+        agent_config=AgentConfig(skills=["tdd-builder"]),
+        resource_dirs=[],
+        discover_apm_resources=True,
+    )
+    explicit_skill = client.explicit_skill_paths[0]
+    explicit_template = next(
+        (explicit_skill.parent / "templates").glob("*.md")
+    ).resolve()
+    explicit_script = next((explicit_skill.parent / "scripts").glob("*.py")).resolve()
+    assert discovered_skill in client.discovered_skill_paths
+
+    calls: list[tuple[str, list[Path]]] = []
+
+    async def _fake_send(prompt: str, **kwargs: object) -> str:
+        passed = kwargs.get("resources")
+        calls.append((prompt, list(passed) if isinstance(passed, list) else []))
+        return "end_turn"
+
+    mock_agent = MagicMock()
+    mock_agent.session_id = "sess-resources"
+    mock_agent.start = AsyncMock()
+    mock_agent.stop = AsyncMock()
+    mock_agent.send_prompt = AsyncMock(side_effect=_fake_send)
+
+    with (
+        patch("acp_factory.acp.client.ACPAgent", return_value=mock_agent),
+        patch(
+            "acp_factory.acp.client.resolve_factory_agent_command",
+            return_value=["python3", "-c", "pass"],
+        ),
+    ):
+        await client.start()
+        await client.send_prompt("first turn", resources=[caller_resource])
+        await client.send_prompt("second turn")
+
+    first_prompt, first_resources = calls[0]
+    _, second_resources = calls[1]
+
+    assert caller_resource in first_resources
+    assert explicit_skill in first_resources
+    assert set(client.instruction_paths) <= set(first_resources)
+    assert discovered_skill not in first_resources
+    assert not [
+        p for p in first_resources if p.parent.name == "templates" and p.suffix == ".md"
+    ]
+
+    assert "# Active Skills" in first_prompt
+    assert "# Available Workspace Skills" in first_prompt
+    assert str(explicit_template) in first_prompt
+    assert str(explicit_script) in first_prompt
+    assert str(discovered_template.resolve()) in first_prompt
+
+    assert second_resources == []
+
+
 async def test_prompt_check_policy_auditor_receives_apm_domain_resources(
     tmp_path: Path,
 ) -> None:
