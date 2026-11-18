@@ -33,6 +33,17 @@ def test_truncate_check_output_preserves_head_and_tail() -> None:
     assert "line 100" not in truncated
 
 
+def test_truncate_check_output_caps_chars_on_wide_lines() -> None:
+    wide = "A" * 8000 + "MIDDLE_NOISE" + "Z" * 8000
+    truncated = truncate_check_output(wide, max_lines=150, max_chars=1000)
+
+    assert truncated.startswith("A" * 600)
+    assert truncated.endswith("Z" * 400)
+    assert "truncated" in truncated
+    assert "characters of output" in truncated
+    assert "MIDDLE_NOISE" not in truncated
+
+
 def test_parse_review_verdict() -> None:
     assert parse_review_verdict("All requirements met.\nVERDICT: PASS") is True
     assert parse_review_verdict("Missing unit test.\nVERDICT: FAIL") is False
@@ -294,6 +305,9 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "Complete all necessary research, file modifications" in mutating_prompt
     assert "Do NOT pause to ask clarifying questions" in mutating_prompt
     assert "GUARDRAIL DENIED" in mutating_prompt
+    assert "Do not narrate tool calls" in mutating_prompt
+    assert "Prefer targeted, windowed file reads" in mutating_prompt
+    assert "omit pleasantries, preambles" in mutating_prompt
 
     results = [
         CheckResult(
@@ -324,6 +338,7 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "AssertionError: 1 != 2" in prompt
     assert "Remember: You are executing autonomously" in prompt
     assert "apply all changes directly to the workspace" in prompt
+    assert "Do not narrate tool calls" in prompt
 
 
 def test_build_retry_prompt_for_response_file_check() -> None:
@@ -834,6 +849,47 @@ def test_build_workspace_env_custom_strip_and_extra_env(tmp_path: Path) -> None:
     assert env.get("NODE_OPTIONS") == "--max-old-space-size=4096"
 
 
+def test_build_workspace_env_injects_low_noise_and_ripgrep_defaults(
+    tmp_path: Path,
+) -> None:
+    mock_env = {
+        "TERM": "xterm-256color",
+        "PAGER": "less",
+        "PATH": "/usr/bin",
+    }
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path)
+
+    assert env["NO_COLOR"] == "1"
+    assert env["TERM"] == "dumb"
+    assert env["CLICOLOR"] == "0"
+    assert env["FORCE_COLOR"] == "0"
+    assert env["GIT_PAGER"] == "cat"
+    assert env["PAGER"] == "cat"
+    assert env["UV_NO_PROGRESS"] == "1"
+    assert env["PIP_PROGRESS_BAR"] == "off"
+    assert env["npm_config_loglevel"] == "warn"
+    assert env["PYTEST_ADDOPTS"] == "-q --tb=short --no-header"
+
+    rg_cfg_path = Path(env["RIPGREP_CONFIG_PATH"])
+    assert rg_cfg_path.is_file()
+    rg_content = rg_cfg_path.read_text(encoding="utf-8")
+    assert "--max-columns=300" in rg_content
+    assert "--glob=!*.lock" in rg_content
+    assert "--glob=!.venv/*" in rg_content
+
+    # extra_env overrides defaults and strip_env suppresses defaults
+    with patch.dict("os.environ", mock_env, clear=True):
+        overridden = build_workspace_env(
+            tmp_path,
+            extra_env={"PYTEST_ADDOPTS": "-vv", "NO_COLOR": "0"},
+            strip_env=["RIPGREP_CONFIG_PATH"],
+        )
+    assert overridden["PYTEST_ADDOPTS"] == "-vv"
+    assert overridden["NO_COLOR"] == "0"
+    assert "RIPGREP_CONFIG_PATH" not in overridden
+
+
 async def test_run_shell_command_forwards_keep_env(tmp_path: Path) -> None:
     host_path = os.environ.get("PATH", "")
     command = 'python3 -c \'import os; print(os.environ.get("CUSTOM_API_KEY", ""))\''
@@ -999,3 +1055,35 @@ async def test_readonly_gh_shim_passes_factory_token(tmp_path: Path) -> None:
     stdout, stderr = await proc.communicate()
     assert proc.returncode == 0, stderr.decode("utf-8", errors="replace")
     assert stdout.decode("utf-8", errors="replace") == "bot-token"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subcommand", ["token", "status", "login", "logout"])
+async def test_readonly_gh_shim_blocks_auth_subcommands(
+    tmp_path: Path, subcommand: str
+) -> None:
+    """The read-only gh shim rejects all `gh auth` subcommands."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_gh.chmod(0o755)
+
+    mock_env = {
+        "PATH": f"{fake_bin}{os.pathsep}/usr/bin{os.pathsep}/bin",
+    }
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path, restrict_gh_writes=True)
+
+    proc = await asyncio.create_subprocess_exec(
+        "gh",
+        "auth",
+        subcommand,
+        cwd=str(tmp_path),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    assert proc.returncode == 1
+    assert "disabled for agents" in stderr.decode("utf-8", errors="replace")

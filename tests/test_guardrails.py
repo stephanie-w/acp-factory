@@ -102,6 +102,8 @@ def test_path_contained_explicit_allowed_paths(tmp_path: Path) -> None:
         "python3 -m unittest",
         "ls -la src/",
         "cat README.md",
+        "gh issue list --state open",
+        "gh pr view 42",
     ],
 )
 def test_safe_commands_pass(cmd: str) -> None:
@@ -131,6 +133,10 @@ def test_safe_commands_pass(cmd: str) -> None:
         ("shutdown -h now", "shutdown or reboot"),
         ("echo 'x' > /etc/shadow", "sensitive host credential paths"),
         ("cat id_rsa > ~/.ssh/authorized_keys", "sensitive host credential paths"),
+        ("gh auth token", "gh auth"),
+        ("gh auth login", "gh auth"),
+        ("gh auth logout", "gh auth"),
+        ("gh auth status", "gh auth"),
     ],
 )
 def test_dangerous_commands_blocked(cmd: str, expected_keyword: str) -> None:

@@ -53,7 +53,7 @@ import shutil
 import sys
 
 FORBIDDEN_SUBCOMMANDS = {
-    "edit", "create", "comment", "close", "reopen", "delete",
+    "auth", "edit", "create", "comment", "close", "reopen", "delete",
     "merge", "lock", "unlock", "transfer", "pin", "unpin",
     "ready", "review",
 }
@@ -132,6 +132,52 @@ def is_sensitive_env(name: str) -> bool:
     return bool(_SENSITIVE_ENV_RE.search(name))
 
 
+# Default low-noise CLI environment variables for workspace subprocesses
+# to suppress ANSI escape codes, interactive pagers, and progress bars.
+DEFAULT_LOW_NOISE_ENV: dict[str, str] = {
+    "NO_COLOR": "1",
+    "TERM": "dumb",
+    "CLICOLOR": "0",
+    "FORCE_COLOR": "0",
+    "GIT_PAGER": "cat",
+    "PAGER": "cat",
+    "UV_NO_PROGRESS": "1",
+    "PIP_PROGRESS_BAR": "off",
+    "npm_config_loglevel": "warn",
+}
+
+DEFAULT_PYTEST_ADDOPTS = "-q --tb=short --no-header"
+
+_RIPGREP_CONFIG_CONTENT = """\
+--max-columns=300
+--max-columns-preview
+--glob=!.git/*
+--glob=!.venv/*
+--glob=!node_modules/*
+--glob=!.worktrees/*
+--glob=!.factory/runs/*
+--glob=!__pycache__/*
+--glob=!.pytest_cache/*
+--glob=!.ruff_cache/*
+--glob=!.mypy_cache/*
+--glob=!*.lock
+--glob=!package-lock.json
+"""
+
+
+def _ensure_ripgrep_config_file() -> Path:
+    """Create and return the default ripgrep config file path for workspace subprocesses."""
+    rg_dir = Path(tempfile.gettempdir()) / "acp-factory-ripgrep"
+    rg_dir.mkdir(parents=True, exist_ok=True)
+    rg_file = rg_dir / "ripgreprc"
+    if (
+        not rg_file.exists()
+        or rg_file.read_text(encoding="utf-8") != _RIPGREP_CONFIG_CONTENT
+    ):
+        rg_file.write_text(_RIPGREP_CONFIG_CONTENT, encoding="utf-8")
+    return rg_file
+
+
 def _ensure_readonly_gh_shim_dir() -> Path:
     """Create and return the directory containing the read-only `gh` shim for agents."""
     shim_dir = Path(tempfile.gettempdir()) / "acp-factory-gh-shim"
@@ -193,15 +239,25 @@ def build_workspace_env(
 
     # 2. Strip declarative host leaks plus pattern-matched sensitive credentials.
     # `keep_env` exempts exact names, while an explicit `strip_env` always wins.
+    custom_strip = set(strip_env) if strip_env else set()
     allowlist = set(keep_env or ())
     keys_to_strip = (
         set(DEFAULT_HOST_ENV_STRIP) | {k for k in env if is_sensitive_env(k)}
     ) - allowlist
-    if strip_env:
-        keys_to_strip.update(strip_env)
+    keys_to_strip.update(custom_strip)
 
     for k in keys_to_strip:
         env.pop(k, None)
+
+    # 3. Apply low-noise CLI defaults and ripgrep config (unless explicitly stripped)
+    for low_noise_key, low_noise_val in DEFAULT_LOW_NOISE_ENV.items():
+        if low_noise_key not in custom_strip:
+            env[low_noise_key] = low_noise_val
+    if "PYTEST_ADDOPTS" not in custom_strip:
+        env.setdefault("PYTEST_ADDOPTS", DEFAULT_PYTEST_ADDOPTS)
+    if "RIPGREP_CONFIG_PATH" not in custom_strip:
+        with contextlib.suppress(OSError):
+            env.setdefault("RIPGREP_CONFIG_PATH", str(_ensure_ripgrep_config_file()))
 
     # Attribute every subprocess commit to the factory bot, never the host developer.
     env["GIT_AUTHOR_NAME"] = FACTORY_BOT_NAME
@@ -244,29 +300,44 @@ def build_workspace_env(
     return env
 
 
-def truncate_check_output(text: str, max_lines: int = 150) -> str:
-    """Truncate check output intelligently to avoid overflowing the agent's context window.
+def truncate_check_output(
+    text: str,
+    max_lines: int = 150,
+    max_chars: int = 12000,
+) -> str:
+    """Truncate check output by both line count and character ceiling.
 
     Preserves the first few lines (command header/summary) and the last `max_lines`
-    lines where stack traces and assertion failures typically appear.
+    lines where stack traces and assertion failures typically appear, then applies
+    a 60/40 character ceiling (`max_chars`) so ultra-wide single-line dumps cannot
+    overflow the agent's context window.
     """
     lines = text.splitlines()
-    if len(lines) <= max_lines:
-        return text
+    result = text
+    if len(lines) > max_lines:
+        head_count = min(15, max(5, max_lines // 10))
+        tail_count = max(1, max_lines - head_count)
+        omitted = len(lines) - (head_count + tail_count)
+        if omitted > 0:
+            head = "\n".join(lines[:head_count])
+            tail = "\n".join(lines[-tail_count:])
+            result = (
+                f"{head}\n\n"
+                f"... [truncated {omitted} lines of output; showing last {tail_count} lines] ...\n\n"
+                f"{tail}"
+            )
 
-    head_count = min(15, max(5, max_lines // 10))
-    tail_count = max(1, max_lines - head_count)
-    omitted = len(lines) - (head_count + tail_count)
-    if omitted <= 0:
-        return text
-
-    head = "\n".join(lines[:head_count])
-    tail = "\n".join(lines[-tail_count:])
-    return (
-        f"{head}\n\n"
-        f"... [truncated {omitted} lines of output; showing last {tail_count} lines] ...\n\n"
-        f"{tail}"
-    )
+    if max_chars > 0 and len(result) > max_chars:
+        head_chars = max(1, int(max_chars * 0.6))
+        tail_chars = max(1, max_chars - head_chars)
+        omitted_chars = len(result) - head_chars - tail_chars
+        if omitted_chars > 0:
+            result = (
+                f"{result[:head_chars]}\n\n"
+                f"... [truncated {omitted_chars} characters of output] ...\n\n"
+                f"{result[-tail_chars:]}"
+            )
+    return result
 
 
 async def run_shell_command(
