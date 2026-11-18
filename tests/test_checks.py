@@ -16,6 +16,7 @@ from acp_factory.runner.checks import (
     build_workspace_env,
     parse_review_verdict,
     run_checks_sequential,
+    run_shell_command,
     truncate_check_output,
 )
 from acp_factory.runner.loop import build_retry_prompt, run_factory
@@ -710,11 +711,12 @@ def test_workspace_env_git_identity(tmp_path: Path) -> None:
 
 
 def test_workspace_env_token_override(tmp_path: Path) -> None:
+    # Host personal tokens are stripped by default; only the factory bot token is promoted.
     with patch.dict(
         "os.environ", {"GH_TOKEN": "human-token", "PATH": "/usr/bin"}, clear=True
     ):
         inherited = build_workspace_env(tmp_path)
-    assert inherited["GH_TOKEN"] == "human-token"
+    assert "GH_TOKEN" not in inherited
 
     with patch.dict(
         "os.environ",
@@ -727,13 +729,86 @@ def test_workspace_env_token_override(tmp_path: Path) -> None:
     ):
         overridden = build_workspace_env(tmp_path)
     assert overridden["GH_TOKEN"] == "bot-token"
+    assert "FACTORY_GH_TOKEN" not in overridden
 
-    # An empty FACTORY_GH_TOKEN must not clobber an intentional empty/inherited value.
+    # An explicit keep_env opt-in preserves the host token.
+    with patch.dict(
+        "os.environ", {"GH_TOKEN": "human-token", "PATH": "/usr/bin"}, clear=True
+    ):
+        kept = build_workspace_env(tmp_path, keep_env=["GH_TOKEN"])
+    assert kept["GH_TOKEN"] == "human-token"
+
+    # An empty FACTORY_GH_TOKEN must not create a GH_TOKEN value.
     with patch.dict(
         "os.environ", {"FACTORY_GH_TOKEN": "", "PATH": "/usr/bin"}, clear=True
     ):
         blank = build_workspace_env(tmp_path)
     assert "GH_TOKEN" not in blank
+
+
+@pytest.mark.parametrize(
+    "sensitive_key",
+    [
+        "GITHUB_TOKEN",
+        "OPENAI_API_KEY",
+        "OPENAI_APIKEY",
+        "MY_SECRET",
+        "DB_PASSWORD",
+        "DB_PASSWD",
+        "GCP_CREDENTIAL",
+        "AWS_SECRET_ACCESS_KEY",
+        "SSH_PRIVATE_KEY",
+        "ACCESS_KEY_ID",
+    ],
+)
+def test_build_workspace_env_sensitive_pattern_stripping(
+    tmp_path: Path, sensitive_key: str
+) -> None:
+    mock_env = {
+        sensitive_key: "host-secret-value",
+        "USER": "developer",
+        "PATH": "/usr/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path)
+
+    assert sensitive_key not in env
+    assert env.get("USER") == "developer"
+
+
+def test_build_workspace_env_keep_env_override(tmp_path: Path) -> None:
+    mock_env = {
+        "PYTHONPATH": "/opt/custom_python",
+        "OPENAI_API_KEY": "sk-host",
+        "GITHUB_TOKEN": "gh-host",
+        "PATH": "/usr/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(tmp_path, keep_env=["PYTHONPATH", "OPENAI_API_KEY"])
+
+    assert env.get("PYTHONPATH") == "/opt/custom_python"
+    assert env.get("OPENAI_API_KEY") == "sk-host"
+    assert "GITHUB_TOKEN" not in env
+
+
+def test_build_workspace_env_strip_overrides_keep(tmp_path: Path) -> None:
+    mock_env = {
+        "OPENAI_API_KEY": "sk-host",
+        "NODE_OPTIONS": "--inspect",
+        "PATH": "/usr/bin",
+    }
+
+    with patch.dict("os.environ", mock_env, clear=True):
+        env = build_workspace_env(
+            tmp_path,
+            keep_env=["OPENAI_API_KEY", "NODE_OPTIONS"],
+            strip_env=["OPENAI_API_KEY"],
+        )
+
+    assert "OPENAI_API_KEY" not in env
+    assert env.get("NODE_OPTIONS") == "--inspect"
 
 
 def test_build_workspace_env_custom_strip_and_extra_env(tmp_path: Path) -> None:
@@ -757,6 +832,143 @@ def test_build_workspace_env_custom_strip_and_extra_env(tmp_path: Path) -> None:
     assert env.get("TARGET_ENV") == "production"
     # Explicit extra_env applied after default strip
     assert env.get("NODE_OPTIONS") == "--max-old-space-size=4096"
+
+
+async def test_run_shell_command_forwards_keep_env(tmp_path: Path) -> None:
+    host_path = os.environ.get("PATH", "")
+    command = 'python3 -c \'import os; print(os.environ.get("CUSTOM_API_KEY", ""))\''
+
+    with patch.dict(
+        "os.environ", {"CUSTOM_API_KEY": "host-secret", "PATH": host_path}, clear=True
+    ):
+        rc_kept, kept_output, _ = await run_shell_command(
+            command, tmp_path, keep_env=["CUSTOM_API_KEY"]
+        )
+        rc_stripped, stripped_output, _ = await run_shell_command(command, tmp_path)
+
+    assert rc_kept == 0
+    assert kept_output.strip() == "host-secret"
+    assert rc_stripped == 0
+    assert stripped_output.strip() == ""
+
+
+async def test_run_checks_sequential_forwards_keep_env(tmp_path: Path) -> None:
+    host_path = os.environ.get("PATH", "")
+    checks = [
+        CheckConfig(
+            name="token check",
+            cmd=(
+                "python3 -c 'import os, sys; "
+                'sys.exit(0 if os.environ.get("CUSTOM_TOKEN") == "host-secret" else 1)\''
+            ),
+        )
+    ]
+
+    with patch.dict(
+        "os.environ", {"CUSTOM_TOKEN": "host-secret", "PATH": host_path}, clear=True
+    ):
+        passed_with_keep, _ = await run_checks_sequential(
+            checks, tmp_path, keep_env=["CUSTOM_TOKEN"]
+        )
+        passed_without_keep, _ = await run_checks_sequential(checks, tmp_path)
+
+    assert passed_with_keep is True
+    assert passed_without_keep is False
+
+
+async def test_run_factory_threads_keep_env_to_setup_and_client(tmp_path: Path) -> None:
+    marker = tmp_path / "setup_token.txt"
+    setup_script = tmp_path / "setup_env.py"
+    setup_script.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(os.environ.get('CUSTOM_TOKEN', 'missing'))\n",
+        encoding="utf-8",
+    )
+    setup_cmd = f"python3 {setup_script}"
+    cfg = FactoryConfig(task="noop", keep_env=["CUSTOM_TOKEN"], setup=[setup_cmd])
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeACPClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured_kwargs.update(kwargs)
+            self.tracker = AsyncMock()
+            self.tracker.history = []
+
+        async def __aenter__(self) -> FakeACPClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def send_prompt(self, prompt: str, **kwargs: object) -> TurnResult:
+            return TurnResult(
+                stop_reason="end_turn",
+                summary=TurnSummary(
+                    prompt=prompt,
+                    response_text="Done.",
+                    thought_text="",
+                    stop_reason="end_turn",
+                    duration_seconds=0.01,
+                    tool_call_count=0,
+                ),
+            )
+
+    host_path = os.environ.get("PATH", "")
+    with (
+        patch.dict(
+            "os.environ", {"CUSTOM_TOKEN": "host-secret", "PATH": host_path}, clear=True
+        ),
+        patch("acp_factory.runner.loop.FactoryACPClient", FakeACPClient),
+    ):
+        outcome = await run_factory(cfg, tmp_path)
+
+    assert outcome.succeeded is True
+    assert marker.read_text(encoding="utf-8") == "host-secret"
+    assert captured_kwargs["keep_env"] == ["CUSTOM_TOKEN"]
+
+
+async def test_factory_acp_client_forwards_keep_env_to_workspace_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import acpterm.acp_agent as acpterm_agent_mod
+
+    from acp_factory.acp import client as client_mod
+    from acp_factory.config import AgentConfig
+
+    captured_kwargs: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_build_workspace_env(workspace: Path, **kwargs: object) -> dict[str, str]:
+        _ = workspace
+        captured_kwargs.update(kwargs)
+        return {"PATH": "/usr/bin"}
+
+    class FakeAgent:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+            self.session_id = None
+
+        async def start(self, **kwargs: object) -> None:
+            _ = kwargs
+            acpterm_agent_mod.spawn_stdio_transport("fake-agent")
+
+    monkeypatch.setattr(
+        acpterm_agent_mod, "spawn_stdio_transport", lambda *a, **k: sentinel
+    )
+    monkeypatch.setattr(
+        "acp_factory.runner.checks.build_workspace_env", fake_build_workspace_env
+    )
+    monkeypatch.setattr(client_mod, "ACPAgent", FakeAgent)
+
+    client = client_mod.FactoryACPClient(
+        workspace=tmp_path,
+        agent_config=AgentConfig(name="opencode", command=["fake-agent-binary"]),
+        keep_env=["CUSTOM_TOKEN"],
+    )
+    await client.start()
+
+    assert captured_kwargs["keep_env"] == ["CUSTOM_TOKEN"]
 
 
 async def test_readonly_gh_shim_passes_factory_token(tmp_path: Path) -> None:

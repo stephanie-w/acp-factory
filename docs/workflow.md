@@ -171,6 +171,7 @@ Each `[stages.<name>]` section accepts the following stage-specific overrides:
 | `timeout` | int | inherited | Per-turn timeout in seconds. |
 | `env` | table | inherited | Stage-specific environment variables. |
 | `strip_env` | list | inherited | Additional environment variable names to strip. |
+| `keep_env` | list | inherited | Environment variable names to preserve even if they match sensitive credential patterns; `strip_env` wins on conflict. |
 | `thought_max_chars` | int or null | `null` | Agent thought visibility/length in transcripts. `0` omits thoughts from `transcript.md` and `transcript.summary.json`; `N > 0` truncates to `N` characters; unset keeps full thoughts in `transcript.md`/`transcript.json` and the default 500-character `thought_preview`. Full reasoning is always preserved in `transcript.json` for `retro`. |
 
 A top-level `thought_max_chars` acts as the global default and is overridden by any stage-level value:

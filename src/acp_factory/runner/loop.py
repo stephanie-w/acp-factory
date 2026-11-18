@@ -620,6 +620,7 @@ async def run_factory(
                     timeout=config.agent.timeout,
                     extra_env=config.env or None,
                     strip_env=config.strip_env or None,
+                    keep_env=config.keep_env or None,
                 )
                 setup_logs.append(f"$ {setup_cmd} (exit {rc})\n{output}")
                 passed = rc == 0
@@ -693,6 +694,7 @@ async def run_factory(
             silent=ui.quiet,
             extra_env=config.env or None,
             strip_env=config.strip_env or None,
+            keep_env=config.keep_env or None,
             thought_max_chars=config.thought_max_chars,
         ) as acp_client:
             session_id = getattr(acp_client, "session_id", None)
@@ -798,6 +800,7 @@ async def run_factory(
                         on_check_complete=ui.show_check_result,
                         extra_env=check_env,
                         strip_env=config.strip_env or None,
+                        keep_env=config.keep_env or None,
                     )
 
                 check_history.append(results)
