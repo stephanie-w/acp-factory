@@ -301,7 +301,11 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
         "Build feature",
         [CheckConfig(name="test", cmd="pytest")],
         read_only=False,
+        workspace=tmp_path,
     )
+    assert "Active workspace:" not in ro_prompt
+    assert f"Active workspace: `{tmp_path.resolve()}`" in mutating_prompt
+    assert "Use workspace-relative paths" in mutating_prompt
     assert "Complete all necessary research, file modifications" in mutating_prompt
     assert "Do NOT pause to ask clarifying questions" in mutating_prompt
     assert "GUARDRAIL DENIED" in mutating_prompt
