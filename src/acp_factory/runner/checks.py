@@ -108,6 +108,29 @@ DEFAULT_HOST_ENV_STRIP: tuple[str, ...] = (
     "RUBYOPT",
 )
 
+# Case-insensitive patterns identifying host credentials that must never leak
+# into workspace subprocesses (checks, setup, ACP agents) by default.
+DEFAULT_SENSITIVE_ENV_PATTERNS: tuple[str, ...] = (
+    r"TOKEN",
+    r"API_?KEY",
+    r"SECRET",
+    r"PASS(?:WORD|WD)",
+    r"CREDENTIAL",
+    r"^AWS_",
+    r"PRIVATE_?KEY",
+    r"ACCESS_?KEY",
+)
+
+_SENSITIVE_ENV_RE = re.compile(
+    "|".join(f"(?:{pattern})" for pattern in DEFAULT_SENSITIVE_ENV_PATTERNS),
+    re.IGNORECASE,
+)
+
+
+def is_sensitive_env(name: str) -> bool:
+    """Return whether an environment variable name looks like a host credential."""
+    return bool(_SENSITIVE_ENV_RE.search(name))
+
 
 # Default low-noise CLI environment variables for workspace subprocesses
 # to suppress ANSI escape codes, interactive pagers, and progress bars.
@@ -179,10 +202,12 @@ def build_workspace_env(
     resources_dir: Path | None = None,
     resource_dirs: list[Path] | None = None,
     strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
+    keep_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> dict[str, str]:
     """Prepare the environment for subprocesses executing in the target workspace/worktree.
 
-    Language-agnostic: strips host runner environment leaks, optionally prepends a
+    Language-agnostic: strips host runner environment leaks and sensitive host
+    credentials by default (unless allowlisted via `keep_env`), optionally prepends a
     read-only `gh` shim so agents cannot directly mutate GitHub issues, PRs, or labels,
     and applies any caller-provided overrides.
     """
@@ -212,9 +237,14 @@ def build_workspace_env(
             p for p in current_paths if os.path.abspath(p) not in paths_to_clean
         )
 
-    # 2. Strip declarative default host variables and any custom strip_env keys
+    # 2. Strip declarative host leaks plus pattern-matched sensitive credentials.
+    # `keep_env` exempts exact names, while an explicit `strip_env` always wins.
     custom_strip = set(strip_env) if strip_env else set()
-    keys_to_strip = set(DEFAULT_HOST_ENV_STRIP) | custom_strip
+    allowlist = set(keep_env or ())
+    keys_to_strip = (
+        set(DEFAULT_HOST_ENV_STRIP) | {k for k in env if is_sensitive_env(k)}
+    ) - allowlist
+    keys_to_strip.update(custom_strip)
 
     for k in keys_to_strip:
         env.pop(k, None)
@@ -235,9 +265,9 @@ def build_workspace_env(
     env["GIT_COMMITTER_NAME"] = FACTORY_BOT_NAME
     env["GIT_COMMITTER_EMAIL"] = FACTORY_BOT_EMAIL
 
-    # Route `gh` subprocesses through the bot token when the orchestrator provides one,
-    # leaving interactive `gh auth` credentials untouched otherwise.
-    factory_token = env.get("FACTORY_GH_TOKEN")
+    # Route `gh` subprocesses through the bot token when the orchestrator provides one.
+    # Promote after stripping so the sensitive-looking bot token survives the filter.
+    factory_token = os.environ.get("FACTORY_GH_TOKEN")
     if factory_token:
         env["GH_TOKEN"] = factory_token
 
@@ -317,10 +347,13 @@ async def run_shell_command(
     timeout: int = 300,
     extra_env: dict[str, str] | None = None,
     strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
+    keep_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> tuple[int, str, float]:
     """Execute a shell command in its own process group with clean termination on timeout/cancel."""
     start = time.monotonic()
-    env = build_workspace_env(cwd, extra_env=extra_env, strip_env=strip_env)
+    env = build_workspace_env(
+        cwd, extra_env=extra_env, strip_env=strip_env, keep_env=keep_env
+    )
 
     proc = await asyncio.create_subprocess_shell(
         cmd,
@@ -414,6 +447,7 @@ async def run_single_check(
     max_output_lines: int = 150,
     extra_env: dict[str, str] | None = None,
     strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
+    keep_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> CheckResult:
     """Execute a single check (either deterministic shell command or agent review prompt)."""
     if check.cmd is not None:
@@ -423,6 +457,7 @@ async def run_single_check(
             timeout=check.timeout,
             extra_env=extra_env,
             strip_env=strip_env,
+            keep_env=keep_env,
         )
         passed = rc == 0
         chk_status: Literal["pass", "retry", "stop"] = "pass" if rc == 0 else "retry"
@@ -527,6 +562,7 @@ async def run_single_check(
                 deny_runs=True,
                 extra_env=extra_env,
                 strip_env=strip_env,
+                keep_env=keep_env,
             ) as reviewer_client:
                 turn_res = await reviewer_client.send_prompt(
                     dedicated_instruction,
@@ -603,6 +639,7 @@ async def run_checks_sequential(
     on_check_complete: Callable[[CheckResult], None] | None = None,
     extra_env: dict[str, str] | None = None,
     strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
+    keep_env: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> tuple[bool, list[CheckResult]]:
     """Run all configured checks in sequence, stopping immediately at the first failure (fail-fast)."""
     response_file: Path | None = None
@@ -641,6 +678,7 @@ async def run_checks_sequential(
                 max_output_lines=max_output_lines,
                 extra_env=check_env,
                 strip_env=strip_env,
+                keep_env=keep_env,
             )
         finally:
             if isolated_file is not None:

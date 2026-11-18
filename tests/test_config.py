@@ -613,6 +613,45 @@ COMMON_KEY = "stage_override"
     }
 
 
+def test_config_keep_env_parsing_and_resolution(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "factory.toml"
+    cfg_file.write_text(
+        """\
+version = "1"
+keep_env = ["GLOBAL_API_KEY"]
+
+[stages.build]
+keep_env = ["STAGE_TOKEN", "GLOBAL_API_KEY"]
+""",
+        encoding="utf-8",
+    )
+
+    cfg = FactoryConfig.from_file(cfg_file)
+    assert cfg.keep_env == ["GLOBAL_API_KEY"]
+    assert FactoryConfig().keep_env == []
+
+    resolved_build = cfg.resolve_stage("build", workspace=tmp_path)
+    assert resolved_build.keep_env == ["GLOBAL_API_KEY", "STAGE_TOKEN"]
+
+    repo = tmp_path / "repo"
+    (repo / ".factory").mkdir(parents=True)
+    (repo / ".factory" / "config.toml").write_text(
+        """\
+version = "1"
+
+[stages.build]
+keep_env = ["REPO_API_KEY", "GLOBAL_API_KEY"]
+""",
+        encoding="utf-8",
+    )
+    resolved_repo = cfg.resolve_repo_stage("build", repo, workspace=tmp_path)
+    assert resolved_repo.keep_env == [
+        "GLOBAL_API_KEY",
+        "STAGE_TOKEN",
+        "REPO_API_KEY",
+    ]
+
+
 def test_thought_max_chars(tmp_path: Path) -> None:
     """AC-1: stage overrides win, otherwise the top-level default is inherited."""
     cfg_file = tmp_path / "factory.toml"

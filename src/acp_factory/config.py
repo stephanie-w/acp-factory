@@ -212,6 +212,10 @@ class StageConfig(BaseModel):
         default_factory=list,
         description="Stage-specific additional environment variable names to strip from workspace subprocesses",
     )
+    keep_env: list[str] = Field(
+        default_factory=list,
+        description="Stage-specific environment variable names to preserve even if they match sensitive patterns",
+    )
     thought_max_chars: int | None = Field(
         default=None,
         ge=0,
@@ -417,6 +421,13 @@ class FactoryConfig(BaseModel):
     strip_env: list[str] = Field(
         default_factory=list,
         description="Additional environment variable names to strip from workspace subprocesses.",
+    )
+    keep_env: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Environment variable names to preserve even if they match sensitive "
+            "credential patterns or DEFAULT_HOST_ENV_STRIP."
+        ),
     )
     thought_max_chars: int | None = Field(
         default=None,
@@ -667,6 +678,8 @@ class FactoryConfig(BaseModel):
             resolved.strip_env = list(
                 dict.fromkeys(resolved.strip_env + stage.strip_env)
             )
+        if stage.keep_env:
+            resolved.keep_env = list(dict.fromkeys(resolved.keep_env + stage.keep_env))
 
         resolved.checks = resolved_checks
         return resolved
@@ -764,6 +777,10 @@ class FactoryConfig(BaseModel):
         if repo_stage.strip_env:
             resolved.strip_env = list(
                 dict.fromkeys(resolved.strip_env + repo_stage.strip_env)
+            )
+        if repo_stage.keep_env:
+            resolved.keep_env = list(
+                dict.fromkeys(resolved.keep_env + repo_stage.keep_env)
             )
 
         return resolved
