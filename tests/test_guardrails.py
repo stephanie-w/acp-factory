@@ -165,8 +165,14 @@ def test_custom_denied_commands() -> None:
         ("read", "outside", None, 1),
         ("write", "inside", None, 0),
         ("execute", None, "sudo rm -rf /", 1),
+        ("other", None, "external_directory", 1),
     ],
-    ids=["denies_outside_path", "allows_inside_path", "denies_dangerous_command"],
+    ids=[
+        "denies_outside_path",
+        "allows_inside_path",
+        "denies_dangerous_command",
+        "denies_external_directory_without_path",
+    ],
 )
 def test_guardrails_main_decisions(
     tmp_path: Path,

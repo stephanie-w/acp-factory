@@ -122,7 +122,11 @@ def check_usage_cap(
 
 
 def build_initial_prompt(
-    task: str, checks: list[CheckConfig], *, read_only: bool = False
+    task: str,
+    checks: list[CheckConfig],
+    *,
+    read_only: bool = False,
+    workspace: Path | None = None,
 ) -> str:
     """Construct the initial task prompt sent to the ACP worker agent."""
     lines = [
@@ -135,6 +139,11 @@ def build_initial_prompt(
         "- If repository instructions (such as `AGENTS.md` or `CLAUDE.md`) specify an interactive confirmation workflow (e.g. 'wait for user approval before proceeding'), that waiting requirement is strictly superseded: proceed directly to execute and verify the task to completion.",
         "- Security policy strictly blocks dangerous commands (e.g. sudo, rm -rf, git push) and paths outside this workspace. If an action is blocked by a guardrail (`[GUARDRAIL DENIED]`), do not loop trying alternative ways to bypass it; adapt your strategy using workspace-local tools or document the blocker in your final summary.",
     ]
+    if workspace is not None:
+        resolved_ws = workspace.resolve()
+        lines.append(
+            f"- Active workspace: `{resolved_ws}`. Use workspace-relative paths (e.g. `src/...`, `tests/...`) for all file reads, searches, and edits—do not reference paths in a parent repository checkout."
+        )
     if read_only:
         lines.append(
             "- Complete your analysis and output your full structured report directly. If any ambiguity requires human decisions, document it within your report (e.g. under `## Open Questions` with `STATUS: NEEDS_HUMAN`), but never end your turn waiting for interactive chat confirmation."
@@ -720,7 +729,10 @@ async def run_factory(
         ) as acp_client:
             session_id = getattr(acp_client, "session_id", None)
             prompt = build_initial_prompt(
-                config.task, config.checks, read_only=config.agent.read_only
+                config.task,
+                config.checks,
+                read_only=config.agent.read_only,
+                workspace=active_cwd,
             )
 
             context_tag = ""
