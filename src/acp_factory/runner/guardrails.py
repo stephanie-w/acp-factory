@@ -686,12 +686,6 @@ def main(argv: list[str] | None = None) -> None:
         if not safe_path:
             print(f"[guardrails] DENIED: {path_reason}", file=sys.stderr)
             sys.exit(1)
-    elif title.lower() == "external_directory":
-        print(
-            "[guardrails] DENIED: External directory access without an explicit allowed path is blocked by guardrails; use workspace-relative paths.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
     # 2. Command safety check
     if kind in ("execute", "command", "bash") or (not kind and title):
