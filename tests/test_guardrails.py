@@ -357,3 +357,182 @@ def test_guardrails_blocks_dotenv_files_and_commands(tmp_path: Path) -> None:
     for safe_cmd in ("cat .env.example", "ls .venv/bin"):
         ok, reason = is_command_safe(safe_cmd)
         assert ok is True, reason
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "env",
+        "/usr/bin/env",
+        "env -0",
+        "env FOO=bar",
+        "env -u TOKEN",
+        "env | grep SECRET",
+        "cd /tmp && env",
+        "FOO=bar env",
+        "bash -c 'env'",
+        "env > out.txt",
+        "env 2> /tmp/env.txt",
+        "> out.txt env",
+    ],
+)
+def test_env_dump_blocked(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is False
+    assert "environment" in (reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "printenv",
+        "/usr/bin/printenv",
+        "printenv -0",
+        "printenv | grep KEY",
+        "/usr/bin/printenv -0",
+        "cd /tmp && printenv",
+        "printenv > out.txt",
+    ],
+)
+def test_printenv_dump_blocked(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is False
+    assert "environment" in (reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "export -p",
+        "export",
+        "export -p PATH",
+        "export | grep SECRET",
+        "cd /tmp && export -p",
+        "export > out.txt",
+    ],
+)
+def test_export_dump_blocked(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is False
+    assert "environment" in (reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'python -c "import os; print(os.environ)"',
+        'python3 -c "import os; print(dict(os.environ))"',
+        'python3 -c "import os, pprint; pprint.pprint(dict(os.environ))"',
+        'python3 -c "import os; print(list(os.environ.items()))"',
+        'python3 -c "import os, sys; sys.stdout.write(str(os.environ))"',
+        'python3 -c "import os; print(os.environb)"',
+        '/usr/bin/python3 -c "import os; print(os.environ)"',
+        'uv run python -c "import os; print(os.environ)"',
+        'cd /tmp && python3 -c "import os; print(os.environ)"',
+    ],
+)
+def test_python_os_environ_probe_blocked(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is False
+    assert "environment" in (reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "env FOO=bar pytest",
+        "/usr/bin/env python3 -m unittest",
+        "env -u TOKEN pytest",
+        "env -i FOO=bar python3 script.py",
+        "export FOO=bar",
+        "export PATH=$PATH:/bin",
+        "printenv USER",
+        "printenv -0 USER",
+        "rg os.environ src/",
+        "git grep os.environ",
+        "pytest -k test_os_environ",
+        "python3 -m unittest",
+        "cat env",
+        "echo env > out.txt",
+        'git commit -m "document env handling"',
+    ],
+)
+def test_safe_env_commands_pass(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is True, reason
+    assert reason is None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "eval env",
+        "command env",
+        "builtin env",
+        "time env",
+        "time -p env",
+        "exec env",
+        "nice env",
+        "nice -n 5 env",
+        "nohup env",
+        "xargs env",
+        "xargs -0 env",
+        "busybox env",
+        "command -p printenv",
+        "nohup export -p",
+        "cat <(env)",
+        "diff <(printenv) <(true)",
+        "cat <(eval env)",
+    ],
+)
+def test_env_dump_wrapper_bypasses_blocked(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is False
+    assert "environment" in (reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "command -v env",
+        "command -V printenv",
+        "eval echo env",
+        "time -p pytest",
+        "nice -n 5 pytest",
+        "nohup pytest",
+        "xargs echo",
+        "busybox ls",
+        "cat <(echo env)",
+        "rg 'eval env' docs/",
+    ],
+)
+def test_env_wrapper_safe_commands_pass(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is True, reason
+    assert reason is None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "python -c \"print('os.environ')\"",
+        "python -c \"import os; print(os.environ.get('USER'))\"",
+        "python3 -c \"import os; print(os.environ['HOME'])\"",
+    ],
+)
+def test_python_single_variable_environ_reads_pass(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is True, reason
+    assert reason is None
+
+
+@pytest.mark.parametrize("cmd", ["env '", 'printenv "', "export '"])
+def test_malformed_env_command_quoting_is_blocked(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd)
+    assert safe is False
+    assert "environment" in (reason or "").lower()
+
+
+@pytest.mark.parametrize("cmd", ["", "   ", "\n\t"])
+def test_empty_commands_pass(cmd: str) -> None:
+    assert is_command_safe(cmd) == (True, None)

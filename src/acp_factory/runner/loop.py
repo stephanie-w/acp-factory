@@ -143,11 +143,16 @@ def build_initial_prompt(
         lines.append(
             "- Complete all necessary research, file modifications, and verification autonomously within your turn."
         )
+    final_clause = (
+        "output strictly the required stage sections and terminal `STATUS:` / `VERDICT:` line."
+        if read_only
+        else "output strictly the required stage sections."
+    )
     lines.extend(
         [
             "- Do not narrate tool calls or announce next steps between tool invocations; call tools directly.",
             "- Prefer targeted, windowed file reads and bounded search commands (`rg`, `fd`) over full-file dumps or unfiltered recursive scans.",
-            "- Keep your final response concise: omit pleasantries, preambles, filler adverbs, and prompt restatements; output strictly the required stage sections and terminal `STATUS:` / `VERDICT:` line.",
+            f"- Keep your final response concise: omit pleasantries, preambles, filler adverbs, and prompt restatements; {final_clause}",
             "",
         ]
     )
@@ -275,9 +280,14 @@ def build_retry_prompt(
             "Do NOT end your turn asking questions or proposing a strategy for approval; "
             "apply all changes directly to the workspace."
         )
+    retry_final_clause = (
+        "and output strictly the required sections and terminal `STATUS:` / `VERDICT:` line."
+        if is_response_check
+        else "and output strictly the required stage sections."
+    )
     lines.append(
         "Do not narrate tool calls or announce next steps; omit pleasantries and preambles, "
-        "and output strictly the required sections and terminal `STATUS:` / `VERDICT:` line."
+        f"{retry_final_clause}"
     )
     return "\n".join(lines)
 
