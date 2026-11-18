@@ -67,6 +67,8 @@ keep_env = ["CUSTOM_TEST_TOKEN"]
 
 Host `GH_TOKEN` is stripped by default. When `FACTORY_GH_TOKEN` is set it is promoted to `GH_TOKEN` for `gh` subprocesses and the internal `FACTORY_GH_TOKEN` variable is not exposed; use `keep_env = ["GH_TOKEN"]` only to intentionally forward a personal token.
 
+Because a fleet target repository's own `.factory/config.toml` can add `keep_env` entries, treat fleet target repositories as fully trusted: they already control arbitrary `pre`/`checks` commands and can read the host environment directly. Central governance should only dispatch fleet runs to repositories whose configuration is trusted to re-inherit host credentials deliberately.
+
 ---
 
 ## 4. Stage, Worktree & Publish Integrity Guards (`runner/worktree.py`, `runner/loop.py`)
