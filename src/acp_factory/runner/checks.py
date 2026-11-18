@@ -199,8 +199,10 @@ def build_workspace_env(
             break
     if skills_dir is None:
         skills_dir = bundled_skills_dir
-    env.setdefault("FACTORY_SKILLS_DIR", skills_dir)
-    env.setdefault("FACTORY_BUNDLED_SKILLS_DIR", bundled_skills_dir)
+    if "FACTORY_SKILLS_DIR" not in keys_to_strip:
+        env["FACTORY_SKILLS_DIR"] = skills_dir
+    if "FACTORY_BUNDLED_SKILLS_DIR" not in keys_to_strip:
+        env["FACTORY_BUNDLED_SKILLS_DIR"] = bundled_skills_dir
 
     if restrict_gh_writes:
         shim_dir = str(_ensure_readonly_gh_shim_dir())

@@ -333,14 +333,9 @@ class FactoryACPClient:
             for ip in self.instruction_paths:
                 if ip not in turn_resources:
                     turn_resources.append(ip)
-            for sp in self.skill_paths:
+            for sp in self.explicit_skill_paths:
                 if sp not in turn_resources:
                     turn_resources.append(sp)
-                templates_dir = sp.parent / "templates"
-                if templates_dir.is_dir():
-                    for tmpl in sorted(templates_dir.glob("*.md")):
-                        if tmpl not in turn_resources:
-                            turn_resources.append(tmpl)
             if self.persona_text or self.skill_paths or self.instruction_paths:
                 effective_prompt = self._decorate_first_turn_prompt(
                     prompt,
