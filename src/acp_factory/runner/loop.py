@@ -398,21 +398,9 @@ def _extract_implementation_notes(response_text: str) -> str | None:
     return notes or None
 
 
-def _update_latest_pointer(
-    factory_dir: Path,
-    run_id: str,
-    *,
-    filename: str,
-    relative_target: Path,
-    text: str,
-) -> None:
-    """Point `.factory/runs/latest` and a `latest-*` artifact at the newest run.
-
-    Symlinks are preferred; when the platform forbids them, the text is copied to
-    the artifact so callers always have a discoverable file.
-    """
+def _update_latest_run_symlink(factory_dir: Path, run_id: str) -> None:
+    """Point `.factory/runs/latest` at the newest run directory."""
     latest_run = factory_dir / "runs" / "latest"
-    latest_artifact = factory_dir / filename
 
     try:
         if latest_run.is_symlink() or latest_run.exists():
@@ -420,6 +408,22 @@ def _update_latest_pointer(
         latest_run.symlink_to(run_id, target_is_directory=True)
     except OSError as exc:
         logger.debug("Could not update latest run symlink: %s", exc)
+
+
+def _update_latest_artifact_pointer(
+    factory_dir: Path,
+    run_id: str,
+    *,
+    filename: str,
+    relative_target: Path,
+    text: str,
+) -> None:
+    """Point a stage-specific `latest-*` artifact at the newest run.
+
+    Symlinks are preferred; when the platform forbids them, the text is copied to
+    the artifact so callers always have a discoverable file.
+    """
+    latest_artifact = factory_dir / filename
 
     try:
         if latest_artifact.is_symlink() or latest_artifact.exists():
@@ -550,11 +554,15 @@ def _persist_run_artifacts(
     }
     (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
+    has_transcripts = bool(turn_transcripts or turn_summaries or turn_condensed)
+    if not config.dry_run and has_transcripts:
+        _update_latest_run_symlink(factory_dir, run_id)
+
     if config.active_stage == "review" and last_response_text.strip():
         report_text = _build_review_report(last_response_text)
         if report_text:
             (run_dir / "report.md").write_text(report_text, encoding="utf-8")
-            _update_latest_pointer(
+            _update_latest_artifact_pointer(
                 factory_dir,
                 run_id,
                 filename="latest-report.md",
@@ -568,7 +576,7 @@ def _persist_run_artifacts(
             (run_dir / "implementation-notes.md").write_text(
                 notes_text, encoding="utf-8"
             )
-            _update_latest_pointer(
+            _update_latest_artifact_pointer(
                 factory_dir,
                 run_id,
                 filename="latest-build-notes.md",

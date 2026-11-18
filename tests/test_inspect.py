@@ -83,6 +83,18 @@ def test_resolve_transcript_path_variants(tmp_path: Path) -> None:
         resolve_transcript_path("nonexistent", workspace=tmp_path)
 
 
+def test_resolve_transcript_path_latest(tmp_path: Path) -> None:
+    """AC-4: explicit `latest` resolves the transcript of the symlinked run."""
+    _write_sample_run(tmp_path, "20261115-100000-older")
+    newest = _write_sample_run(tmp_path, "20261115-130000-newest")
+    runs_dir = tmp_path / ".factory" / "runs"
+    (runs_dir / "latest").symlink_to("20261115-130000-newest", target_is_directory=True)
+
+    resolved = resolve_transcript_path("latest", workspace=tmp_path)
+    assert resolved.resolve() == newest.resolve()
+    assert resolved.parent.parent.name == "latest"
+
+
 def test_filter_tool_calls_and_exit_code() -> None:
     calls = [
         {
