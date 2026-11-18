@@ -135,4 +135,8 @@ Before signaling completion, verify:
 - Stage check commands: `.factory/config.toml` `[checks.<name>]` vs bundled defaults in `src/acp_factory/cli.py`.
 - Validator scripts live externally in `$FACTORY_SKILLS_DIR/<skill>/scripts/validate_*.py` (e.g. `issue-triage/scripts/validate_triage.py`).
 - `justfile` recipes (`just test`, `just test-fast`, `just fix`, `just typecheck`) vs `[checks.*]` — note `[checks.test]` runs `pytest -m 'not slow'`.
+- `.factory/runs/latest/` is a symlink pointing to the most recent run directory (use `.factory/runs/latest/attempt-1/transcript.summary.json` directly with `jq`; note [#54](https://github.com/stephanie-w/acp-factory/issues/54): until fixed, `latest` only updates on `build`/`review` runs, so pass explicit `<run-id>` for `triage`/`spec`).
+- `acp-factory inspect [TARGET]` defaults to the latest run and lists tool calls by default; supported view/filter flags are `--calls` (`-c`), `--thoughts` (`-t`), `--response` (`-r`), `--call <index>`, `--kind` (`-k`), `--failed`, `--grep` (`-g`), `--attempt` (`-a`), and `--json` (there is no `--view` option).
+- `docs/transcript-inspection.md`: `jq` recipes and reproducible Before/After (A/B) token & performance benchmarking workflow using `acp-factory history`, `acp-factory stats <run-id> [--json]`, and `acp-factory inspect <run-id>`.
+
 
