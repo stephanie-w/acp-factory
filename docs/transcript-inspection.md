@@ -199,3 +199,97 @@ jq '.permissions[] | select(.outcome != "approved")' "$SUMMARY"
 RUN_DIR="$(ls -td .factory/runs/20* | head -n 1)"
 jq -s 'to_entries[] | {attempt: (.key + 1), summary: .value.summary}' "$RUN_DIR"/attempt-*/transcript.summary.json
 ```
+
+---
+
+## Reproducible Before/After (A/B) Token & Performance Comparisons
+
+When evaluating prompt changes, CLI environment flags, tool shims, or model swaps, use the built-in `history`, `stats`, and `inspect` commands alongside `jq` to compare runs on the same stage (or same issue via `--dry-run`).
+
+### 1. Identify Candidate Run IDs
+
+List recent runs in chronological order (`acp-factory history` sorts newest-first from `.factory/runs/20*/run.json`):
+
+```bash
+uv run acp-factory history --limit 15
+```
+
+Or filter runs for a specific stage (e.g., `triage`, `spec`, `build`, `review`) directly from `.factory/runs/`:
+
+```bash
+for d in $(ls -td .factory/runs/20* | head -n 15); do
+  jq -c '{run_id, stage, issue_id, model, succeeded, attempts_used, duration_seconds, tokens: .usage.total_tokens}' "$d/run.json"
+done
+```
+
+> **Note:** Until [#54](https://github.com/stephanie-w/acp-factory/issues/54) lands, `.factory/runs/latest` only updates on `build` and `review` runs. Pass the explicit `<run-id>` (or prefix) to `acp-factory stats <run-id>` and `acp-factory inspect <run-id>` when comparing `triage` or `spec` runs.
+
+### 2. Controlled Same-Issue A/B Testing with `--dry-run`
+
+To compare two configurations, prompts, or models on the **exact same GitHub Issue and stage** without mutating GitHub labels or posting comments:
+
+1. **Run Baseline (A)** in `--dry-run` mode (or on a specific model via `--model`):
+   ```bash
+   uv run acp-factory issue <ISSUE_ID> --stage triage --dry-run
+   ```
+   *(Note: `--dry-run` writes its output artifacts to `.factory/runs/dry-run/`. If you want full persisted run directories under `.factory/runs/<timestamp>-<id>/`, run without `--dry-run` on a test issue or copy `.factory/runs/<run-id>` before re-running.)*
+2. **Apply Optimization / Switch Model (B)** and run the same stage again.
+
+### 3. Compare Token Breakdown & Tool Output Volume (`acp-factory stats`)
+
+Run `acp-factory stats <run-id>` on the Before (`RUN_A`) and After (`RUN_B`) run IDs:
+
+```bash
+for r in <RUN_A> <RUN_B>; do
+  echo "=== $r ==="
+  uv run acp-factory stats "$r"
+done
+```
+
+Even when an ACP agent does not emit provider-level `usage_update` token telemetry (`Tokens: 0`), `acp-factory stats` computes a deterministic character-based token estimate (`~4 chars/token`) split across four buckets:
+
+| Bucket | What It Measures | Which Optimizations Affect It |
+| :--- | :--- | :--- |
+| **`prompt`** | Initial task + persona + stage instructions | Lazy skill/template attachment ([#50](https://github.com/stephanie-w/acp-factory/issues/50)), concise prompt headers |
+| **`thought`** | Intermediate agent reasoning & tool-loop narration | Scoped caveman / quiet tool-loop directives ([#53](https://github.com/stephanie-w/acp-factory/issues/53)), `thought_max_chars` |
+| **`response`** | Final assistant stage report / verdict text | Terse final response rules ([#53](https://github.com/stephanie-w/acp-factory/issues/53)) |
+| **`tool output`** | Cumulative characters returned by `read`, `execute`, etc. | Low-noise CLI env & `RIPGREP_CONFIG_PATH` ([#49](https://github.com/stephanie-w/acp-factory/issues/49)), noisy-path guardrails ([#51](https://github.com/stephanie-w/acp-factory/issues/51)), `PATH` tool shims ([#52](https://github.com/stephanie-w/acp-factory/issues/52)) |
+
+### 4. Side-by-Side JSON Comparison with `jq`
+
+To compare exact character and estimated-token metrics between two or more runs in a single table using `acp-factory stats <run-id> --json`:
+
+```bash
+for r in <RUN_A> <RUN_B>; do
+  uv run acp-factory stats "$r" --json | jq '{
+    transcript: (.transcript | split("/")[-3]),
+    duration_s: .duration_seconds,
+    tool_calls: .tool_call_count,
+    failed_calls: .failed_count,
+    tool_output_chars: .total_output_chars,
+    est_tokens_total: .estimated_tokens,
+    breakdown: .estimated_tokens_breakdown
+  }'
+done
+```
+
+### 5. Drill Into the Heaviest Tool Calls (`acp-factory inspect`)
+
+When a run has high `tool_output` or `thought` tokens, use `acp-factory inspect` to pinpoint the exact cause:
+
+```bash
+# List all tool calls with kind, status, exit code, and duration
+uv run acp-factory inspect <RUN_ID>
+
+# Filter only shell executions or failed calls
+uv run acp-factory inspect <RUN_ID> --kind execute
+uv run acp-factory inspect <RUN_ID> --failed
+
+# Inspect the full input and output of a specific tool call (e.g. #7 from Top 10 Largest Outputs)
+uv run acp-factory inspect <RUN_ID> --call 7
+
+# Inspect intermediate thoughts/narration or final response
+uv run acp-factory inspect <RUN_ID> --thoughts
+uv run acp-factory inspect <RUN_ID> --response
+```
+
