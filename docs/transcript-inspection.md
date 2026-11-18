@@ -222,8 +222,6 @@ for d in $(ls -td .factory/runs/20* | head -n 15); do
 done
 ```
 
-> **Note:** Until [#54](https://github.com/stephanie-w/acp-factory/issues/54) lands, `.factory/runs/latest` only updates on `build` and `review` runs. Pass the explicit `<run-id>` (or prefix) to `acp-factory stats <run-id>` and `acp-factory inspect <run-id>` when comparing `triage` or `spec` runs.
-
 ### 2. Controlled Same-Issue A/B Testing with `--dry-run`
 
 To compare two configurations, prompts, or models on the **exact same GitHub Issue and stage** without mutating GitHub labels or posting comments:

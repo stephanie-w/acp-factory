@@ -332,13 +332,14 @@ def _persist(
     run_id: str,
     response_text: str = "",
     succeeded: bool = True,
+    attempts_used: int = 1,
 ) -> Path | None:
     return _persist_run_artifacts(
         workspace,
         run_id,
         config,
         succeeded=succeeded,
-        attempts_used=1,
+        attempts_used=attempts_used,
         total_duration=0.5,
         setup_logs=[],
         turn_transcripts=[],
@@ -466,7 +467,7 @@ def test_persist_run_artifacts_non_review_stage(tmp_path: Path) -> None:
     assert run_dir is not None
     assert not (run_dir / "report.md").exists()
     assert not (tmp_path / ".factory" / "latest-report.md").exists()
-    assert not (tmp_path / ".factory" / "runs" / "latest").exists()
+    assert os.readlink(tmp_path / ".factory" / "runs" / "latest") == "run-build"
 
     # A workspace without `.factory/` is a no-op, not an error.
     bare_workspace = tmp_path / "bare"
@@ -480,6 +481,46 @@ def test_persist_run_artifacts_non_review_stage(tmp_path: Path) -> None:
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["triage", "spec", "build", "review", "retro", None],
+    ids=["triage", "spec", "build", "review", "retro", "ad_hoc"],
+)
+def test_persist_run_artifacts_updates_latest_symlink_for_all_stages(
+    tmp_path: Path, stage: str | None
+) -> None:
+    """AC-1: every completed run refreshes `.factory/runs/latest`."""
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Run stage", active_stage=stage)
+
+    run_dir = _persist(tmp_path, config=config, run_id="run-newest")
+
+    assert run_dir is not None
+    latest = tmp_path / ".factory" / "runs" / "latest"
+    assert latest.is_symlink()
+    assert os.readlink(latest) == "run-newest"
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "attempts_used"),
+    [(True, 1), (False, 0)],
+    ids=["dry_run", "setup_failure"],
+)
+def test_persist_run_artifacts_dry_run_or_setup_failure(
+    tmp_path: Path, dry_run: bool, attempts_used: int
+) -> None:
+    """AC-3: dry runs and setup failures leave any existing latest pointer untouched."""
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Run stage", active_stage="triage", dry_run=dry_run)
+
+    run_dir = _persist(
+        tmp_path, config=config, run_id="run-skipped", attempts_used=attempts_used
+    )
+
+    assert run_dir is not None
+    assert not (tmp_path / ".factory" / "runs" / "latest").exists()
 
 
 @pytest.mark.parametrize(
@@ -743,7 +784,7 @@ def test_persist_run_artifacts_build_notes(tmp_path: Path) -> None:
     assert plain_dir is not None
     assert not (plain_dir / "implementation-notes.md").exists()
     assert not (plain_ws / ".factory" / "latest-build-notes.md").exists()
-    assert not (plain_ws / ".factory" / "runs" / "latest").exists()
+    assert os.readlink(plain_ws / ".factory" / "runs" / "latest") == "run-build-plain"
 
 
 async def test_review_stage_injects_prior_build_notes(tmp_path: Path) -> None:
