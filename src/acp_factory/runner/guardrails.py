@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -100,6 +101,34 @@ _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON_NAME_RE = re.compile(r"(?:python|pythonw|pypy)\d*(?:\.\d+)*$")
 _SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash", "ash", "ksh", "fish"})
 _SHELL_CONTROL_CHARS = frozenset("|&;()")
+_COMMAND_WRAPPERS = frozenset(
+    {"eval", "command", "builtin", "time", "exec", "nice", "nohup", "xargs", "busybox"}
+)
+_WRAPPER_OPTIONS_WITH_VALUE: dict[str, frozenset[str]] = {
+    "nice": frozenset({"-n", "--adjustment"}),
+    "time": frozenset({"-f", "--format", "-o", "--output"}),
+    "exec": frozenset({"-a"}),
+    "xargs": frozenset(
+        {
+            "-a",
+            "--arg-file",
+            "-d",
+            "--delimiter",
+            "-E",
+            "--eof",
+            "-I",
+            "--replace",
+            "-L",
+            "--max-lines",
+            "-n",
+            "--max-args",
+            "-P",
+            "--max-procs",
+            "-s",
+            "--max-chars",
+        }
+    ),
+}
 _ENV_OPTIONS_WITH_VALUE = frozenset({"-u", "--unset", "-C", "--chdir"})
 _ENV_OPTIONS_WITH_STRING = frozenset({"-S", "--split-string"})
 _ENV_INLINE_STRING_PREFIXES = ("--unset=", "--chdir=", "--split-string=")
@@ -186,12 +215,21 @@ def _strip_redirections(tokens: Sequence[str]) -> list[str]:
     return cleaned
 
 
+def _is_shell_separator(arg: str) -> bool:
+    """Return True for control operators, including process-substitution openers."""
+    if not arg:
+        return False
+    if arg.endswith("<(") or arg.endswith(">("):
+        return True
+    return all(char in _SHELL_CONTROL_CHARS for char in arg)
+
+
 def _iter_command_segments(tokens: Sequence[str]) -> list[list[str]]:
     """Split tokens into simple-command segments at shell control operators."""
     segments: list[list[str]] = []
     segment: list[str] = []
     for arg in tokens:
-        if arg and all(char in _SHELL_CONTROL_CHARS for char in arg):
+        if _is_shell_separator(arg):
             if segment:
                 segments.append(segment)
                 segment = []
@@ -261,14 +299,48 @@ def _check_export_invocation(args: Sequence[str]) -> str | None:
     return _environment_dump_reason("export")
 
 
+def _python_code_dumps_environ(code: str) -> bool:
+    """Return True when inline Python dumps ``os.environ``/``os.environb``.
+
+    Single-variable reads via ``os.environ.get(...)`` or ``os.environ[...]`` are
+    allowed, mirroring the permitted ``printenv USER`` query form. Malformed code
+    falls back to a conservative substring check.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return "os.environ" in code
+
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and node.attr in ("environ", "environb")
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+        ):
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Attribute) and parent.attr == "get":
+            continue
+        if isinstance(parent, ast.Subscript) and parent.value is node:
+            continue
+        return True
+    return False
+
+
 def _check_python_inline(tokens: Sequence[str], interpreter_index: int) -> str | None:
-    """Block inline Python ``-c`` probes that reference ``os.environ``/``os.environb``."""
+    """Block inline Python ``-c`` probes that dump ``os.environ``/``os.environb``."""
     index = interpreter_index + 1
     while index < len(tokens):
         arg = tokens[index]
         if arg == "-c":
             code = " ".join(tokens[index + 1 :])
-            if "os.environ" in code:
+            if _python_code_dumps_environ(code):
                 return "Inline Python environment dump via 'os.environ' is blocked"
             return None
         if arg == "-m" or not arg.startswith("-"):
@@ -312,6 +384,43 @@ def _check_shell_wrapper(args: Sequence[str]) -> str | None:
     return None
 
 
+def _check_command_wrapper(name: str, args: Sequence[str]) -> str | None:
+    """Inspect the command wrapped by a shell keyword or prefix launcher."""
+    if name == "eval":
+        if not args:
+            return None
+        return _check_env_dump_command(" ".join(args))
+    if name == "command":
+        # ``-v``/``-V`` only resolve how a name would be interpreted.
+        for index, arg in enumerate(args):
+            if arg in ("-v", "-V"):
+                return None
+            if arg == "--":
+                return _check_command_tokens(args[index + 1 :])
+            if arg.startswith("-") and arg != "-":
+                continue
+            return _check_command_tokens(args[index:])
+        return None
+
+    options_with_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg in options_with_value:
+            index += 2
+            continue
+        if arg.startswith("-") and arg != "-":
+            index += 1
+            continue
+        break
+    if index < len(args):
+        return _check_command_tokens(args[index:])
+    return None
+
+
 def _check_command_tokens(tokens: Sequence[str]) -> str | None:
     """Inspect a single simple command for environment-dumping invocations."""
     index = 0
@@ -337,6 +446,8 @@ def _check_command_tokens(tokens: Sequence[str]) -> str | None:
         return None
     if name in _SHELL_WRAPPERS:
         return _check_shell_wrapper(args)
+    if name in _COMMAND_WRAPPERS:
+        return _check_command_wrapper(name, args)
     return None
 
 
