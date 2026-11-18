@@ -75,6 +75,10 @@ DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         "Output redirection targeting system or sensitive host credential paths is blocked",
     ),
+    (
+        re.compile(r"\bgh\s+auth\b", re.IGNORECASE),
+        "GitHub auth commands (gh auth) are blocked for agents",
+    ),
 ]
 
 SENSITIVE_HOST_PATHS: list[re.Pattern[str]] = [
