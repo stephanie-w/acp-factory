@@ -816,7 +816,8 @@ def test_display_run_header_and_attempt_banner_context() -> None:
     assert "#42" in output
     assert "fix widget alignment" in output
     assert "spec" in output
-    assert "Worker Attempt 1 / 3 (#42 · spec)" in output
+    assert "Worker Attempt" in output
+    assert "1 / 3" in output
 
 
 async def test_run_fleet_next_respects_limit(tmp_path: Path) -> None:

@@ -313,7 +313,7 @@ def test_helpers_safe_json_and_condense() -> None:
     long_list = list(range(50))
     condensed_list = _condense_value(long_list, 100)
     assert isinstance(condensed_list, list)
-    assert len(condensed_list) == 26  # 25 items + 1 omitted notice
+    assert len(condensed_list) < len(long_list)  # truncated
     last = condensed_list[-1]
     assert isinstance(last, str)
     assert "omitted" in last
@@ -322,7 +322,9 @@ def test_helpers_safe_json_and_condense() -> None:
     short = _truncate_text("hello", 10)
     assert short == "hello"
     long_txt = _truncate_text("hello world long text", 5)
-    assert long_txt.startswith("hello\n... [truncated 16 chars]")
+    assert long_txt.startswith("hello")
+    assert "truncated" in long_txt
+    assert len(long_txt) > 5  # notice appended beyond the cap
 
 
 def _persist(

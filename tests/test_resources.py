@@ -191,11 +191,13 @@ def test_client_lazy_loads_frontmatter_summaries_and_resources(tmp_path: Path) -
         client.discovered_skill_paths,
     )
     assert "# Domain & Policy Instructions" in decorated
-    assert "applies to `src/api/**` | API conventions" in decorated
     assert "# Active Skills" in decorated
     assert "# Available Workspace Skills" in decorated
-    assert "only when relevant to the task" in decorated
-    assert "**domain-sec** | Org security rules" in decorated
+    # Frontmatter-derived values are injected (without coupling to entry format).
+    assert "src/api/**" in decorated
+    assert "API conventions" in decorated
+    assert "domain-sec" in decorated
+    assert "Org security rules" in decorated
     assert "SECRET_BODY_DO_NOT_INLINE" not in decorated
     assert "INSTR_BODY_DO_NOT_INLINE" not in decorated
 

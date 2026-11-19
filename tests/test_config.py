@@ -287,9 +287,14 @@ def test_scaffolded_multi_stage_config_resolves_all_stages_and_skills(
         assert client.persona_text is not None
         decorated = client._decorate_first_turn_prompt("Run task", client.skill_paths)
         assert "# Active Skills" in decorated
-        if stage_name != "retro":
-            assert "Template:" in decorated
-            assert "Validation Script:" in decorated
+        # Non-retro skills inject their templates and validation scripts by path.
+        for sp in client.skill_paths:
+            templates_dir = sp.parent / "templates"
+            scripts_dir = sp.parent / "scripts"
+            for tmpl in sorted(templates_dir.glob("*.md")) if templates_dir.is_dir() else ():
+                assert str(tmpl) in decorated
+            for script in sorted(scripts_dir.glob("*.py")) if scripts_dir.is_dir() else ():
+                assert str(script) in decorated
 
     assert "security" in cfg.named_checks
     assert cfg.named_checks["security"].skills == ["security-auditor"]

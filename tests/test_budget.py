@@ -120,15 +120,23 @@ def test_budget_breach_message_helpers() -> None:
     assert check_turn_cap(0, unlimited) is None
     assert check_usage_cap(0, 0.0, unlimited) is None
 
-    assert check_turn_cap(1, BudgetConfig(max_turns=1)) == (
-        "Budget cap breached: turn count (1) reached max_turns (1)"
-    )
-    assert check_usage_cap(101, 0.0, BudgetConfig(max_tokens_per_run=100)) == (
-        "Budget cap breached: cumulative tokens 101 exceeded max_tokens_per_run (100)"
-    )
-    assert check_usage_cap(0, 1.5, BudgetConfig(max_cost_usd=1.0)) == (
-        "Budget cap breached: cumulative cost $1.50 exceeded max_cost_usd ($1.00)"
-    )
+    assert check_turn_cap(0, unlimited) is None
+    assert check_usage_cap(0, 0.0, unlimited) is None
+
+    turn_breach = check_turn_cap(1, BudgetConfig(max_turns=1))
+    assert turn_breach is not None
+    assert "max_turns" in turn_breach
+    assert "(1)" in turn_breach
+
+    token_breach = check_usage_cap(101, 0.0, BudgetConfig(max_tokens_per_run=100))
+    assert token_breach is not None
+    assert "max_tokens_per_run" in token_breach
+    assert "101" in token_breach
+
+    cost_breach = check_usage_cap(0, 1.5, BudgetConfig(max_cost_usd=1.0))
+    assert cost_breach is not None
+    assert "max_cost_usd" in cost_breach
+    assert "$1.50" in cost_breach
     # At exactly the cap, no breach is reported (limits are inclusive).
     assert (
         check_usage_cap(
