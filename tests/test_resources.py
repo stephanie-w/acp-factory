@@ -413,12 +413,6 @@ def test_build_workspace_env_uses_bundled_skills_dir_when_no_external_dir(
     monkeypatch.delenv("FACTORY_RESOURCES_DIRS", raising=False)
     monkeypatch.setenv("FACTORY_SKILLS_DIR", "/stale/parent/skills")
     monkeypatch.setenv("FACTORY_BUNDLED_SKILLS_DIR", "/stale/parent/bundled-skills")
-    monkeypatch.setattr(
-        "acp_factory.resources.resolve_resource_dirs",
-        lambda **_kwargs: (
-            [get_bundled_resources_dir()] if _kwargs.get("include_bundled") else []
-        ),
-    )
     env = build_workspace_env(tmp_path)
     expected_skills = str((get_bundled_resources_dir() / "skills").resolve())
     assert env["FACTORY_SKILLS_DIR"] == expected_skills

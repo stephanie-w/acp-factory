@@ -20,13 +20,22 @@ def _write_sample_run(
     workspace: Path,
     run_id: str = "20261115-120000-abcdef",
     *,
-    started_at: str = "2026-11-15T12:00:00Z",
+    timestamp: str = "2026-11-15T12:00:00+00:00",
 ) -> Path:
     run_dir = workspace / ".factory" / "runs" / run_id
     attempt_dir = run_dir / "attempt-1"
     attempt_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run.json").write_text(
-        json.dumps({"run_id": run_id, "started_at": started_at, "succeeded": True}),
+        json.dumps(
+            {
+                "run_id": run_id,
+                "timestamp": timestamp,
+                "stage": "build",
+                "succeeded": True,
+                "attempts_used": 1,
+                "duration_seconds": 12.5,
+            }
+        ),
         encoding="utf-8",
     )
     transcript = {
@@ -69,10 +78,10 @@ def _write_sample_run(
 
 def test_resolve_transcript_path_variants(tmp_path: Path) -> None:
     older = _write_sample_run(
-        tmp_path, "20261115-110000-111111", started_at="2026-11-15T11:00:00Z"
+        tmp_path, "20261115-110000-111111", timestamp="2026-11-15T11:00:00+00:00"
     )
     newer = _write_sample_run(
-        tmp_path, "20261115-120000-222222", started_at="2026-11-15T12:00:00Z"
+        tmp_path, "20261115-120000-222222", timestamp="2026-11-15T12:00:00+00:00"
     )
 
     assert resolve_transcript_path(None, workspace=tmp_path) == newer
@@ -150,27 +159,30 @@ def test_cli_inspect_views(tmp_path: Path) -> None:
     assert payload["tool_call_matches"][0]["index"] == 0
 
 
-def test_turn_summary_forwards_tool_call_duration() -> None:
-    """TurnEventTracker and TurnSummary preserve duration_seconds from acpterm."""
+def test_turn_summary_uses_real_recorder_no_per_call_duration() -> None:
+    """TurnEventTracker and TurnSummary preserve turn-level duration from acpterm.
+
+    acpterm's ``TranscriptRecorder`` never records a per-tool-call ``duration_seconds``
+    (only turn-level via ``set_duration``). Driving the real recorder API confirms the
+    TurnSummary forwards the turn duration and does not invent per-call durations.
+    """
     from acp_factory.acp.events import TurnEventTracker
 
     tracker = TurnEventTracker()
     tracker.begin_turn("hi")
-    tracker.recorder.tool_calls["tc_1"] = {
-        "title": "Run pytest",
-        "kind": "execute",
-        "status": "completed",
-        "content": ["ok"],
-        "raw_input": {},
-        "raw_output": {"metadata": {"exit": 0}},
-        "duration_seconds": 1.234,
-    }
+    tracker.recorder.add_tool_call("tc_1", "Run pytest", "execute")
+    tracker.recorder.update_tool_call(
+        "tc_1", status="completed", content="ok", raw_output={"metadata": {"exit": 0}}
+    )
     summary = tracker.end_turn("end_turn")
     full = summary.to_dict()
     condensed = summary.to_condensed_dict()
 
-    assert full["tool_calls"][0]["duration_seconds"] == 1.234
-    assert condensed["tool_calls"][0]["duration_seconds"] == 1.234
+    assert summary.duration_seconds >= 0.0
+    assert full["summary"]["duration_seconds"] >= 0.0
+    assert condensed["summary"]["duration_seconds"] >= 0.0
+    assert "duration_seconds" not in full["tool_calls"][0]
+    assert "duration_seconds" not in condensed["tool_calls"][0]
 
 
 def test_cli_stats_single_and_aggregate(tmp_path: Path) -> None:
@@ -225,13 +237,13 @@ def test_cli_stats_single_and_aggregate(tmp_path: Path) -> None:
 def test_cli_stats_token_usage_telemetry_and_fallback(tmp_path: Path) -> None:
     """Aggregate stats tracks reported tokens, cost, telemetry count, and ~est. fallback."""
     t1 = _write_sample_run(
-        tmp_path, "20261115-120000-runone", started_at="2026-11-15T12:00:00Z"
+        tmp_path, "20261115-120000-runone", timestamp="2026-11-15T12:00:00+00:00"
     )
     (t1.parent.parent / "run.json").write_text(
         json.dumps(
             {
                 "run_id": "20261115-120000-runone",
-                "started_at": "2026-11-15T12:00:00Z",
+                "timestamp": "2026-11-15T12:00:00+00:00",
                 "stage": "build",
                 "model": "claude-sonnet",
                 "succeeded": True,
@@ -248,13 +260,13 @@ def test_cli_stats_token_usage_telemetry_and_fallback(tmp_path: Path) -> None:
     )
 
     t2 = _write_sample_run(
-        tmp_path, "20261115-130000-runtwo", started_at="2026-11-15T13:00:00Z"
+        tmp_path, "20261115-130000-runtwo", timestamp="2026-11-15T13:00:00+00:00"
     )
     (t2.parent.parent / "run.json").write_text(
         json.dumps(
             {
                 "run_id": "20261115-130000-runtwo",
-                "started_at": "2026-11-15T13:00:00Z",
+                "timestamp": "2026-11-15T13:00:00+00:00",
                 "stage": "triage",
                 "model": "deepseek-flash",
                 "succeeded": True,
