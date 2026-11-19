@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
-from acp_factory.acp.client import FactoryACPClient
 from acp_factory.config import AgentConfig, FactoryConfig, GuardrailsConfig
 from acp_factory.runner.guardrails import (
     is_command_safe,
@@ -194,26 +194,37 @@ def test_guardrails_main_decisions(
     assert exc.value.code == expected_code
 
 
-def test_factory_config_guardrails_schema() -> None:
+def test_factory_config_guardrails_schema_defaults() -> None:
     cfg = FactoryConfig()
     assert cfg.guardrails.enabled is True
     assert cfg.guardrails.denied_commands == []
     assert cfg.guardrails.allowed_paths == []
 
-    custom = FactoryConfig(
-        guardrails=GuardrailsConfig(
-            enabled=False,
-            denied_commands=["drop database"],
-            allowed_paths=["/tmp/shared"],
-        )
+
+async def test_factory_acp_client_injects_guardrail_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from acp_factory.acp import client as client_mod
+
+    captured_hooks: list[Any] = []
+
+    class FakeAgent:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args
+            self.session_id = None
+            captured_hooks.extend(cast(list[Any], kwargs.get("permission_hooks", [])))
+
+        async def start(self, **kwargs: object) -> None:
+            _ = kwargs
+
+    monkeypatch.setattr(client_mod, "ACPAgent", FakeAgent)
+    monkeypatch.setattr(
+        client_mod,
+        "resolve_factory_agent_command",
+        lambda _cfg: ["python3", "-c", "pass"],
     )
-    assert custom.guardrails.enabled is False
-    assert custom.guardrails.denied_commands == ["drop database"]
-    assert custom.guardrails.allowed_paths == ["/tmp/shared"]
 
-
-async def test_factory_acp_client_injects_guardrail_hook(tmp_path: Path) -> None:
-    client = FactoryACPClient(
+    client = client_mod.FactoryACPClient(
         workspace=tmp_path,
         agent_config=AgentConfig(name="opencode"),
         guardrails=GuardrailsConfig(
@@ -221,24 +232,27 @@ async def test_factory_acp_client_injects_guardrail_hook(tmp_path: Path) -> None
             denied_commands=["npm publish"],
             allowed_paths=["/tmp/allowed"],
         ),
+        deny_runs=True,
     )
-    assert client.guardrails.enabled is True
+    await client.start()
 
-    # Disabled guardrails
-    client_disabled = FactoryACPClient(
+    assert len(captured_hooks) == 1
+    hook = captured_hooks[0]
+    assert hook.name == "factory-guardrails"
+    assert hook.on == "permission"
+    assert "--allow-path \"/tmp/allowed\"" in hook.run
+    assert "--deny-cmd \"npm publish\"" in hook.run
+    assert "--deny-runs" in hook.run
+
+    # Disabling guardrails injects no hook.
+    captured_hooks.clear()
+    client_disabled = client_mod.FactoryACPClient(
         workspace=tmp_path,
         agent_config=AgentConfig(name="opencode"),
         guardrails=GuardrailsConfig(enabled=False),
     )
-    assert client_disabled.guardrails.enabled is False
-
-    # Deny runs flag
-    client_deny_runs = FactoryACPClient(
-        workspace=tmp_path,
-        agent_config=AgentConfig(name="opencode"),
-        deny_runs=True,
-    )
-    assert client_deny_runs.deny_runs is True
+    await client_disabled.start()
+    assert captured_hooks == []
 
 
 def test_deny_runs_blocks_run_artifacts_paths(tmp_path: Path) -> None:

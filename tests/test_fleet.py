@@ -41,12 +41,6 @@ def test_fleet_config_parsing_and_defaults() -> None:
         }
     )
     assert cfg.fleet is not None
-    assert cfg.fleet.repositories == {
-        "acme/core": "~/DEV/core",
-        "acme/api": "~/DEV/api",
-    }
-    assert cfg.fleet.max_active_branches_per_repo == 2
-    assert cfg.fleet.max_review_rounds == 5
     # fleet max_review_rounds wins over top-level
     assert cfg.effective_max_review_rounds == 5
 

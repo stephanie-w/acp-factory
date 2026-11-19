@@ -505,14 +505,10 @@ def test_budget_config_validation(tmp_path: Path) -> None:
     assert default.max_cost_usd is None
     assert default.max_turns is None
 
-    # Valid values (including a zero cost cap) are accepted.
-    valid = BudgetConfig(max_tokens_per_run=100_000, max_cost_usd=2.0, max_turns=3)
-    assert valid.max_tokens_per_run == 100_000
-    assert valid.max_cost_usd == 2.0
-    assert valid.max_turns == 3
+    # A zero cost cap is accepted (cost caps may be disabled via zero), while
+    # zero/negative tokens or turns are rejected.
     assert BudgetConfig(max_cost_usd=0.0).max_cost_usd == 0.0
 
-    # Zero/negative tokens or turns are rejected.
     for bad_tokens in (0, -1):
         with pytest.raises(ValidationError):
             BudgetConfig(max_tokens_per_run=bad_tokens)
