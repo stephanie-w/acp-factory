@@ -120,6 +120,18 @@ def test_resolve_main_repo_root_timeout(tmp_path: Path) -> None:
         assert resolve_main_repo_root(sub_dir) == main_root
 
 
+def test_resolve_main_repo_root_git_oserror_falls_back(tmp_path: Path) -> None:
+    main_root = _init_repo(tmp_path / "main")
+    sub_dir = main_root / "src"
+    sub_dir.mkdir()
+
+    with patch(
+        "acp_factory.runner.worktree.subprocess.run",
+        side_effect=FileNotFoundError("git is not installed"),
+    ):
+        assert resolve_main_repo_root(sub_dir) == main_root
+
+
 def test_issue_worktree_path_no_subprocess(tmp_path: Path) -> None:
     main_root = _init_repo(tmp_path / "main")
 

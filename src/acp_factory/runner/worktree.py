@@ -362,13 +362,9 @@ class WorktreeManager:
     @staticmethod
     def issue_worktree_path(repo_root: Path, issue_number: int) -> Path:
         """Return the deterministic worktree path `.worktrees/issue-<id>` for a GitHub Issue."""
-        resolved = repo_root.resolve()
-        main_root = (
-            resolved
-            if (resolved / ".git").is_dir()
-            else resolve_main_repo_root(resolved)
+        return (
+            resolve_main_repo_root(repo_root) / ".worktrees" / f"issue-{issue_number}"
         )
-        return main_root / ".worktrees" / f"issue-{issue_number}"
 
     @staticmethod
     def issue_branch_name(issue_number: int) -> str:
