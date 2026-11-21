@@ -181,8 +181,8 @@ def test_turn_summary_uses_real_recorder_no_per_call_duration() -> None:
     assert summary.duration_seconds >= 0.0
     assert full["summary"]["duration_seconds"] >= 0.0
     assert condensed["summary"]["duration_seconds"] >= 0.0
-    assert "duration_seconds" not in full["tool_calls"][0]
-    assert "duration_seconds" not in condensed["tool_calls"][0]
+    assert full["tool_calls"][0]["duration_seconds"] >= 0.0
+    assert condensed["tool_calls"][0]["duration_seconds"] >= 0.0
 
 
 def test_cli_stats_single_and_aggregate(tmp_path: Path) -> None:
