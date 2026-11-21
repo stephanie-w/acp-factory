@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -351,6 +352,61 @@ def test_guardrails_main_warns_on_invalid_env_json(
     err = capsys.readouterr().err
     assert "FACTORY_GUARDRAILS_ALLOWED_PATHS" in err
     assert "FACTORY_GUARDRAILS_DENIED_COMMANDS" in err
+
+
+def test_path_contained_allows_spill_reads(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    with tempfile.TemporaryDirectory(prefix="acp-factory-spill-") as spill_root:
+        spill_path = Path(spill_root) / "check-output-abc123.log"
+        spill_path.write_text("omitted middle line\n", encoding="utf-8")
+
+        assert is_path_contained(spill_path, ws, is_read=True) == (True, None)
+        assert is_path_contained(spill_path, ws, is_read=True, deny_runs=True) == (
+            True,
+            None,
+        )
+
+
+def test_path_contained_denies_spill_writes(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    with tempfile.TemporaryDirectory(prefix="acp-factory-spill-") as spill_root:
+        spill_path = Path(spill_root) / "check-output-abc123.log"
+        spill_path.write_text("omitted middle line\n", encoding="utf-8")
+
+        safe, reason = is_path_contained(spill_path, ws, is_read=False)
+        assert safe is False
+        assert "escapes workspace" in (reason or "")
+
+
+def test_path_contained_denies_arbitrary_temp_and_runs(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    with tempfile.TemporaryDirectory() as generic_root:
+        generic_path = Path(generic_root) / "dump.log"
+        generic_path.write_text("unrelated temp data\n", encoding="utf-8")
+
+        safe, reason = is_path_contained(generic_path, ws, is_read=True)
+        assert safe is False
+        assert "escapes workspace" in (reason or "")
+
+    # A look-alike directory outside the system temp root must not gain access.
+    spoofed_root = tmp_path / "acp-factory-spill-spoofed"
+    spoofed_root.mkdir()
+    spoofed_path = spoofed_root / "check-output.log"
+    spoofed_path.write_text("not a factory spill file\n", encoding="utf-8")
+    assert is_path_contained(spoofed_path, ws, is_read=True)[0] is False
+
+    runs_file = ws / ".factory" / "runs" / "20261121-run" / "attempt-1" / "log.txt"
+    runs_file.parent.mkdir(parents=True)
+    runs_file.touch()
+    safe, reason = is_path_contained(runs_file, ws, is_read=True, deny_runs=True)
+    assert safe is False
+    assert "restricted" in (reason or "")
 
 
 def test_guardrails_blocks_dotenv_files_and_commands(tmp_path: Path) -> None:

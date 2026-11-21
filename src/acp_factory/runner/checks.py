@@ -10,6 +10,7 @@ import signal
 import stat
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,7 @@ class CheckResult:
     truncated_output: str
     duration_seconds: float
     status: Literal["pass", "retry", "stop"] = "pass"
+    spill_path: Path | None = None
 
 
 _GH_READONLY_SHIM_SCRIPT = """\
@@ -300,20 +302,42 @@ def build_workspace_env(
     return env
 
 
-def truncate_check_output(
-    text: str,
-    max_lines: int = 150,
-    max_chars: int = 12000,
-) -> str:
-    """Truncate check output by both line count and character ceiling.
+DEFAULT_MAX_OUTPUT_LINES = 150
+DEFAULT_MAX_OUTPUT_CHARS = 12000
 
-    Preserves the first few lines (command header/summary) and the last `max_lines`
-    lines where stack traces and assertion failures typically appear, then applies
-    a 60/40 character ceiling (`max_chars`) so ultra-wide single-line dumps cannot
-    overflow the agent's context window.
+_SPILL_NOTICE_TEMPLATE = (
+    "\n\nFull output saved to {path} — use rg/read to inspect omitted lines"
+)
+
+
+def _write_spill_file(full_text: str, spill_dir: Path) -> Path:
+    """Write untruncated output to a private per-check spill file.
+
+    Files are created with mode ``0o600`` so output that may contain host
+    credentials is not readable by other local users.
+    """
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    spill_path = spill_dir / f"check-output-{uuid.uuid4().hex}.log"
+    fd = os.open(spill_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(full_text)
+    return spill_path
+
+
+def _truncate_and_spill(
+    text: str,
+    *,
+    max_lines: int,
+    max_chars: int,
+    spill_dir: Path | None,
+) -> tuple[str, Path | None]:
+    """Truncate output and optionally spill the full text to disk.
+
+    Returns the truncated text and the spill file path (if one was written).
     """
     lines = text.splitlines()
     result = text
+    truncated = False
     if len(lines) > max_lines:
         head_count = min(15, max(5, max_lines // 10))
         tail_count = max(1, max_lines - head_count)
@@ -326,6 +350,7 @@ def truncate_check_output(
                 f"... [truncated {omitted} lines of output; showing last {tail_count} lines] ...\n\n"
                 f"{tail}"
             )
+            truncated = True
 
     if max_chars > 0 and len(result) > max_chars:
         head_chars = max(1, int(max_chars * 0.6))
@@ -337,6 +362,36 @@ def truncate_check_output(
                 f"... [truncated {omitted_chars} characters of output] ...\n\n"
                 f"{result[-tail_chars:]}"
             )
+            truncated = True
+
+    spill_path: Path | None = None
+    if truncated and spill_dir is not None:
+        spill_path = _write_spill_file(text, spill_dir)
+        result = f"{result}{_SPILL_NOTICE_TEMPLATE.format(path=spill_path)}"
+    return result, spill_path
+
+
+def truncate_check_output(
+    text: str,
+    max_lines: int = DEFAULT_MAX_OUTPUT_LINES,
+    max_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
+    spill_dir: Path | None = None,
+) -> str:
+    """Truncate check output by both line count and character ceiling.
+
+    Preserves the first few lines (command header/summary) and the last `max_lines`
+    lines where stack traces and assertion failures typically appear, then applies
+    a 60/40 character ceiling (`max_chars`) so ultra-wide single-line dumps cannot
+    overflow the agent's context window. When output is truncated and `spill_dir`
+    is provided, the full text is written there and the returned notice points at
+    the file so agents can inspect omitted regions without re-running the check.
+    """
+    result, _ = _truncate_and_spill(
+        text,
+        max_lines=max_lines,
+        max_chars=max_chars,
+        spill_dir=spill_dir,
+    )
     return result
 
 
@@ -444,7 +499,8 @@ async def run_single_check(
     resources_dir: Path | None = None,
     resource_dirs: list[Path] | None = None,
     discover_apm_resources: bool = True,
-    max_output_lines: int = 150,
+    max_output_lines: int = DEFAULT_MAX_OUTPUT_LINES,
+    spill_dir: Path | None = None,
     extra_env: dict[str, str] | None = None,
     strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
     keep_env: list[str] | set[str] | tuple[str, ...] | None = None,
@@ -461,6 +517,12 @@ async def run_single_check(
         )
         passed = rc == 0
         chk_status: Literal["pass", "retry", "stop"] = "pass" if rc == 0 else "retry"
+        truncated_output, spill_path = _truncate_and_spill(
+            output,
+            max_lines=max_output_lines,
+            max_chars=DEFAULT_MAX_OUTPUT_CHARS,
+            spill_dir=spill_dir,
+        )
         return CheckResult(
             name=check.name,
             check_type="cmd",
@@ -468,9 +530,10 @@ async def run_single_check(
             passed=passed,
             exit_code=rc,
             raw_output=output,
-            truncated_output=truncate_check_output(output, max_lines=max_output_lines),
+            truncated_output=truncated_output,
             duration_seconds=duration,
             status=chk_status,
+            spill_path=spill_path,
         )
 
     if check.prompt is not None:
@@ -584,18 +647,23 @@ async def run_single_check(
         response_text = turn_res.summary.response_text
         rev_status, feedback_text = parse_review_verdict_status(response_text)
         passed = rev_status == "pass"
+        truncated_output, spill_path = _truncate_and_spill(
+            feedback_text,
+            max_lines=max_output_lines,
+            max_chars=DEFAULT_MAX_OUTPUT_CHARS,
+            spill_dir=spill_dir,
+        )
         return CheckResult(
             name=check.name,
             check_type="prompt",
             command_or_prompt=check.prompt,
             exit_code=0 if passed else (1 if rev_status == "retry" else 2),
             raw_output=response_text,
-            truncated_output=truncate_check_output(
-                feedback_text, max_lines=max_output_lines
-            ),
+            truncated_output=truncated_output,
             duration_seconds=duration,
             status=rev_status,
             passed=passed,
+            spill_path=spill_path,
         )
 
     raise ValueError(f"Invalid check configuration for '{check.name}'")
@@ -635,7 +703,8 @@ async def run_checks_sequential(
     resources_dir: Path | None = None,
     resource_dirs: list[Path] | None = None,
     discover_apm_resources: bool = True,
-    max_output_lines: int = 150,
+    max_output_lines: int = DEFAULT_MAX_OUTPUT_LINES,
+    spill_dir: Path | None = None,
     on_check_complete: Callable[[CheckResult], None] | None = None,
     extra_env: dict[str, str] | None = None,
     strip_env: list[str] | set[str] | tuple[str, ...] | None = None,
@@ -676,6 +745,7 @@ async def run_checks_sequential(
                 resource_dirs=resource_dirs,
                 discover_apm_resources=discover_apm_resources,
                 max_output_lines=max_output_lines,
+                spill_dir=spill_dir,
                 extra_env=check_env,
                 strip_env=strip_env,
                 keep_env=keep_env,
