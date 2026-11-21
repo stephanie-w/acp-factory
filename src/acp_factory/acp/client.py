@@ -156,6 +156,8 @@ class FactoryACPClient:
                 hook_cmd += f' --resources-dir "{res_dir}"'
             for p in self.guardrails.allowed_paths:
                 hook_cmd += f' --allow-path "{p}"'
+            for p in self.guardrails.blocked_paths:
+                hook_cmd += f' --block-path "{p}"'
             for d in self.guardrails.denied_commands:
                 hook_cmd += f' --deny-cmd "{d}"'
             if self.deny_runs:

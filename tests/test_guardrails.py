@@ -199,6 +199,7 @@ def test_factory_config_guardrails_schema_defaults() -> None:
     assert cfg.guardrails.enabled is True
     assert cfg.guardrails.denied_commands == []
     assert cfg.guardrails.allowed_paths == []
+    assert cfg.guardrails.blocked_paths == []
 
 
 async def test_factory_acp_client_injects_guardrail_hook(
@@ -231,6 +232,7 @@ async def test_factory_acp_client_injects_guardrail_hook(
             enabled=True,
             denied_commands=["npm publish"],
             allowed_paths=["/tmp/allowed"],
+            blocked_paths=["dist"],
         ),
         deny_runs=True,
     )
@@ -242,6 +244,7 @@ async def test_factory_acp_client_injects_guardrail_hook(
     assert hook.on == "permission"
     assert '--allow-path "/tmp/allowed"' in hook.run
     assert '--deny-cmd "npm publish"' in hook.run
+    assert '--block-path "dist"' in hook.run
     assert "--deny-runs" in hook.run
 
     # Disabling guardrails injects no hook.
@@ -550,3 +553,301 @@ def test_malformed_env_command_quoting_is_blocked(cmd: str) -> None:
 @pytest.mark.parametrize("cmd", ["", "   ", "\n\t"])
 def test_empty_commands_pass(cmd: str) -> None:
     assert is_command_safe(cmd) == (True, None)
+
+
+_LOCKFILE_MANIFESTS = [
+    ("uv.lock", "pyproject.toml"),
+    ("poetry.lock", "pyproject.toml"),
+    ("package-lock.json", "package.json"),
+    ("pnpm-lock.yaml", "package.json"),
+    ("yarn.lock", "package.json"),
+    ("Cargo.lock", "Cargo.toml"),
+]
+
+
+def test_guardrails_blocks_lockfiles(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    for lockfile, manifest in _LOCKFILE_MANIFESTS:
+        target = ws / lockfile
+        target.touch()
+        safe, reason = is_path_contained(target, ws, is_read=True)
+        assert safe is False
+        assert "lockfile" in (reason or "").lower()
+        assert manifest in (reason or "")
+
+    # Package managers still need to generate/update lockfiles.
+    assert is_path_contained(ws / "uv.lock", ws) == (True, None)
+
+
+_NOISY_CACHE_PATHS = [
+    ("node_modules", "node_modules/react/index.js"),
+    ("__pycache__", "__pycache__/module.cpython-314.pyc"),
+    (".pytest_cache", ".pytest_cache/v/cache/nodeids"),
+    (".ruff_cache", ".ruff_cache/0.1/content"),
+    (".mypy_cache", ".mypy_cache/3.14/module.meta.json"),
+    (".ty_cache", ".ty_cache/analysis.db"),
+    (".tox", ".tox/py314/bin/python"),
+    (".nox", ".nox/tests/bin/python"),
+    (".git/objects", ".git/objects/ab/cdef0123"),
+]
+
+
+@pytest.mark.parametrize(("directory", "relative_path"), _NOISY_CACHE_PATHS)
+def test_guardrails_blocks_noisy_cache_directories(
+    tmp_path: Path, directory: str, relative_path: str
+) -> None:
+    ws = tmp_path / "workspace"
+    target = ws / relative_path
+    target.parent.mkdir(parents=True)
+    target.touch()
+
+    safe, reason = is_path_contained(target, ws, is_read=True)
+    assert safe is False
+    assert directory in (reason or "")
+
+    # Matching directory names in a workspace parent must not poison inner paths.
+    nested_ws = tmp_path / "node_modules" / "workspace"
+    inner = nested_ws / "src" / "main.py"
+    inner.parent.mkdir(parents=True)
+    inner.touch()
+    assert is_path_contained(inner, nested_ws, is_read=True) == (True, None)
+
+
+def test_guardrails_allows_venv_by_default_and_blocks_when_configured(
+    tmp_path: Path,
+) -> None:
+    ws = tmp_path / "workspace"
+    pyvenv_cfg = ws / ".venv" / "pyvenv.cfg"
+    site_packages_file = (
+        ws / ".venv" / "lib" / "python3.14" / "site-packages" / "acp" / "__init__.py"
+    )
+    site_packages_file.parent.mkdir(parents=True)
+    site_packages_file.touch()
+    pyvenv_cfg.parent.mkdir(parents=True, exist_ok=True)
+    pyvenv_cfg.touch()
+
+    for allowed in (pyvenv_cfg, site_packages_file):
+        assert is_path_contained(allowed, ws, is_read=True) == (True, None)
+
+    for blocked in (pyvenv_cfg, site_packages_file):
+        safe, reason = is_path_contained(
+            blocked, ws, is_read=True, blocked_paths=[".venv"]
+        )
+        assert safe is False
+        assert "blocked path" in (reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    ("cmd", "expected_keyword"),
+    [
+        ("cat uv.lock", "lockfile"),
+        ("head -n 5 package-lock.json", "lockfile"),
+        ("tail Cargo.lock", "lockfile"),
+        ("less yarn.lock", "lockfile"),
+        ("more pnpm-lock.yaml", "lockfile"),
+        ("cat poetry.lock", "lockfile"),
+        ("cat node_modules/react/index.js", "cache/vendor"),
+        ("head __pycache__/module.pyc", "cache/vendor"),
+        ("cat .git/objects/ab/cdef0123", ".git/objects"),
+        ("bash -c 'cat uv.lock'", "lockfile"),
+        ("xargs cat uv.lock", "lockfile"),
+        ("eval 'head package-lock.json'", "lockfile"),
+        ("env -S 'cat uv.lock'", "lockfile"),
+        ("command -p cat uv.lock", "lockfile"),
+        ("time cat uv.lock", "lockfile"),
+        ("cat uv.lock > /tmp/dump.txt", "lockfile"),
+    ],
+)
+def test_guardrails_blocks_file_dump_commands(cmd: str, expected_keyword: str) -> None:
+    safe, reason = is_command_safe(cmd, rg_available=False, fd_available=False)
+    assert safe is False
+    assert expected_keyword in (reason or "").lower()
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "ls .venv/bin",
+        "ls node_modules",
+        "cat .env.example",
+        "cat .venv/pyvenv.cfg",
+        "cat .venv/lib/python3.14/site-packages/acp/__init__.py",
+        "cat pyproject.toml",
+        "cat README.md",
+        "bash -c 'ls src/'",
+    ],
+)
+def test_guardrails_allows_non_dump_and_venv_commands(cmd: str) -> None:
+    assert is_command_safe(cmd, rg_available=True, fd_available=True) == (True, None)
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "grep -r foo src/",
+        "grep -R foo .",
+        "grep -rn foo src/",
+        "grep -rE 'foo|bar' src/",
+        "grep -nr foo src/",
+        "egrep -rn foo src/",
+        "fgrep -nr foo src/",
+        "grep --recursive foo src/",
+        "grep --dereference-recursive foo .",
+        "grep -d recurse foo .",
+        "grep --directories=recurse foo .",
+        "env -S 'grep -rn foo .'",
+        "bash -c 'grep -rn foo .'",
+    ],
+)
+def test_recursive_grep_blocked_when_rg_available(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd, rg_available=True)
+    assert safe is False
+    assert "rg" in (reason or "")
+    assert is_command_safe(cmd, rg_available=False) == (True, None)
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "grep foo src/main.py",
+        "grep -n foo src/main.py",
+        "grep --include='*.py' foo src/main.py",
+        "grep -- -r pattern src/main.py",
+        "grep -e -r PATTERN src/main.py",
+        "grep -e '-r' PATTERN src/main.py",
+        "rg -r replacement src/",
+    ],
+)
+def test_non_recursive_grep_allowed(cmd: str) -> None:
+    safe, _ = is_command_safe(cmd, rg_available=True)
+    assert safe is True
+
+
+def test_guardrails_ignores_blank_blocked_paths(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    dist_file = ws / "dist" / "bundle.js"
+    dist_file.parent.mkdir(parents=True)
+    dist_file.touch()
+
+    assert is_path_contained(
+        dist_file, ws, is_read=True, blocked_paths=["", "   "]
+    ) == (True, None)
+    assert is_command_safe("cat dist/bundle.js", blocked_paths=["", "   "]) == (
+        True,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "find .",
+        "find . -name '*.py'",
+        "find ./ -type f",
+        "find $PWD -name '*.py'",
+        "find",
+        "find -name '*.py'",
+        "find . -maxdepth 2 -type f",
+        "find . -type d -name node_modules",
+    ],
+)
+def test_broad_find_blocked_when_fd_available(cmd: str) -> None:
+    safe, reason = is_command_safe(cmd, fd_available=True)
+    assert safe is False
+    assert "fd" in (reason or "")
+    assert is_command_safe(cmd, fd_available=False) == (True, None)
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "find . -maxdepth 1 -type f",
+        "find . -maxdepth 0",
+        "find src/acp_factory -name '*.py'",
+        "find src -maxdepth 3 -type f",
+    ],
+)
+def test_targeted_find_allowed(cmd: str) -> None:
+    safe, _ = is_command_safe(cmd, fd_available=True)
+    assert safe is True
+
+
+def test_broad_find_blocks_absolute_workspace_root(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    other = tmp_path / "other"
+    ws.mkdir()
+    other.mkdir()
+
+    workspace_cmd = f"find {ws} -name '*.py'"
+    safe, reason = is_command_safe(workspace_cmd, fd_available=True, workspace=ws)
+    assert safe is False
+    assert "fd" in (reason or "")
+
+    # The same command is only redirection-worthy when the workspace is known.
+    assert is_command_safe(workspace_cmd, fd_available=False, workspace=ws) == (
+        True,
+        None,
+    )
+
+    # Absolute roots outside the workspace and shallow scans stay permitted.
+    assert is_command_safe(
+        f"find {other} -name '*.py'", fd_available=True, workspace=ws
+    ) == (True, None)
+    assert is_command_safe(
+        f"find {ws} -maxdepth 1 -name '*.py'", fd_available=True, workspace=ws
+    ) == (True, None)
+
+
+def test_guardrails_main_blocked_paths(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    dist_file = ws / "dist" / "bundle.js"
+    dist_file.parent.mkdir(parents=True)
+    dist_file.touch()
+    source_file = ws / "src" / "main.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.touch()
+
+    read_env = {
+        "ACPTERM_PERMISSION_KIND": "read",
+        "ACPTERM_PERMISSION_PATH": str(dist_file),
+        "ACPTERM_CWD": str(ws),
+    }
+    with (
+        patch.dict("os.environ", read_env, clear=True),
+        pytest.raises(SystemExit) as exc,
+    ):
+        guardrails_main(["--block-path", "dist", "--block-path", "build"])
+    assert exc.value.code == 1
+
+    allowed_env = {**read_env, "ACPTERM_PERMISSION_PATH": str(source_file)}
+    with (
+        patch.dict("os.environ", allowed_env, clear=True),
+        pytest.raises(SystemExit) as exc,
+    ):
+        guardrails_main(["--block-path", "dist"])
+    assert exc.value.code == 0
+
+    command_env = {
+        "ACPTERM_PERMISSION_KIND": "execute",
+        "ACPTERM_PERMISSION_PATH": "cat dist/bundle.js",
+        "ACPTERM_CWD": str(ws),
+        "FACTORY_GUARDRAILS_BLOCKED_PATHS": '["dist"]',
+    }
+    with (
+        patch.dict("os.environ", command_env, clear=True),
+        pytest.raises(SystemExit) as exc,
+    ):
+        guardrails_main([])
+    assert exc.value.code == 1
+
+    lockfile = ws / "uv.lock"
+    lockfile.touch()
+    lock_env = {**read_env, "ACPTERM_PERMISSION_PATH": str(lockfile)}
+    with (
+        patch.dict("os.environ", lock_env, clear=True),
+        pytest.raises(SystemExit) as exc,
+    ):
+        guardrails_main([])
+    assert exc.value.code == 1

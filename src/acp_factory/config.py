@@ -292,6 +292,12 @@ class GuardrailsConfig(BaseModel):
         default_factory=list,
         description="Additional external host directory paths permitted for agent access",
     )
+    blocked_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Workspace-relative or absolute paths to block from direct access and file-dump commands"
+        ),
+    )
 
 
 class FleetConfig(BaseModel):
