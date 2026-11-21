@@ -149,6 +149,7 @@ def filter_tool_calls(
             haystack = "\n".join(
                 [
                     str(tc.get("title", "")),
+                    str(tc.get("name") or ""),
                     str(tc.get("kind", "")),
                     json.dumps(tc.get("raw_input")) if tc.get("raw_input") else "",
                     extract_tool_output(tc),
@@ -238,6 +239,7 @@ def compute_transcript_stats(data: dict[str, Any], *, top: int = 10) -> dict[str
             {
                 "index": idx,
                 "kind": kind,
+                "name": tc.get("name"),
                 "status": str(tc.get("status") or "-"),
                 "exit": extract_tool_exit_code(tc),
                 "duration_seconds": dur,

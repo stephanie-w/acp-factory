@@ -178,6 +178,8 @@ class TurnSummary:
                 "content": content,
                 "raw_output": _safe_json_value(raw_out),
             }
+            if tc.get("name") is not None:
+                tool_entry["name"] = tc["name"]
             if tc.get("duration_seconds") is not None:
                 tool_entry["duration_seconds"] = tc["duration_seconds"]
             formatted_tools.append(tool_entry)
@@ -233,6 +235,8 @@ class TurnSummary:
                 "kind": tc.get("kind", ""),
                 "status": tc.get("status", "completed"),
             }
+            if tc.get("name") is not None:
+                entry["name"] = tc["name"]
             if tc.get("raw_input") is not None:
                 entry["raw_input"] = _condense_value(tc["raw_input"], max_output_len)
             content = tc.get("content", "")
@@ -332,6 +336,8 @@ class TurnEventTracker:
                 "content": content_str,
                 "raw_output": tc.get("raw_output"),
             }
+            if tc.get("name") is not None:
+                rec_entry["name"] = tc["name"]
             if tc.get("duration_seconds") is not None:
                 rec_entry["duration_seconds"] = tc["duration_seconds"]
             recorded_tools.append(rec_entry)

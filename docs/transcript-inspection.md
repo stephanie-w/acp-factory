@@ -26,7 +26,7 @@ Fields:
 
 - `summary`: `{duration_seconds, stop_reason, tool_call_count, file_operations_count, tokens, cost_usd}`
 - `prompt_preview`, `thought_preview`, `response_preview`: truncated text previews
-- `tool_calls[]`: `{id, title, kind, status, raw_input, output_preview, raw_output}`
+- `tool_calls[]`: `{id, name?, title, kind, status, raw_input, output_preview, raw_output}`
 - `file_operations[]`: file edits/writes recorded by the tracker
 - `permissions[]`: `{title, kind, outcome}`
 
@@ -81,6 +81,10 @@ Generated from `TurnSummary.to_condensed_dict()` in [`src/acp_factory/acp/events
         "additionalProperties": false,
         "properties": {
           "id": { "type": ["string", "null"] },
+          "name": {
+            "type": "string",
+            "description": "Stable ACP tool name, present only when reported by the agent."
+          },
           "title": { "type": "string" },
           "kind": { "type": "string" },
           "status": { "type": "string" },
@@ -130,7 +134,7 @@ jq '{summary, prompt_preview, response_preview}' "$SUMMARY"
 ### 2. List All Tool Calls in Order
 
 ```bash
-jq -r '.tool_calls | to_entries[] | "\(.key)\t[\(.value.kind)/\(.value.status)]\t\(.value.title)"' "$SUMMARY"
+jq -r '.tool_calls | to_entries[] | "\(.key)\t[\(.value.kind)/\(.value.status)]\t\(.value.name // "-")\t\(.value.title)"' "$SUMMARY"
 ```
 
 ### 3. Count Tool Calls by `kind` and `status`
@@ -160,8 +164,18 @@ jq -r '.tool_calls[] | select(.kind == "execute") | "\(.status)\t\(.title)"' "$S
 Search titles with a regex (case-insensitive):
 
 ```bash
-jq '.tool_calls[] | select(.title | test("git|gh|pytest"; "i")) | {id, title, status, output_preview}' "$SUMMARY"
+jq '.tool_calls[] | select(.title | test("git|gh|pytest"; "i")) | {id, name, title, status, output_preview}' "$SUMMARY"
 ```
+
+`name` is the stable ACP tool name and is absent on older transcripts. Filter on it
+only when present:
+
+```bash
+jq '.tool_calls[] | select(.name? == "run_command") | {id, name, title, status}' "$SUMMARY"
+```
+
+`acp-factory inspect` shows `-` in the `Name` column and omits `name:` from the
+`--call` detail panel when a transcript has no recorded name.
 
 ### 6. Inspect One Tool Call in Detail (by Index or `id`)
 

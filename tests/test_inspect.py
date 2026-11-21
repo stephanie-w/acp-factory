@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from acp_factory.cli import app
 from acp_factory.inspect import (
+    compute_transcript_stats,
     extract_tool_exit_code,
     filter_tool_calls,
     resolve_transcript_path,
@@ -74,6 +78,58 @@ def _write_sample_run(
     transcript_path = attempt_dir / "transcript.json"
     transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
     return transcript_path
+
+
+def _write_named_run(workspace: Path, *, include_name: bool = True) -> Path:
+    """Write a single-call run whose tool call may carry a stable ACP name."""
+    run_id = "20261116-090000-named"
+    run_dir = workspace / ".factory" / "runs" / run_id
+    attempt_dir = run_dir / "attempt-1"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "timestamp": "2026-11-16T09:00:00+00:00",
+                "stage": "build",
+                "succeeded": True,
+                "attempts_used": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    call: dict[str, object] = {
+        "id": "call_0",
+        "title": "Execute command",
+        "kind": "execute",
+        "status": "completed",
+        "raw_input": {},
+        "content": "ok",
+        "raw_output": {"metadata": {"exit": 0}},
+    }
+    if include_name:
+        call["name"] = "run_command"
+    transcript_path = attempt_dir / "transcript.json"
+    transcript_path.write_text(json.dumps({"tool_calls": [call]}), encoding="utf-8")
+    return transcript_path
+
+
+def _invoke_inspect(*args: str) -> str:
+    """Run `inspect` against a wide console and return the rendered output."""
+    buffer = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=buffer, force_terminal=False, width=200),
+    ):
+        res = CliRunner().invoke(app, ["inspect", *args])
+    assert res.exit_code == 0, res.output
+    return buffer.getvalue()
+
+
+def _table_name_cell(output: str, title: str) -> str:
+    """Return the Name cell of the rendered tool-call row with `title`."""
+    row = next(line for line in output.splitlines() if title in line)
+    return [cell.strip() for cell in row.split("│")][3]
 
 
 def test_resolve_transcript_path_variants(tmp_path: Path) -> None:
@@ -157,6 +213,83 @@ def test_cli_inspect_views(tmp_path: Path) -> None:
     assert len(payload["thought_matches"]) == 1
     assert len(payload["tool_call_matches"]) == 1
     assert payload["tool_call_matches"][0]["index"] == 0
+
+
+def test_filter_tool_calls_grep_name() -> None:
+    """AC-3: `--grep` matches a tool call by its stable name, even when unnamed."""
+    calls = [
+        {
+            "id": "c1",
+            "name": "run_command",
+            "title": "Execute",
+            "kind": "execute",
+            "status": "completed",
+        },
+        {
+            "id": "c2",
+            "name": "read_file",
+            "title": "Read",
+            "kind": "read",
+            "status": "completed",
+        },
+        {"id": "c3", "title": "Legacy call", "kind": "other", "status": "completed"},
+    ]
+
+    assert [idx for idx, _ in filter_tool_calls(calls, grep="RUN_COMMAND")] == [0]
+    assert [idx for idx, _ in filter_tool_calls(calls, grep="read_file")] == [1]
+    assert filter_tool_calls(calls, grep="run_command")[0][1]["id"] == "c1"
+
+
+def test_compute_transcript_stats_preserves_name() -> None:
+    """AC-6: per-call stats rows carry the stable name, or None for legacy calls."""
+    data = {
+        "tool_calls": [
+            {
+                "name": "run_command",
+                "title": "Run pytest",
+                "kind": "execute",
+                "status": "completed",
+                "content": "ok",
+            },
+            {"title": "Legacy call", "kind": "read", "status": "completed"},
+        ]
+    }
+
+    stats = compute_transcript_stats(data)
+
+    by_index = {row["index"]: row for row in stats["largest_calls"]}
+    assert by_index[0]["name"] == "run_command"
+    assert by_index[1]["name"] is None
+
+
+def test_cli_inspect_shows_name_column(tmp_path: Path) -> None:
+    """AC-4: the summary table exposes a Name column with the recorded name."""
+    _write_named_run(tmp_path)
+
+    output = _invoke_inspect("--workspace", str(tmp_path))
+
+    assert _table_name_cell(output, "Execute command") == "run_command"
+
+
+def test_cli_inspect_call_detail_name(tmp_path: Path) -> None:
+    """AC-5: `--call` renders the stable name in the detail header."""
+    _write_named_run(tmp_path)
+
+    output = _invoke_inspect("--workspace", str(tmp_path), "--call", "0")
+
+    assert "name: run_command" in output
+    assert output.index("id: call_0") < output.index("name: run_command")
+
+
+def test_cli_inspect_legacy_transcript_compatibility(tmp_path: Path) -> None:
+    """AC-7: transcripts without `name` render `-` and omit the detail line."""
+    _write_named_run(tmp_path, include_name=False)
+
+    table_output = _invoke_inspect("--workspace", str(tmp_path))
+    assert _table_name_cell(table_output, "Execute command") == "-"
+
+    detail_output = _invoke_inspect("--workspace", str(tmp_path), "--call", "0")
+    assert "name:" not in detail_output
 
 
 def test_turn_summary_uses_real_recorder_no_per_call_duration() -> None:
