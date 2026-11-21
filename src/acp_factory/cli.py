@@ -324,7 +324,7 @@ DEFAULT_STAGE_PROMPTS: dict[str, str] = {
         "(`DUPLICATE` vs `ALSO_FIXES`), verify single-PR sizing (<400 changed lines), and note "
         "available verification tooling.\n"
         "2. Output ONLY the completed triage report matching `skills/issue-triage/templates/triage-report.md` "
-        "(starting with `### Codebase Inspection` and ending with `STATUS: <OK | DUPLICATE | TOO_BIG | NEEDS_HUMAN>`)."
+        "(starting with `### Codebase Inspection` and ending with `STATUS: <OK | TRIVIAL | DUPLICATE | TOO_BIG | NEEDS_HUMAN>`)."
     ),
     "SPEC.md": (
         "Execute the `spec-writer` skill for the supplied ticket, triage notes, and human comments:\n"

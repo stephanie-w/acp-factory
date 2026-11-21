@@ -742,6 +742,17 @@ def parse_stage_verdict(
                 updated_factory_block=f"## Triage Report (`{raw_token}`)\n\n{cleaned_body}",
                 summary=f"Triage requires human attention ({raw_token})",
             )
+        if raw_token == "TRIVIAL":  # noqa: S105
+            return StageVerdict(
+                stage="triage",
+                status="trivial",
+                target_label=LABEL_SPEC_READY,
+                updated_factory_block=f"## Triage Report (`TRIVIAL`)\n\n{cleaned_body}",
+                summary=(
+                    "Triage fast-tracked (TRIVIAL) -> waiting for Human Gate 1 "
+                    "approval (factory:spec-ready)"
+                ),
+            )
         return StageVerdict(
             stage="triage",
             status="ok",

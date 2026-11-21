@@ -26,7 +26,8 @@ Use this skill during the `triage` stage to ensure the builder never starts from
 
 3. **Size It (One Ticket = One Reviewable PR)**:
    - A valid ticket must fit a single pull request that a human can review in one sitting: **one cohesive area, roughly under ~400 changed lines**.
-   - If the ticket spans multiple independent subsystems or exceeds a single reviewable PR, report `STATUS: TOO_BIG` and provide a **Suggested Split**:
+   - **`TRIVIAL`**: If the ticket is small (single file or single cohesive subsystem), completely unambiguous, requires no architectural or contract decisions, and you can state exact `AC-n` acceptance criteria + verification command right away, report `STATUS: TRIVIAL` and include `### Acceptance Criteria` (with `AC-1`, ...) so it can fast-track past `spec` directly to Human Gate 1 (`factory:spec-ready`).
+   - **`TOO_BIG`**: If the ticket spans multiple independent subsystems or exceeds a single reviewable PR, report `STATUS: TOO_BIG` and provide a **Suggested Split**:
      - A numbered list of smaller ticket titles in **build order**, with one line of concrete scope each.
      - Never create the split issues yourself; let the human review the split first.
 

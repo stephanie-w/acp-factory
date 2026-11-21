@@ -13,7 +13,7 @@ import re
 import sys
 from pathlib import Path
 
-VALID_STATUSES = {"OK", "DUPLICATE", "TOO_BIG", "NEEDS_HUMAN"}
+VALID_STATUSES = {"OK", "TRIVIAL", "DUPLICATE", "TOO_BIG", "NEEDS_HUMAN"}
 REQUIRED_FIELDS = (
     "Touched Area",
     "Current Behavior & Root Cause",
@@ -49,7 +49,7 @@ def validate_triage_text(raw_text: str) -> tuple[list[str], str]:
     status_matches = list(_STATUS_LINE_RE.finditer(masked))
     if not status_matches:
         errors.append(
-            "Missing terminal 'STATUS: <OK | DUPLICATE | TOO_BIG | NEEDS_HUMAN>' line."
+            "Missing terminal 'STATUS: <OK | TRIVIAL | DUPLICATE | TOO_BIG | NEEDS_HUMAN>' line."
         )
         terminal_match = None
         status_token = ""
@@ -89,6 +89,13 @@ def validate_triage_text(raw_text: str) -> tuple[list[str], str]:
     ):
         errors.append(
             "When STATUS is TOO_BIG, a '### Suggested Split' section with numbered build-order tickets is required."
+        )
+
+    if status_token == "TRIVIAL" and not re.search(
+        r"^###+\s+Acceptance\s+Criteria\b", body, re.IGNORECASE | re.MULTILINE
+    ):
+        errors.append(
+            "When STATUS is TRIVIAL, a '### Acceptance Criteria' section with AC-1 items is required."
         )
 
     host_match = _HOST_PATH_RE.search(body)

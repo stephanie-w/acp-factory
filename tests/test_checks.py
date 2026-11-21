@@ -561,6 +561,54 @@ def test_all_skill_validators_and_templates_exist_and_work(tmp_path: Path) -> No
     assert res_triage.returncode == 0
     assert triage_file.read_text(encoding="utf-8").startswith("### Codebase Inspection")
 
+    # 1b. Triage validator with TRIVIAL (requires ### Acceptance Criteria)
+    trivial_missing_ac = tmp_path / "triage_trivial_bad.md"
+    trivial_missing_ac.write_text(
+        "### Codebase Inspection\n"
+        "- **Touched Area**: `src/acp_factory/cli.py`\n"
+        "- **Current Behavior & Root Cause**: Typo in help text.\n"
+        "- **Duplicates / Related Issues**: `None`\n"
+        "- **Estimated Scope**: `Small (~2 lines across 1 file)`\n"
+        "- **Verification Tooling Available**: `just test-fast`\n\n"
+        "STATUS: TRIVIAL\n",
+        encoding="utf-8",
+    )
+    res_trivial_bad = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "issue-triage" / "scripts" / "validate_triage.py"),
+            str(trivial_missing_ac),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_trivial_bad.returncode != 0
+    assert "Acceptance Criteria" in res_trivial_bad.stderr
+
+    trivial_valid = tmp_path / "triage_trivial_ok.md"
+    trivial_valid.write_text(
+        trivial_missing_ac.read_text(encoding="utf-8").replace(
+            "STATUS: TRIVIAL",
+            "### Acceptance Criteria\n"
+            "- **AC-1**: Fix help text typo.\n"
+            "- **Verification**: `just test-fast`\n\n"
+            "STATUS: TRIVIAL",
+        ),
+        encoding="utf-8",
+    )
+    res_trivial_ok = subprocess.run(
+        [
+            "python3",
+            str(skills_dir / "issue-triage" / "scripts" / "validate_triage.py"),
+            str(trivial_valid),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_trivial_ok.returncode == 0
+
     # 2. Review validator
     review_file = tmp_path / "review.md"
     review_file.write_text(

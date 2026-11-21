@@ -5,8 +5,12 @@
 - **Estimated Scope**: `<Small | Medium | Too Big (~N lines across M files)>`
 - **Verification Tooling Available**: `<commands available in repo, or missing tooling notes>`
 
+### Acceptance Criteria (Only when TRIVIAL)
+- **AC-1**: <concrete, testable requirement>
+- **Verification**: `<exact command, e.g. just fix && just typecheck && just test-fast>`
+
 ### Suggested Split (Only when TOO_BIG)
 1. **<Ticket Title 1>**: <one line of concrete scope>
 2. **<Ticket Title 2>**: <one line of concrete scope>
 
-STATUS: <OK | DUPLICATE | TOO_BIG | NEEDS_HUMAN>
+STATUS: <OK | TRIVIAL | DUPLICATE | TOO_BIG | NEEDS_HUMAN>

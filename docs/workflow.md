@@ -61,7 +61,8 @@ stateDiagram-v2
     [*] --> Triage : Issue labeled `factory:triage`
 
     state "1. Triage (Agent)" as Triage
-    Triage --> Spec : Valid & sized for 1 PR -> Orchestrator sets `factory:spec`
+    Triage --> Spec : Valid & sized for 1 PR (`OK`) -> Orchestrator sets `factory:spec`
+    Triage --> SpecReady : Small & unambiguous (`TRIVIAL`) -> Orchestrator sets `factory:spec-ready`
     Triage --> NeedsHuman : Duplicate / Too big / Unclear -> Orchestrator sets `factory:needs-human`
 
     state "2. Spec (Agent)" as Spec
@@ -98,7 +99,7 @@ stateDiagram-v2
 1. **`triage` (`factory:triage`)**:
    - **Mode**: Read-only (`read_only = true`, `mode = "plan"`).
    - **Action**: Inspects the codebase and existing issues to check for duplicates and verify the ticket fits a single reviewable PR.
-   - **Transition**: Updates the `<!-- factory:start -->` block in the Issue Body and transitions to `factory:spec` (or `factory:needs-human` if `duplicate` / `too_big`).
+   - **Transition**: Updates the `<!-- factory:start -->` block in the Issue Body and transitions to `factory:spec` (`OK`), `factory:spec-ready` (`TRIVIAL`, skipping `spec` while preserving Human Gate 1), or `factory:needs-human` (`DUPLICATE` / `TOO_BIG` / `NEEDS_HUMAN`).
 
 2. **`spec` (`factory:spec`)**:
    - **Mode**: Read-only (`read_only = true`, `mode = "plan"`).

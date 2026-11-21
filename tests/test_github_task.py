@@ -372,6 +372,18 @@ def test_parse_stage_verdicts_across_pipeline() -> None:
     v_triage_ok = parse_stage_verdict("triage", "Scoped to routes.py.\nSTATUS: OK")
     assert v_triage_ok.target_label == LABEL_SPEC
 
+    # 1b. Triage TRIVIAL -> factory:spec-ready (skips spec, keeps Human Gate 1)
+    v_triage_trivial = parse_stage_verdict(
+        "triage",
+        "### Codebase Inspection\nScoped to one function.\n"
+        "### Acceptance Criteria\n- **AC-1**: Fix typo.\n"
+        "STATUS: TRIVIAL",
+    )
+    assert v_triage_trivial.target_label == LABEL_SPEC_READY
+    assert v_triage_trivial.status == "trivial"
+    assert "## Triage Report (`TRIVIAL`)" in v_triage_trivial.updated_factory_block
+    assert "### Acceptance Criteria" in v_triage_trivial.updated_factory_block
+
     # 2. Triage TOO_BIG -> factory:needs-human
     v_triage_big = parse_stage_verdict(
         "triage", "Requires 4 microservices.\nSTATUS: TOO_BIG"
