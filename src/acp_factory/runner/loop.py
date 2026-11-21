@@ -641,6 +641,10 @@ async def run_factory(
     session_id: str | None = None
 
     active_cwd = await wt_manager.create(base_ref=base_ref)
+    # Spill files for truncated check output outlive retry attempts but are removed
+    # with the run so agents can inspect omitted output without re-running checks.
+    spill_tmp_dir = tempfile.TemporaryDirectory(prefix=f"acp-factory-spill-{run_id}-")
+    spill_dir = Path(spill_tmp_dir.name)
     ui.show_run_header(
         config,
         active_cwd,
@@ -841,6 +845,7 @@ async def run_factory(
                         resource_dirs=resolved_res_dirs,
                         discover_apm_resources=effective_discover,
                         max_output_lines=config.retry.max_output_lines,
+                        spill_dir=spill_dir,
                         on_check_complete=ui.show_check_result,
                         extra_env=check_env,
                         strip_env=config.strip_env or None,
@@ -894,6 +899,7 @@ async def run_factory(
     except Exception as exc:
         failure_reason = f"Unhandled error: {exc}"
     finally:
+        spill_tmp_dir.cleanup()
         preserved_wt = await wt_manager.cleanup(succeeded=succeeded)
 
     total_duration = max(0.0, time.monotonic() - start_time)

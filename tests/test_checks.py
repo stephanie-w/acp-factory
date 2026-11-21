@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -42,6 +43,74 @@ def test_truncate_check_output_caps_chars_on_wide_lines() -> None:
     assert "truncated" in truncated
     assert "characters of output" in truncated
     assert "MIDDLE_NOISE" not in truncated
+
+
+def test_truncate_check_output_spill_on_lines(tmp_path: Path) -> None:
+    lines = [f"line {i}" for i in range(1, 301)]
+    raw = "\n".join(lines)
+
+    truncated = truncate_check_output(raw, max_lines=50, spill_dir=tmp_path)
+
+    spill_files = list(tmp_path.iterdir())
+    assert len(spill_files) == 1
+    spill_path = spill_files[0]
+    assert spill_path.read_text(encoding="utf-8") == raw
+    assert stat.S_IMODE(spill_path.stat().st_mode) == 0o600
+    assert f"Full output saved to {spill_path}" in truncated
+    assert "use rg/read to inspect omitted lines" in truncated
+
+
+def test_truncate_check_output_spill_on_chars(tmp_path: Path) -> None:
+    raw = "A" * 8000 + "MIDDLE_NOISE" + "Z" * 8000
+
+    truncated = truncate_check_output(
+        raw, max_lines=150, max_chars=1000, spill_dir=tmp_path
+    )
+
+    spill_files = list(tmp_path.iterdir())
+    assert len(spill_files) == 1
+    spill_path = spill_files[0]
+    assert spill_path.read_text(encoding="utf-8") == raw
+    assert stat.S_IMODE(spill_path.stat().st_mode) == 0o600
+    assert f"Full output saved to {spill_path}" in truncated
+
+
+def test_truncate_check_output_no_spill_when_within_bounds(tmp_path: Path) -> None:
+    within_bounds = "\n".join(f"line {i}" for i in range(1, 6))
+
+    result = truncate_check_output(
+        within_bounds, max_lines=50, max_chars=1000, spill_dir=tmp_path
+    )
+
+    assert result == within_bounds
+    assert list(tmp_path.iterdir()) == []
+
+    large = "\n".join(f"line {i}" for i in range(1, 301))
+    no_spill_dir = truncate_check_output(large, max_lines=50, spill_dir=None)
+    assert "Full output saved to" not in no_spill_dir
+
+
+async def test_run_checks_sequential_populates_spill_path(tmp_path: Path) -> None:
+    script = tmp_path / "big_failure.py"
+    script.write_text(
+        "import sys\nfor i in range(200):\n    print(f'line {i}')\nsys.exit(3)\n",
+        encoding="utf-8",
+    )
+    checks = [CheckConfig(name="Big Fail", cmd=f"python3 {script}")]
+    spill_dir = tmp_path / "spill"
+
+    all_passed, results = await run_checks_sequential(
+        checks, tmp_path, max_output_lines=10, spill_dir=spill_dir
+    )
+
+    assert all_passed is False
+    result = results[0]
+    assert result.passed is False
+    assert result.spill_path is not None
+    assert result.spill_path.is_file()
+    assert result.spill_path.parent == spill_dir
+    assert "line 199" in result.spill_path.read_text(encoding="utf-8")
+    assert f"Full output saved to {result.spill_path}" in result.truncated_output
 
 
 def test_parse_review_verdict() -> None:

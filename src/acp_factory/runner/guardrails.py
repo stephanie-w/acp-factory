@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -557,6 +558,25 @@ def _is_env_secret_path(target_resolved: Path) -> bool:
     return name == ".env" or name.startswith(".env.")
 
 
+_SPILL_DIR_PREFIX = "acp-factory-spill-"
+
+
+def _is_spill_path(target_resolved: Path) -> bool:
+    """Return True if *target_resolved* is inside an ``acp-factory-spill-*`` temp dir.
+
+    Only direct children of the system temp directory with that prefix qualify,
+    so arbitrary temp paths and look-alike directories elsewhere stay blocked.
+    """
+    try:
+        temp_root = Path(tempfile.gettempdir()).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    if not target_resolved.is_relative_to(temp_root):
+        return False
+    relative = target_resolved.relative_to(temp_root)
+    return bool(relative.parts) and relative.parts[0].startswith(_SPILL_DIR_PREFIX)
+
+
 def _is_run_artifact_path(target_resolved: Path, ws_resolved: Path) -> bool:
     """Return True if target_resolved points inside .factory/runs or .factory/latest-* pointers."""
     factory_dir = ws_resolved / ".factory"
@@ -922,6 +942,11 @@ def is_path_contained(
             False,
             f"Target path '{target_path}' references a '.env' file, which is blocked by guardrails",
         )
+
+    # Spill files from truncated check output are read-only accessible so agents
+    # can inspect omitted lines without exposing all of the system temp dir.
+    if is_read and _is_spill_path(target_resolved):
+        return True, None
 
     # 1. Target is inside current workspace
     if target_resolved == ws_resolved or target_resolved.is_relative_to(ws_resolved):
