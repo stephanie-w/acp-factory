@@ -94,6 +94,92 @@ def test_resolve_main_repo_root_outside_repo_returns_resolved_path(
     assert resolve_main_repo_root(missing) == missing.resolve()
 
 
+def test_resolve_main_repo_root_fast_path_skips_git(tmp_path: Path) -> None:
+    main_root = _init_repo(tmp_path / "main")
+    link = tmp_path / "link-main"
+    link.symlink_to(main_root, target_is_directory=True)
+
+    with patch(
+        "acp_factory.runner.worktree.subprocess.run",
+        side_effect=AssertionError("git must not run for a resolved main root"),
+    ):
+        assert resolve_main_repo_root(main_root) == main_root
+        assert resolve_main_repo_root(link) == main_root
+
+
+def test_resolve_main_repo_root_timeout(tmp_path: Path) -> None:
+    main_root = _init_repo(tmp_path / "main")
+    sub_dir = main_root / "src"
+    sub_dir.mkdir()
+
+    def fake_run(cmd: list[str], **kwargs: object) -> None:
+        assert kwargs.get("timeout") == 10.0
+        raise subprocess.TimeoutExpired(cmd="git", timeout=10.0)
+
+    with patch("acp_factory.runner.worktree.subprocess.run", side_effect=fake_run):
+        assert resolve_main_repo_root(sub_dir) == main_root
+
+
+def test_resolve_main_repo_root_git_oserror_falls_back(tmp_path: Path) -> None:
+    main_root = _init_repo(tmp_path / "main")
+    sub_dir = main_root / "src"
+    sub_dir.mkdir()
+
+    with patch(
+        "acp_factory.runner.worktree.subprocess.run",
+        side_effect=FileNotFoundError("git is not installed"),
+    ):
+        assert resolve_main_repo_root(sub_dir) == main_root
+
+
+def test_issue_worktree_path_no_subprocess(tmp_path: Path) -> None:
+    main_root = _init_repo(tmp_path / "main")
+
+    with patch(
+        "acp_factory.runner.worktree.subprocess.run",
+        side_effect=AssertionError("git must not run for an already-resolved root"),
+    ):
+        assert (
+            WorktreeManager.issue_worktree_path(main_root, 7)
+            == main_root / ".worktrees" / "issue-7"
+        )
+
+
+async def test_create_reuses_active_worktree_symlink(tmp_path: Path) -> None:
+    main_root = _init_repo(tmp_path / "real-main")
+    wt_path = _add_issue_worktree(main_root, 5)
+    link = tmp_path / "link-main"
+    link.symlink_to(main_root, target_is_directory=True)
+    symlinked_common = link / ".git"
+
+    def fake_run(
+        cmd: list[str], *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["git", "rev-parse", "--path-format=absolute"]:
+            return subprocess.CompletedProcess(cmd, 0, f"{symlinked_common}\n", "")
+        raise AssertionError(f"unexpected git invocation: {cmd}")
+
+    real_run_git = worktree_module._run_git
+    calls: list[tuple[str, ...]] = []
+
+    async def spy_run_git(cwd: Path, *args: str):
+        calls.append(args)
+        return await real_run_git(cwd, *args)
+
+    with (
+        patch("acp_factory.runner.worktree.subprocess.run", side_effect=fake_run),
+        patch("acp_factory.runner.worktree._run_git", new=spy_run_git),
+    ):
+        manager = WorktreeManager(
+            link / ".worktrees" / "issue-5", enabled=True, issue_number=5
+        )
+        result = await manager.create()
+
+    assert result == wt_path
+    assert manager.worktree_path == wt_path
+    assert not any(args[:2] == ("worktree", "add") for args in calls)
+
+
 def test_issue_worktree_path_anchoring(tmp_path: Path) -> None:
     main_root = _init_repo(tmp_path / "main")
     sub_dir = main_root / "src"

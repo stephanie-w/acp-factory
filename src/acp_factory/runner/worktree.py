@@ -120,6 +120,8 @@ def resolve_main_repo_root(path: Path) -> Path:
     repository marker exists (e.g. mocked unit tests).
     """
     resolved = path.resolve()
+    if (resolved / ".git").is_dir():
+        return resolved
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],  # noqa: S607
@@ -127,13 +129,15 @@ def resolve_main_repo_root(path: Path) -> Path:
             capture_output=True,
             text=True,
             check=False,
+            timeout=10.0,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return _fallback_main_repo_root(resolved)
 
     if proc.returncode == 0 and proc.stdout.strip():
         common_dir = Path(proc.stdout.strip())
-        return common_dir.parent if common_dir.name == ".git" else common_dir
+        root = common_dir.parent if common_dir.name == ".git" else common_dir
+        return root.resolve()
     return _fallback_main_repo_root(resolved)
 
 
@@ -358,8 +362,9 @@ class WorktreeManager:
     @staticmethod
     def issue_worktree_path(repo_root: Path, issue_number: int) -> Path:
         """Return the deterministic worktree path `.worktrees/issue-<id>` for a GitHub Issue."""
-        main_root = resolve_main_repo_root(repo_root)
-        return main_root / ".worktrees" / f"issue-{issue_number}"
+        return (
+            resolve_main_repo_root(repo_root) / ".worktrees" / f"issue-{issue_number}"
+        )
 
     @staticmethod
     def issue_branch_name(issue_number: int) -> str:
@@ -389,7 +394,9 @@ class WorktreeManager:
             self.branch_name = self.issue_branch_name(self.issue_number)
             wt_path = self.issue_worktree_path(self.repo_root, self.issue_number)
             # Invoked from inside the target issue's own worktree: reuse it in place.
-            if self.invocation_root.is_relative_to(wt_path):
+            # Compare canonical paths so symlinked roots (e.g. macOS `/var` -> `/private/var`)
+            # do not produce a false negative and trigger a duplicate `git worktree add`.
+            if self.invocation_root.resolve().is_relative_to(wt_path.resolve()):
                 self.worktree_path = wt_path
                 await _configure_worktree_git_identity(self.repo_root, wt_path)
                 return wt_path

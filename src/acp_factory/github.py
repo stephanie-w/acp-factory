@@ -196,7 +196,9 @@ async def list_actionable_issues(
             seen_numbers.add(task.issue_number)
 
     # Also check local .worktrees/issue-<id> directories in case their issue was closed by a PR merge
-    worktrees_root = cwd / ".worktrees"
+    from .runner.worktree import resolve_main_repo_root
+
+    worktrees_root = resolve_main_repo_root(cwd) / ".worktrees"
     if not stage_label and worktrees_root.is_dir():
         for entry in sorted(worktrees_root.iterdir()):
             if entry.is_dir() and entry.name.startswith("issue-"):
@@ -253,7 +255,9 @@ async def list_all_factory_issues(
             tasks.append(task)
             seen_numbers.add(task.issue_number)
 
-    worktrees_root = cwd / ".worktrees"
+    from .runner.worktree import resolve_main_repo_root
+
+    worktrees_root = resolve_main_repo_root(cwd) / ".worktrees"
     if scan_worktrees and worktrees_root.is_dir():
         for entry in sorted(worktrees_root.iterdir()):
             if entry.is_dir() and entry.name.startswith("issue-"):
@@ -824,11 +828,13 @@ def build_dry_run_gh_plan(
 
     # 3. Label creation & transition commands (split remove/add to avoid gh parallel mutation race)
     if verdict.stage == "done":
-        wt_rel = _rel_or_abs(
-            ws_resolved / ".worktrees" / f"issue-{task.issue_number}", path_base
-        )
+        from .runner.worktree import WorktreeManager, resolve_main_repo_root
+
+        main_root = resolve_main_repo_root(ws_resolved)
+        wt_path = WorktreeManager.issue_worktree_path(main_root, task.issue_number)
+        wt_rel = _rel_or_abs(wt_path, main_root)
         git_prefix = (
-            f"git -C {shlex.quote(str(ws_resolved))} " if outside_workspace else "git "
+            f"git -C {shlex.quote(str(main_root))} " if cwd != main_root else "git "
         )
         commands.append(
             f"{git_prefix}worktree remove --force {shlex.quote(str(wt_rel))}"
