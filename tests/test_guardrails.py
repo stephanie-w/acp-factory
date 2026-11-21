@@ -240,8 +240,8 @@ async def test_factory_acp_client_injects_guardrail_hook(
     hook = captured_hooks[0]
     assert hook.name == "factory-guardrails"
     assert hook.on == "permission"
-    assert "--allow-path \"/tmp/allowed\"" in hook.run
-    assert "--deny-cmd \"npm publish\"" in hook.run
+    assert '--allow-path "/tmp/allowed"' in hook.run
+    assert '--deny-cmd "npm publish"' in hook.run
     assert "--deny-runs" in hook.run
 
     # Disabling guardrails injects no hook.

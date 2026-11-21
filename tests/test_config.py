@@ -291,9 +291,13 @@ def test_scaffolded_multi_stage_config_resolves_all_stages_and_skills(
         for sp in client.skill_paths:
             templates_dir = sp.parent / "templates"
             scripts_dir = sp.parent / "scripts"
-            for tmpl in sorted(templates_dir.glob("*.md")) if templates_dir.is_dir() else ():
+            for tmpl in (
+                sorted(templates_dir.glob("*.md")) if templates_dir.is_dir() else ()
+            ):
                 assert str(tmpl) in decorated
-            for script in sorted(scripts_dir.glob("*.py")) if scripts_dir.is_dir() else ():
+            for script in (
+                sorted(scripts_dir.glob("*.py")) if scripts_dir.is_dir() else ()
+            ):
                 assert str(script) in decorated
 
     assert "security" in cfg.named_checks
