@@ -299,36 +299,6 @@ def _iter_command_segments(tokens: Sequence[str]) -> list[list[str]]:
     return segments
 
 
-def _check_env_invocation(args: Sequence[str]) -> str | None:
-    """Block ``env`` invocations that dump the environment instead of launching a command."""
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if _is_quote_noise(arg) or arg == "--":
-            index += 1
-            continue
-        if arg in _ENV_OPTIONS_WITH_VALUE:
-            index += 2
-            continue
-        if arg in _ENV_OPTIONS_WITH_STRING:
-            if index + 1 >= len(args):
-                return _environment_dump_reason("env")
-            return _check_env_dump_command(args[index + 1])
-        if arg.startswith(_ENV_INLINE_STRING_PREFIXES):
-            if arg.startswith("--split-string="):
-                return _check_env_dump_command(arg.split("=", 1)[1])
-            index += 1
-            continue
-        if arg.startswith("-") and arg != "-":
-            index += 1
-            continue
-        if _is_assignment(arg):
-            index += 1
-            continue
-        return _check_env_dump_tokens(args[index:])
-    return _environment_dump_reason("env")
-
-
 def _check_printenv_invocation(args: Sequence[str]) -> str | None:
     """Block ``printenv`` unless it queries specific variables."""
     variables = 0
@@ -556,7 +526,7 @@ def _check_env_dump_tokens(tokens: Sequence[str]) -> str | None:
     name = _command_name(tokens[index])
     args = tokens[index + 1 :]
     if name == "env":
-        return _check_env_invocation(args)
+        return _environment_dump_reason("env")
     if name == "printenv":
         return _check_printenv_invocation(args)
     if name == "export":
