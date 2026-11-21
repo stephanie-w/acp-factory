@@ -112,6 +112,13 @@ def test_extract_usage_metrics_bad_inputs() -> None:
         0.0,
     )
     assert extract_usage_metrics({"tokens": 80}) == (80, 0.0)
+    assert extract_usage_metrics({"used": 41_470, "total_tokens": 514_272}) == (
+        514_272,
+        0.0,
+    )
+    assert extract_usage_metrics(
+        {"used": 41_470, "input_tokens": 100, "output_tokens": 50}
+    ) == (150, 0.0)
 
 
 def test_budget_breach_message_helpers() -> None:
@@ -184,7 +191,7 @@ def test_render_budget_escalation() -> None:
             {"used": 60, "size": 1000, "cost": None},
             5,
             2,
-            "cumulative tokens 120 exceeded max_tokens_per_run (100)",
+            "run tokens 120 exceeded max_tokens_per_run (100)",
             120,
             0.0,
         ),
@@ -193,7 +200,7 @@ def test_render_budget_escalation() -> None:
             {"used": 10, "size": 1000, "cost": {"amount": 0.25, "currency": "USD"}},
             5,
             2,
-            "cumulative cost $0.50 exceeded max_cost_usd ($0.40)",
+            "run cost $0.50 exceeded max_cost_usd ($0.40)",
             20,
             0.5,
         ),
@@ -386,32 +393,33 @@ async def test_run_json_per_run_isolation(
     assert outcome.run_usage == expected_run_usage
 
 
-async def test_cumulative_usage_cap_enforced_with_initial_usage(
+async def test_per_run_usage_cap_ignores_initial_usage(
     tmp_path: Path,
 ) -> None:
-    """AC-3: budget caps trip on initial_usage + run_usage, not run usage alone."""
+    """Budget caps (max_tokens_per_run, max_cost_usd) apply to run_usage, not initial_usage."""
     cfg = FactoryConfig(
         task="do work",
-        budget=BudgetConfig(max_tokens_per_run=50_000),
-        checks=[CheckConfig(name="always-fail", cmd=_FAIL_CHECK)],
-        retry=RetryConfig(max_attempts=5),
+        budget=BudgetConfig(max_tokens_per_run=50_000, max_cost_usd=1.0),
+        checks=[],
+        retry=RetryConfig(max_attempts=3),
     )
-    fake, prompts = _fake_client({"used": 1000, "size": 20000, "cost": None})
+    fake, prompts = _fake_client(
+        {"total_tokens": 1_000, "used": 500, "cost": {"amount": 0.25}}
+    )
     with patch("acp_factory.runner.loop.FactoryACPClient", fake):
         outcome = await run_factory(
             cfg,
             tmp_path,
-            initial_usage=UsageTotals(tokens=50_000, cost_usd=0.0, turns=0),
+            initial_usage=UsageTotals(tokens=50_000, cost_usd=1.0, turns=2),
         )
 
-    assert outcome.succeeded is False
-    assert outcome.budget_breached is True
-    # 50,000 seeded + 1,000 consumed breaches the 50,000 cap after a single turn.
+    assert outcome.succeeded is True
+    assert outcome.budget_breached is False
     assert len(prompts) == 1
-    assert "cumulative tokens 51,000 exceeded max_tokens_per_run (50,000)" in (
-        outcome.failure_reason or ""
-    )
+    assert outcome.run_usage.tokens == 1_000
+    assert outcome.run_usage.cost_usd == 0.25
     assert outcome.usage.tokens == 51_000
+    assert outcome.usage.cost_usd == 1.25
 
 
 async def test_multi_stage_seeds_initial_usage(tmp_path: Path) -> None:

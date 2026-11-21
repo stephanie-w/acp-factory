@@ -110,12 +110,12 @@ def check_usage_cap(
         and total_tokens > budget.max_tokens_per_run
     ):
         return (
-            f"Budget cap breached: cumulative tokens {total_tokens:,} exceeded "
+            f"Budget cap breached: run tokens {total_tokens:,} exceeded "
             f"max_tokens_per_run ({budget.max_tokens_per_run:,})"
         )
     if budget.max_cost_usd is not None and total_cost_usd > budget.max_cost_usd:
         return (
-            f"Budget cap breached: cumulative cost ${total_cost_usd:.2f} exceeded "
+            f"Budget cap breached: run cost ${total_cost_usd:.2f} exceeded "
             f"max_cost_usd (${budget.max_cost_usd:.2f})"
         )
     return None
@@ -788,7 +788,7 @@ async def run_factory(
                 cumulative_usage.cost_usd += turn_res.summary.cost_usd
 
                 usage_breach = check_usage_cap(
-                    cumulative_usage.tokens, cumulative_usage.cost_usd, config.budget
+                    run_usage.tokens, run_usage.cost_usd, config.budget
                 )
                 if usage_breach is not None:
                     failure_reason = usage_breach

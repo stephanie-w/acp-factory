@@ -58,16 +58,17 @@ def extract_usage_metrics(usage: dict[str, Any] | None) -> tuple[int, float]:
     if not usage:
         return 0, 0.0
 
-    raw_tokens = (
-        usage.get("used")
-        or usage.get("total_tokens")
-        or usage.get("totalTokens")
-        or usage.get("tokens")
-    )
+    raw_tokens: Any = None
+    for key in ("total_tokens", "totalTokens", "tokens"):
+        if usage.get(key) is not None:
+            raw_tokens = usage.get(key)
+            break
     if raw_tokens is None and ("input_tokens" in usage or "output_tokens" in usage):
         raw_tokens = _non_negative_int(usage.get("input_tokens")) + _non_negative_int(
             usage.get("output_tokens")
         )
+    if raw_tokens is None:
+        raw_tokens = usage.get("used")
 
     tokens = _non_negative_int(raw_tokens)
     cost = usage.get("cost")
