@@ -119,6 +119,16 @@ def test_extract_usage_metrics_bad_inputs() -> None:
     assert extract_usage_metrics(
         {"used": 41_470, "input_tokens": 100, "output_tokens": 50}
     ) == (150, 0.0)
+    assert extract_usage_metrics(
+        {
+            "used": 42_939,
+            "total_tokens": 400_958,
+            "input_tokens": 37_081,
+            "output_tokens": 3_169,
+            "thought_tokens": 1_924,
+            "cached_read_tokens": 358_784,
+        }
+    ) == (42_174, 0.0)
 
 
 def test_budget_breach_message_helpers() -> None:
