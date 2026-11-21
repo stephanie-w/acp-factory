@@ -127,6 +127,29 @@ NOISY_DIRECTORIES: frozenset[str] = frozenset(
 _FILE_DUMP_COMMANDS: frozenset[str] = frozenset({"cat", "head", "tail", "less", "more"})
 _GREP_COMMANDS: frozenset[str] = frozenset({"grep", "egrep", "fgrep"})
 _BROAD_FIND_ROOTS: frozenset[str] = frozenset({".", "./", "$PWD", "${PWD}"})
+# Short/long grep options that consume a value. They must be skipped so a value
+# such as `-r` passed to `-e` is not mistaken for recursive traversal.
+_GREP_SHORT_OPTIONS_WITH_VALUE: frozenset[str] = frozenset(
+    {"e", "f", "m", "A", "B", "C", "d", "D"}
+)
+_GREP_LONG_OPTIONS_WITH_VALUE: frozenset[str] = frozenset(
+    {
+        "--regexp",
+        "--file",
+        "--max-count",
+        "--after-context",
+        "--before-context",
+        "--context",
+        "--directories",
+        "--devices",
+        "--label",
+        "--binary-files",
+        "--exclude",
+        "--exclude-from",
+        "--exclude-dir",
+        "--include",
+    }
+)
 
 
 _ENV_FILE_CMD_RE = re.compile(
@@ -302,7 +325,7 @@ def _check_env_invocation(args: Sequence[str]) -> str | None:
         if _is_assignment(arg):
             index += 1
             continue
-        return _check_command_tokens(args[index:])
+        return _check_env_dump_tokens(args[index:])
     return _environment_dump_reason("env")
 
 
@@ -408,34 +431,59 @@ def _uv_python_index(tokens: Sequence[str], uv_index: int) -> int | None:
     return None
 
 
-def _check_shell_wrapper(args: Sequence[str]) -> str | None:
-    """Inspect the command string passed to a shell wrapper's ``-c`` option."""
+def _split_command_text(cmd_str: str) -> list[list[str]]:
+    """Tokenize a shell string into simple-command segments without redirections."""
+    return _iter_command_segments(_strip_redirections(_tokenize_command(cmd_str)))
+
+
+def _shell_wrapper_payload(args: Sequence[str]) -> str | None:
+    """Return the command string passed to a shell wrapper's ``-c`` option."""
     for index, arg in enumerate(args):
         if arg == "-c":
-            if index + 1 < len(args):
-                return _check_env_dump_command(args[index + 1])
-            return None
+            return args[index + 1] if index + 1 < len(args) else None
         if not arg.startswith("-"):
             return None
     return None
 
 
-def _check_command_wrapper(name: str, args: Sequence[str]) -> str | None:
-    """Inspect the command wrapped by a shell keyword or prefix launcher."""
+def _wrapper_payload_segments(name: str, args: Sequence[str]) -> list[list[str]] | None:
+    """Return the simple commands wrapped by a shell keyword or prefix launcher."""
     if name == "eval":
-        if not args:
-            return None
-        return _check_env_dump_command(" ".join(args))
+        return _split_command_text(" ".join(args)) if args else None
     if name == "command":
         # ``-v``/``-V`` only resolve how a name would be interpreted.
         for index, arg in enumerate(args):
             if arg in ("-v", "-V"):
                 return None
             if arg == "--":
-                return _check_command_tokens(args[index + 1 :])
+                return [list(args[index + 1 :])] if index + 1 < len(args) else None
             if arg.startswith("-") and arg != "-":
                 continue
-            return _check_command_tokens(args[index:])
+            return [list(args[index:])]
+        return None
+    if name == "env":
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if _is_quote_noise(arg) or arg == "--":
+                index += 1
+                continue
+            if arg in _ENV_OPTIONS_WITH_VALUE:
+                index += 2
+                continue
+            if arg in _ENV_OPTIONS_WITH_STRING:
+                if index + 1 >= len(args):
+                    return None
+                return _split_command_text(args[index + 1])
+            if arg.startswith(_ENV_INLINE_STRING_PREFIXES):
+                if arg.startswith("--split-string="):
+                    return _split_command_text(arg.split("=", 1)[1])
+                index += 1
+                continue
+            if (arg.startswith("-") and arg != "-") or _is_assignment(arg):
+                index += 1
+                continue
+            return [list(args[index:])]
         return None
 
     options_with_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
@@ -452,13 +500,53 @@ def _check_command_wrapper(name: str, args: Sequence[str]) -> str | None:
             index += 1
             continue
         break
-    if index < len(args):
-        return _check_command_tokens(args[index:])
-    return None
+    return [list(args[index:])] if index < len(args) else None
 
 
-def _check_command_tokens(tokens: Sequence[str]) -> str | None:
-    """Inspect a single simple command for environment-dumping invocations."""
+def _unwrap_command_segments(
+    segments: Sequence[Sequence[str]], depth: int = 0
+) -> list[list[str]]:
+    """Return leaf simple commands after descending every wrapper prefix."""
+    leaves: list[list[str]] = []
+    for segment in segments:
+        if depth > 6:
+            continue
+        index = 0
+        while index < len(segment) and _is_assignment(segment[index]):
+            index += 1
+        if index >= len(segment):
+            continue
+        tokens = list(segment[index:])
+        name = _command_name(tokens[0])
+        args = tokens[1:]
+        if name in _SHELL_WRAPPERS:
+            payload = _shell_wrapper_payload(args)
+            if payload is not None:
+                leaves.extend(
+                    _unwrap_command_segments(
+                        _split_command_text(payload), depth=depth + 1
+                    )
+                )
+            continue
+        if name == "env" or name in _COMMAND_WRAPPERS:
+            wrapped = _wrapper_payload_segments(name, args)
+            if wrapped is not None:
+                leaves.extend(_unwrap_command_segments(wrapped, depth=depth + 1))
+            elif name == "env":
+                # A bare ``env`` is itself a dump candidate, not a launcher.
+                leaves.append(tokens)
+            continue
+        leaves.append(tokens)
+    return leaves
+
+
+def _iter_unwrapped_commands(cmd_str: str) -> list[list[str]]:
+    """Return every leaf simple command in *cmd_str*, unwrapping shell prefixes."""
+    return _unwrap_command_segments(_split_command_text(cmd_str))
+
+
+def _check_env_dump_tokens(tokens: Sequence[str]) -> str | None:
+    """Inspect one already-unwrapped simple command for environment dumping."""
     index = 0
     while index < len(tokens) and _is_assignment(tokens[index]):
         index += 1
@@ -479,19 +567,13 @@ def _check_command_tokens(tokens: Sequence[str]) -> str | None:
         python_index = _uv_python_index(tokens, index)
         if python_index is not None:
             return _check_python_inline(tokens, python_index)
-        return None
-    if name in _SHELL_WRAPPERS:
-        return _check_shell_wrapper(args)
-    if name in _COMMAND_WRAPPERS:
-        return _check_command_wrapper(name, args)
     return None
 
 
 def _check_env_dump_command(cmd_str: str) -> str | None:
     """Return a denial reason when a command dumps the process environment."""
-    tokens = _strip_redirections(_tokenize_command(cmd_str))
-    for segment in _iter_command_segments(tokens):
-        reason = _check_command_tokens(segment)
+    for tokens in _iter_unwrapped_commands(cmd_str):
+        reason = _check_env_dump_tokens(tokens)
         if reason:
             return reason
     return None
@@ -673,15 +755,47 @@ def _check_dump_command(
 
 def _is_recursive_grep(args: Sequence[str]) -> bool:
     """Return True when grep arguments request recursive traversal."""
-    for arg in args:
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
         if arg == "--":
             break
-        if arg in ("--recursive", "--dereference-recursive"):
-            return True
-        if not arg.startswith("-") or arg == "-" or arg.startswith("--"):
+        if not arg.startswith("-") or arg == "-":
             continue
-        if "r" in arg[1:] or "R" in arg[1:]:
-            return True
+        if arg.startswith("--"):
+            name, separator, value = arg.partition("=")
+            if name in ("--recursive", "--dereference-recursive"):
+                return True
+            if name == "--directories":
+                directories = (
+                    value if separator else (args[index] if index < len(args) else "")
+                )
+                if directories == "recurse":
+                    return True
+                if not separator:
+                    index += 1
+            elif name in _GREP_LONG_OPTIONS_WITH_VALUE and not separator:
+                index += 1
+            continue
+
+        # Short option clusters: consume the value of options such as ``-e`` so a
+        # pattern/value that happens to be ``-r`` is not mistaken for recursion.
+        position = 0
+        short = arg[1:]
+        while position < len(short):
+            option = short[position]
+            if option in _GREP_SHORT_OPTIONS_WITH_VALUE:
+                value = short[position + 1 :]
+                if not value and index < len(args):
+                    value = args[index]
+                    index += 1
+                if option == "d" and value == "recurse":
+                    return True
+                break
+            if option in "rR":
+                return True
+            position += 1
     return False
 
 
@@ -702,7 +816,20 @@ def _find_maxdepth(args: Sequence[str]) -> int | None:
     return None
 
 
-def _is_broad_find(args: Sequence[str]) -> bool:
+def _workspace_search_roots(workspace: str | Path | None) -> set[Path]:
+    """Return resolved roots that represent workspace-wide ``find`` targets."""
+    roots: set[Path] = set()
+    for raw in (workspace, Path.cwd()):
+        if raw is None:
+            continue
+        try:
+            roots.add(Path(raw).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    return roots
+
+
+def _is_broad_find(args: Sequence[str], workspace: str | Path | None = None) -> bool:
     """Return True for workspace-wide ``find`` invocations without a shallow bound."""
     if any(arg in ("--help", "--version") for arg in args):
         return False
@@ -719,90 +846,30 @@ def _is_broad_find(args: Sequence[str]) -> bool:
         return False
     if not roots:
         return True
-    return any(
-        os.path.normpath(root) in _BROAD_FIND_ROOTS
-        or (Path(root).is_absolute() and Path(root) == Path.cwd())
-        for root in roots
-    )
 
-
-def _shell_wrapper_payload(args: Sequence[str]) -> str | None:
-    """Return the command string passed to a shell wrapper's ``-c`` option."""
-    for index, arg in enumerate(args):
-        if arg == "-c" and index + 1 < len(args):
-            return args[index + 1]
-        if not arg.startswith("-"):
-            return None
-    return None
-
-
-def _wrapper_payload_tokens(name: str, args: Sequence[str]) -> list[str] | None:
-    """Return the command tokens wrapped by a shell prefix launcher."""
-    if name == "eval":
-        return _tokenize_command(" ".join(args)) if args else None
-    if name == "command":
-        for index, arg in enumerate(args):
-            if arg in ("-v", "-V"):
-                return None
-            if arg == "--":
-                return list(args[index + 1 :])
-            if arg.startswith("-") and arg != "-":
-                continue
-            return list(args[index:])
-        return None
-    if name == "env":
-        index = 0
-        while index < len(args):
-            arg = args[index]
-            if arg == "--":
-                return list(args[index + 1 :])
-            if arg in _ENV_OPTIONS_WITH_VALUE:
-                index += 2
-                continue
-            if arg in _ENV_OPTIONS_WITH_STRING:
-                if index + 1 >= len(args):
-                    return None
-                return _tokenize_command(args[index + 1])
-            if arg.startswith(_ENV_INLINE_STRING_PREFIXES):
-                if arg.startswith("--split-string="):
-                    return _tokenize_command(arg.split("=", 1)[1])
-                index += 1
-                continue
-            if (arg.startswith("-") and arg != "-") or _is_assignment(arg):
-                index += 1
-                continue
-            return list(args[index:])
-        return None
-
-    options_with_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg == "--":
-            index += 1
-            break
-        if arg in options_with_value:
-            index += 2
+    search_roots = _workspace_search_roots(workspace)
+    for root in roots:
+        if os.path.normpath(root) in _BROAD_FIND_ROOTS:
+            return True
+        if not Path(root).is_absolute():
             continue
-        if arg.startswith("-") and arg != "-":
-            index += 1
+        try:
+            if Path(root).expanduser().resolve() in search_roots:
+                return True
+        except (OSError, RuntimeError):
             continue
-        break
-    return list(args[index:]) or None
+    return False
 
 
-def _check_resource_command_tokens(
+def _check_resource_tokens(
     tokens: Sequence[str],
     *,
     blocked_paths: Sequence[str | Path] | None,
     rg_available: bool,
     fd_available: bool,
-    depth: int = 0,
+    workspace: str | Path | None,
 ) -> str | None:
-    """Inspect one simple command for blocked dumps and unbounded recursive searches."""
-    if depth > 6:
-        return None
-
+    """Inspect one already-unwrapped simple command for blocked resource access."""
     index = 0
     while index < len(tokens) and _is_assignment(tokens[index]):
         index += 1
@@ -821,33 +888,10 @@ def _check_resource_command_tokens(
                 "use 'rg' instead for gitignore-aware searches"
             )
         return None
-    if name == "find" and fd_available and _is_broad_find(args):
+    if name == "find" and fd_available and _is_broad_find(args, workspace):
         return (
             "Broad find is blocked when 'fd' is available; "
             "use 'fd' instead for gitignore-aware searches"
-        )
-
-    if name in _SHELL_WRAPPERS:
-        payload = _shell_wrapper_payload(args)
-        if payload is None:
-            return None
-        return _check_resource_command(
-            payload,
-            blocked_paths=blocked_paths,
-            rg_available=rg_available,
-            fd_available=fd_available,
-            depth=depth + 1,
-        )
-    if name in _COMMAND_WRAPPERS:
-        wrapped = _wrapper_payload_tokens(name, args)
-        if wrapped is None:
-            return None
-        return _check_resource_command_tokens(
-            wrapped,
-            blocked_paths=blocked_paths,
-            rg_available=rg_available,
-            fd_available=fd_available,
-            depth=depth + 1,
         )
     return None
 
@@ -858,17 +902,16 @@ def _check_resource_command(
     blocked_paths: Sequence[str | Path] | None,
     rg_available: bool,
     fd_available: bool,
-    depth: int = 0,
+    workspace: str | Path | None = None,
 ) -> str | None:
-    """Inspect every command segment for blocked dumps and unbounded searches."""
-    tokens = _strip_redirections(_tokenize_command(cmd_str))
-    for segment in _iter_command_segments(tokens):
-        reason = _check_resource_command_tokens(
-            segment,
+    """Inspect every unwrapped command for blocked dumps and unbounded searches."""
+    for tokens in _iter_unwrapped_commands(cmd_str):
+        reason = _check_resource_tokens(
+            tokens,
             blocked_paths=blocked_paths,
             rg_available=rg_available,
             fd_available=fd_available,
-            depth=depth,
+            workspace=workspace,
         )
         if reason:
             return reason
@@ -973,6 +1016,7 @@ def is_command_safe(
     deny_runs: bool = False,
     rg_available: bool | None = None,
     fd_available: bool | None = None,
+    workspace: str | Path | None = None,
 ) -> tuple[bool, str | None]:
     """Verify that a shell command does not match dangerous or unauthorized patterns."""
     cmd_str = command.strip()
@@ -1008,6 +1052,7 @@ def is_command_safe(
         blocked_paths=blocked_paths,
         rg_available=_tool_available(rg_available, "rg"),
         fd_available=_tool_available(fd_available, "fd", "fdfind"),
+        workspace=workspace,
     )
     if resource_reason:
         return False, f"Command blocked by guardrail: {resource_reason} ('{cmd_str}')"
@@ -1127,6 +1172,7 @@ def main(argv: list[str] | None = None) -> None:
             custom_denied=custom_denied,
             blocked_paths=blocked_paths,
             deny_runs=args.deny_runs,
+            workspace=cwd,
         )
         if not safe_cmd:
             print(f"[guardrails] DENIED: {cmd_reason}", file=sys.stderr)

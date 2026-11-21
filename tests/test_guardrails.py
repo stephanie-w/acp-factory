@@ -654,6 +654,9 @@ def test_guardrails_allows_venv_by_default_and_blocks_when_configured(
         ("bash -c 'cat uv.lock'", "lockfile"),
         ("xargs cat uv.lock", "lockfile"),
         ("eval 'head package-lock.json'", "lockfile"),
+        ("env -S 'cat uv.lock'", "lockfile"),
+        ("command -p cat uv.lock", "lockfile"),
+        ("time cat uv.lock", "lockfile"),
         ("cat uv.lock > /tmp/dump.txt", "lockfile"),
     ],
 )
@@ -692,6 +695,10 @@ def test_guardrails_allows_non_dump_and_venv_commands(cmd: str) -> None:
         "fgrep -nr foo src/",
         "grep --recursive foo src/",
         "grep --dereference-recursive foo .",
+        "grep -d recurse foo .",
+        "grep --directories=recurse foo .",
+        "env -S 'grep -rn foo .'",
+        "bash -c 'grep -rn foo .'",
     ],
 )
 def test_recursive_grep_blocked_when_rg_available(cmd: str) -> None:
@@ -708,6 +715,8 @@ def test_recursive_grep_blocked_when_rg_available(cmd: str) -> None:
         "grep -n foo src/main.py",
         "grep --include='*.py' foo src/main.py",
         "grep -- -r pattern src/main.py",
+        "grep -e -r PATTERN src/main.py",
+        "grep -e '-r' PATTERN src/main.py",
         "rg -r replacement src/",
     ],
 )
@@ -763,6 +772,32 @@ def test_broad_find_blocked_when_fd_available(cmd: str) -> None:
 def test_targeted_find_allowed(cmd: str) -> None:
     safe, _ = is_command_safe(cmd, fd_available=True)
     assert safe is True
+
+
+def test_broad_find_blocks_absolute_workspace_root(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    other = tmp_path / "other"
+    ws.mkdir()
+    other.mkdir()
+
+    workspace_cmd = f"find {ws} -name '*.py'"
+    safe, reason = is_command_safe(workspace_cmd, fd_available=True, workspace=ws)
+    assert safe is False
+    assert "fd" in (reason or "")
+
+    # The same command is only redirection-worthy when the workspace is known.
+    assert is_command_safe(workspace_cmd, fd_available=False, workspace=ws) == (
+        True,
+        None,
+    )
+
+    # Absolute roots outside the workspace and shallow scans stay permitted.
+    assert is_command_safe(
+        f"find {other} -name '*.py'", fd_available=True, workspace=ws
+    ) == (True, None)
+    assert is_command_safe(
+        f"find {ws} -maxdepth 1 -name '*.py'", fd_available=True, workspace=ws
+    ) == (True, None)
 
 
 def test_guardrails_main_blocked_paths(tmp_path: Path) -> None:
