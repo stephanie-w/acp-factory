@@ -309,8 +309,11 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "Complete all necessary research, file modifications" in mutating_prompt
     assert "Do NOT pause to ask clarifying questions" in mutating_prompt
     assert "GUARDRAIL DENIED" in mutating_prompt
+    assert "Tool & Token Discipline" in mutating_prompt
     assert "Do not narrate tool calls" in mutating_prompt
-    assert "Prefer targeted, windowed file reads" in mutating_prompt
+    assert "Batch parallel tool calls" in mutating_prompt
+    assert "targeted, windowed file reads" in mutating_prompt
+    assert "git diff --stat" in mutating_prompt
     assert "omit pleasantries, preambles" in mutating_prompt
 
     results = [
@@ -343,6 +346,7 @@ def test_build_retry_prompt_includes_context(tmp_path: Path) -> None:
     assert "Remember: You are executing autonomously" in prompt
     assert "apply all changes directly to the workspace" in prompt
     assert "Do not narrate tool calls" in prompt
+    assert "batch independent tool calls in parallel" in prompt
 
 
 def test_build_retry_prompt_for_response_file_check() -> None:

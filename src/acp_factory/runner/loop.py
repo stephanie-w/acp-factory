@@ -159,9 +159,12 @@ def build_initial_prompt(
     )
     lines.extend(
         [
-            "- Do not narrate tool calls or announce next steps between tool invocations; call tools directly.",
-            "- Prefer targeted, windowed file reads and bounded search commands (`rg`, `fd`) over full-file dumps or unfiltered recursive scans.",
-            f"- Keep your final response concise: omit pleasantries, preambles, filler adverbs, and prompt restatements; {final_clause}",
+            "",
+            "## Tool & Token Discipline",
+            "- Do not narrate tool calls or announce next steps (e.g. 'Let me...', 'I will...', 'Now let's...') between tool invocations; invoke tools silently.",
+            "- Batch parallel tool calls: run independent file reads, searches, and git checks in a single turn instead of sequential 1-by-1 calls.",
+            "- Bounded reads & diffs: use targeted, windowed file reads and bounded search commands (`rg`, `fd`) over full-file dumps or unfiltered recursive scans; inspect `git diff --stat` before reading large diffs.",
+            f"- Telegraphic output: omit pleasantries, preambles, filler adverbs, and prompt restatements; {final_clause}",
             "",
         ]
     )
@@ -295,8 +298,8 @@ def build_retry_prompt(
         else "and output strictly the required stage sections."
     )
     lines.append(
-        "Do not narrate tool calls or announce next steps; omit pleasantries and preambles, "
-        f"{retry_final_clause}"
+        "Do not narrate tool calls or announce next steps; batch independent tool calls in parallel, "
+        f"omit pleasantries and preambles, {retry_final_clause}"
     )
     return "\n".join(lines)
 
