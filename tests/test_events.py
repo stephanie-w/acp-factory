@@ -230,6 +230,65 @@ def test_turn_event_tracker_lifecycle() -> None:
     assert tracker.cumulative_cost_usd() == 0.001
 
 
+def test_turn_event_tracker_preserves_tool_name() -> None:
+    """AC-1: a stable ACP tool name recorded by acpterm survives `end_turn`."""
+    tracker = TurnEventTracker(initial_prompt="Initial prompt")
+    tracker.begin_turn("Turn 1")
+    tracker.recorder.add_tool_call(
+        "tc-named", "Run pytest", "execute", name="run_command"
+    )
+    tracker.recorder.update_tool_call(
+        "tc-named", status="completed", content="1 passed"
+    )
+    tracker.recorder.add_tool_call("tc-unnamed", "Read file", "read")
+    tracker.recorder.update_tool_call("tc-unnamed", status="completed")
+
+    summary = tracker.end_turn("end_turn")
+
+    by_id = {tc["id"]: tc for tc in summary.tool_calls}
+    assert by_id["tc-named"]["name"] == "run_command"
+    assert "name" not in by_id["tc-unnamed"]
+
+
+@pytest.mark.parametrize(
+    "tool_call",
+    [
+        {"id": "tc-1", "name": "run_command"},
+        {"id": "tc-1", "name": None},
+        {"id": "tc-1"},
+    ],
+    ids=["named", "explicit_none", "missing"],
+)
+def test_turn_summary_name_serialization(tool_call: dict[str, object]) -> None:
+    """AC-2: both serializers emit `name` only when it is set."""
+    summary = TurnSummary(
+        prompt="Run tests",
+        response_text="Done",
+        thought_text="",
+        stop_reason="end_turn",
+        duration_seconds=1.0,
+        tool_call_count=1,
+        tool_calls=[
+            {
+                "title": "Run pytest",
+                "kind": "execute",
+                "status": "completed",
+                **tool_call,
+            }
+        ],
+    )
+
+    full_tc = summary.to_dict()["tool_calls"][0]
+    condensed_tc = summary.to_condensed_dict()["tool_calls"][0]
+
+    if tool_call.get("name") is None:
+        assert "name" not in full_tc
+        assert "name" not in condensed_tc
+    else:
+        assert full_tc["name"] == "run_command"
+        assert condensed_tc["name"] == "run_command"
+
+
 def test_turn_event_tracker_resets_usage_between_turns() -> None:
     tracker = TurnEventTracker(initial_prompt="Initial prompt")
     tracker.begin_turn("Turn 1")

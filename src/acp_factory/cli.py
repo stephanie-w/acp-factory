@@ -1412,6 +1412,7 @@ def _build_tool_calls_table(
     table = Table(title=title)
     table.add_column("#", justify="right", style="dim", no_wrap=True)
     table.add_column("Kind", style="cyan", no_wrap=True)
+    table.add_column("Name", no_wrap=True)
     table.add_column("Status", no_wrap=True)
     table.add_column("Exit", justify="right", no_wrap=True)
     table.add_column("Dur", justify="right", no_wrap=True)
@@ -1422,6 +1423,7 @@ def _build_tool_calls_table(
         table.add_row(
             str(idx),
             str(tc.get("kind") or "-"),
+            str(tc.get("name") or "-"),
             str(tc.get("status") or "-"),
             str(ec) if ec is not None else "-",
             f"{dur:.2f}s" if dur is not None else "-",
@@ -1528,8 +1530,10 @@ def inspect_cmd(
         exit_str = f" (exit {exit_code})" if exit_code is not None else ""
         dur = extract_tool_duration(tc)
         dur_str = f" | duration: {dur:.3f}s" if dur is not None else ""
-        header = (
-            f"id: {tc.get('id')}\n"
+        header = f"id: {tc.get('id')}\n"
+        if tc.get("name"):
+            header += f"name: {tc.get('name')}\n"
+        header += (
             f"kind: {tc.get('kind')} | status: {tc.get('status')}{exit_str}{dur_str}\n"
             f"title: {tc.get('title')}"
         )
