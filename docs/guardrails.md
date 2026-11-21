@@ -10,8 +10,12 @@ When `guardrails.enabled` is `true` (default), [`FactoryACPClient.start()`](../s
 
 ### Workspace Path Containment (`is_path_contained`)
 - **Workspace boundary:** Relative and symlinked paths are resolved against `ACPTERM_CWD`. Any path outside the active workspace (or worktree) is denied.
+- **Generated lockfiles:** Reads of `uv.lock`, `poetry.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, and `Cargo.lock` are denied with a pointer to the corresponding manifest (`pyproject.toml`, `package.json`, or `Cargo.toml`). Package managers may still create or update lockfiles.
+- **Noisy cache/vendor directories:** Reads inside `node_modules`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.ty_cache`, `.tox`, `.nox`, and `.git/objects` are denied. Detection uses workspace-relative path components, so a workspace whose parent directory happens to be named `node_modules` is not affected.
+- **`.venv` stays readable by default:** Agents may inspect `.venv/pyvenv.cfg` and installed sources under `.venv/lib/.../site-packages`. Add `.venv` to `blocked_paths` to opt into blocking it.
 - **External & bundled resources catalogs (read-only):** When `kind` is `read` or `view`, reading from configured `resource_dirs` / `resources_dir` (`--resources-dir` / `FACTORY_RESOURCES_DIRS` / `FACTORY_RESOURCES_DIR`) and `acp-factory`'s package-bundled resources is permitted.
 - **Explicit allowlist:** Paths listed in `[guardrails].allowed_paths` (`--allow-path` / `FACTORY_GUARDRAILS_ALLOWED_PATHS`) are permitted.
+- **Custom blocked paths:** Paths or directories listed in `[guardrails].blocked_paths` (`--block-path` / `FACTORY_GUARDRAILS_BLOCKED_PATHS`) are denied for direct access and file-dump commands.
 - **Run artifact isolation (`--deny-runs`):** In all stages except `retro`, access to `.factory/runs/`, `.factory/latest-report.md`, and `.factory/latest-build-notes.md` is denied so agents do not read prior run transcripts or reports directly from disk.
 
 ### Command & Sensitive Path Filtering (`is_command_safe`)
@@ -30,6 +34,9 @@ For `execute` / `command` / `bash` requests, commands are checked against:
   - `/etc/shadow`, `/etc/passwd`, `/etc/sudoers`
   - `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.config/gcloud`
 - **Dotenv secret files:** `.env` and `.env.*` (e.g., `.env.local`, `.env.production`) are blocked for both path access and shell commands, while safe templates (`.env.example`, `.env.sample`, `.env.template`) remain allowed.
+- **Lockfile & cache dumps:** File-dump commands (`cat`, `head`, `tail`, `less`, `more`) targeting generated lockfiles, noisy cache/vendor directories, or configured `blocked_paths` are denied. Wrapper invocations such as `bash -c 'cat uv.lock'`, `xargs cat uv.lock`, and `eval 'head package-lock.json'` are inspected. Non-dump commands such as `ls .venv/bin` and reads of `.venv` sources remain permitted.
+- **Recursive `grep` redirection:** When `rg` (ripgrep) is available on `PATH`, recursive `grep`/`egrep`/`fgrep` forms (`-r`, `-R`, `-rn`, `--recursive`, `--dereference-recursive`) are denied with a message pointing to `rg`, which respects `.gitignore` and skips `.venv`/cache directories automatically. If `rg` is unavailable, recursive `grep` is permitted.
+- **Broad `find` redirection:** When `fd` (or `fdfind`) is available on `PATH`, workspace-wide `find` invocations (`find`, `find .`, `find ./`, `find $PWD`) without `-maxdepth` or with `-maxdepth` greater than 1 are denied in favour of `fd`. Shallow bounded scans (`find . -maxdepth 1`) and targeted subdirectory scans (`find src -name '*.py'`) remain permitted.
 - **Environment-dumping commands:** Bare `env` / `/usr/bin/env` (no target command), bare `printenv` / `/usr/bin/printenv` (no specific variable names), `export` / `export -p`, and inline Python `-c` probes that dump `os.environ` / `os.environb` are blocked. The check also descends through shell prefixes and wrappers (`eval`, `command`, `builtin`, `time`, `exec`, `nice`, `nohup`, `xargs`, `busybox env`) and process substitution (`cat <(env)`), so one-word prefixes cannot bypass it. Launcher forms such as `env FOO=bar pytest`, specific-variable queries such as `printenv USER`, assignments such as `export FOO=bar`, single-variable Python reads such as `os.environ.get("USER")`, and repository searches such as `rg os.environ` remain allowed.
 - **Custom denied patterns:** Case-insensitive substring matches from `[guardrails].denied_commands` (`--deny-cmd` / `FACTORY_GUARDRAILS_DENIED_COMMANDS`).
 - **Run artifact commands (`--deny-runs`):** Shell commands referencing `.factory/runs`, `.factory/latest-report.md`, or `.factory/latest-build-notes.md` are blocked outside `retro`.
@@ -94,6 +101,7 @@ Because a fleet target repository's own `.factory/config.toml` can add `keep_env
 [guardrails]
 enabled = true
 allowed_paths = []
+blocked_paths = []
 denied_commands = []
 
 [budget]
@@ -101,3 +109,5 @@ max_tokens_per_run = 100000
 max_cost_usd = 2.00
 max_turns = 3
 ```
+
+`blocked_paths` entries may be workspace-relative (e.g. `dist`, `.venv`, `vendor/generated`) or absolute directories. They apply to both direct file access and file-dump commands.
