@@ -435,3 +435,57 @@ def test_cli_stats_token_usage_telemetry_and_fallback(tmp_path: Path) -> None:
 
     assert agg["top_token_runs"][0]["run_id"] == "20261115-120000-runone"
     assert agg["top_token_runs"][1]["run_id"] == "20261115-130000-runtwo"
+
+
+def test_cli_inspect_shows_output_size(tmp_path: Path) -> None:
+    """`inspect` displays tool output character counts in the table and `--call` view."""
+    run_id = "20261122-160000-size01"
+    run_dir = tmp_path / ".factory" / "runs" / run_id
+    attempt_dir = run_dir / "attempt-1"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "timestamp": "2026-11-22T16:00:00+00:00",
+                "stage": "build",
+                "succeeded": True,
+                "attempts_used": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    transcript = {
+        "tool_calls": [
+            {
+                "id": "call_0",
+                "title": "Large output call",
+                "kind": "read",
+                "status": "completed",
+                "content": "x" * 1234,
+            },
+            {
+                "id": "call_1",
+                "title": "Empty output call",
+                "kind": "execute",
+                "status": "completed",
+            },
+        ]
+    }
+    (attempt_dir / "transcript.json").write_text(
+        json.dumps(transcript), encoding="utf-8"
+    )
+
+    table_output = _invoke_inspect("--workspace", str(tmp_path))
+    assert "Chars" in table_output
+    large_row = next(
+        line for line in table_output.splitlines() if "Large output call" in line
+    )
+    empty_row = next(
+        line for line in table_output.splitlines() if "Empty output call" in line
+    )
+    assert [cell.strip() for cell in large_row.split("│")][7] == "1,234"
+    assert [cell.strip() for cell in empty_row.split("│")][7] == "-"
+
+    detail_output = _invoke_inspect("--workspace", str(tmp_path), "--call", "0")
+    assert "output: 1,234 chars" in detail_output

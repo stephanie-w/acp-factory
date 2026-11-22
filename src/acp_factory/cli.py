@@ -1427,10 +1427,12 @@ def _build_tool_calls_table(
     table.add_column("Status", no_wrap=True)
     table.add_column("Exit", justify="right", no_wrap=True)
     table.add_column("Dur", justify="right", no_wrap=True)
+    table.add_column("Chars", justify="right", style="magenta", no_wrap=True)
     table.add_column("Title")
     for idx, tc in rows:
         ec = extract_tool_exit_code(tc)
         dur = extract_tool_duration(tc)
+        out_len = len(extract_tool_output(tc))
         table.add_row(
             str(idx),
             str(tc.get("kind") or "-"),
@@ -1438,6 +1440,7 @@ def _build_tool_calls_table(
             str(tc.get("status") or "-"),
             str(ec) if ec is not None else "-",
             f"{dur:.2f}s" if dur is not None else "-",
+            f"{out_len:,}" if out_len > 0 else "-",
             str(tc.get("title") or "-"),
         )
     return table
@@ -1541,16 +1544,17 @@ def inspect_cmd(
         exit_str = f" (exit {exit_code})" if exit_code is not None else ""
         dur = extract_tool_duration(tc)
         dur_str = f" | duration: {dur:.3f}s" if dur is not None else ""
+        output = extract_tool_output(tc)
         header = f"id: {tc.get('id')}\n"
         if tc.get("name"):
             header += f"name: {tc.get('name')}\n"
         header += (
-            f"kind: {tc.get('kind')} | status: {tc.get('status')}{exit_str}{dur_str}\n"
+            f"kind: {tc.get('kind')} | status: {tc.get('status')}{exit_str}{dur_str}"
+            f" | output: {len(output):,} chars\n"
             f"title: {tc.get('title')}"
         )
         if tc.get("raw_input"):
             header += f"\nraw_input: {json.dumps(tc.get('raw_input'))}"
-        output = extract_tool_output(tc)
         body = f"{header}\n\n{output}" if output else header
         console.print(
             Panel(
