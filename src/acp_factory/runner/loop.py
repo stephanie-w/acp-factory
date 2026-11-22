@@ -160,10 +160,12 @@ def build_initial_prompt(
     lines.extend(
         [
             "",
-            "## Tool & Token Discipline",
-            "- Do not narrate tool calls or announce next steps (e.g. 'Let me...', 'I will...', 'Now let's...') between tool invocations; invoke tools silently.",
+            "## Tool & Token Discipline (First Priority)",
+            "- Token economy is your first priority: you are operating under a strict per-run token budget (exceeding it aborts the run). Before every tool call, ask whether current evidence already answers the question.",
+            "- Locate first, read selectively: find targets with `rg -n`, `fd`, `jq`, or `git diff --stat`, then use targeted, windowed file reads (`<=150` lines). Never read full files over ~200 lines or re-read lines already read in this turn.",
+            "- Quiet & query at source: use quiet/no-color flags (`-q`, `--no-color`) and project structured outputs (`jq`, `head`/`tail`) while retaining exact failure diagnostics.",
             "- Batch parallel tool calls: run independent file reads, searches, and git checks in a single turn instead of sequential 1-by-1 calls.",
-            "- Bounded reads & diffs: use targeted, windowed file reads and bounded search commands (`rg`, `fd`) over full-file dumps or unfiltered recursive scans; inspect `git diff --stat` before reading large diffs.",
+            "- Do not narrate tool calls or announce next steps (e.g. 'Let me...', 'I will...', 'Now let's...') between tool invocations; invoke tools silently.",
             f"- Telegraphic output: omit pleasantries, preambles, filler adverbs, and prompt restatements; {final_clause}",
             "",
         ]
