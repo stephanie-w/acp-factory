@@ -171,11 +171,24 @@ If you choose to run models with extended reasoning in implementation stages:
    [stages.build]
    timeout = 1200
    ```
-2. **Use effort suffixes where supported**:
+2. **Set `thought_level` where the agent supports it**:
+   Agents that advertise a `thought_level` ACP config option (e.g. `session/set_config_option`) can run cheaper reasoning on high-frequency stages and deeper reasoning where it pays off. Values are agent-defined:
+   ```toml
+   [agent]
+   thought_level = "medium"          # Global default
+
+   [stages.build]
+   thought_level = "low"             # Fast tool-call loop
+
+   [stages.review]
+   thought_level = "high"            # Deeper critique
+   ```
+   `thought_level` controls the model's actual reasoning effort. It is unrelated to `thought_max_chars`, which only truncates or omits recorded thoughts in `transcript.md` / `transcript.summary.json`. Unsupported agents and unrecognized values warn and continue.
+3. **Use effort suffixes where supported**:
    Gateways like OpenRouter or LiteLLM allow specifying reasoning intensity directly in the model ID:
    ```toml
    model = "openai/o3-mini:low"       # Reduces reasoning delay on build
    model = "openai/o3-mini:high"      # Maximizes critique depth on review
    ```
-3. **Preserve worktrees on timeout**:
+4. **Preserve worktrees on timeout**:
    Keep `keep_worktree_on_failure = true` in the top-level `[retry]` configuration. If an agent turn times out, any code and tests written prior to the timeout remain safely preserved in `.worktrees/issue-<id>`.

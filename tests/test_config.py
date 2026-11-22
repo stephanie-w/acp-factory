@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -708,6 +710,128 @@ def test_thought_max_chars_negative_rejected() -> None:
         StageConfig.model_validate({"thought_max_chars": 1.5})
     with pytest.raises(ValidationError):
         StageConfig.model_validate({"thought_max_chars": "100"})
+
+
+def test_thought_level_defaults_to_none() -> None:
+    """AC-1: thought_level is optional and unset by default everywhere."""
+    from acp_factory.config import AgentConfig
+
+    assert AgentConfig().thought_level is None
+    assert StageConfig().thought_level is None
+    assert CheckConfig(name="review", prompt="Check it").thought_level is None
+    assert FactoryConfig().agent.thought_level is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("medium", "medium"),
+        ("  low  ", "low"),
+        ("\tHigh\n", "High"),
+        ("budget_10k", "budget_10k"),
+    ],
+)
+def test_thought_level_strips_whitespace_and_preserves_case(
+    raw: str, expected: str
+) -> None:
+    """AC-1: surrounding whitespace is stripped, internal casing is preserved."""
+    from acp_factory.config import AgentConfig
+
+    assert AgentConfig(thought_level=raw).thought_level == expected
+    assert StageConfig(thought_level=raw).thought_level == expected
+    assert (
+        CheckConfig(name="review", prompt="Check it", thought_level=raw).thought_level
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    ["", "   ", 1, 0, 1.5, True, False, ["low"], {"level": "low"}],
+)
+def test_thought_level_rejects_invalid_values(bad_value: Any) -> None:
+    """AC-1: blank and non-string thought levels are rejected explicitly."""
+    from acp_factory.config import AgentConfig
+
+    with pytest.raises(ValidationError, match="thought_level"):
+        AgentConfig(thought_level=bad_value)
+    with pytest.raises(ValidationError, match="thought_level"):
+        StageConfig(thought_level=bad_value)
+    with pytest.raises(ValidationError, match="thought_level"):
+        CheckConfig(name="review", prompt="Check it", thought_level=bad_value)
+    with pytest.raises(ValidationError, match="thought_level"):
+        FactoryConfig(stages={"build": {"thought_level": bad_value}})
+
+
+def test_thought_level_stage_precedence_and_overrides(tmp_path: Path) -> None:
+    """AC-2: stage overrides win, unset stages inherit, CLI overrides take precedence."""
+    cfg_file = tmp_path / "factory.toml"
+    cfg_file.write_text(
+        """\
+version = "1"
+
+[agent]
+name = "opencode"
+thought_level = "medium"
+
+[stages.build]
+thought_level = "  low  "
+
+[stages.review]
+model = "anthropic/claude"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = FactoryConfig.from_file(cfg_file)
+    assert cfg.agent.thought_level == "medium"
+    assert cfg.resolve_stage("build").agent.thought_level == "low"
+    assert cfg.resolve_stage("review").agent.thought_level == "medium"
+
+    assert cfg.with_overrides(thought_level="high").agent.thought_level == "high"
+    assert cfg.with_overrides(stage="build").agent.thought_level == "low"
+    assert (
+        cfg.with_overrides(stage="build", thought_level="High").agent.thought_level
+        == "High"
+    )
+    with pytest.raises(ValueError, match="thought_level"):
+        cfg.with_overrides(thought_level="   ")
+    with pytest.raises(ValueError, match="thought_level"):
+        cfg.with_overrides(thought_level="")
+
+
+def test_cli_run_exposes_and_forwards_thought_level() -> None:
+    """AC-2: `run --thought-level` is documented and threaded into the config."""
+    from unittest.mock import AsyncMock, patch
+
+    from typer.testing import CliRunner
+
+    from acp_factory.cli import app
+    from acp_factory.runner.loop import FactoryRunOutcome
+
+    help_res = CliRunner().invoke(app, ["run", "--help"])
+    assert help_res.exit_code == 0
+    # Rich splits the double dash across style spans; strip ANSI before asserting.
+    plain_help = re.sub(r"\x1b\[[0-9;]*m", "", help_res.output)
+    assert "--thought-level" in plain_help
+
+    cfg = FactoryConfig(task="task")
+    with (
+        patch("acp_factory.config.FactoryConfig.discover", return_value=cfg),
+        patch(
+            "acp_factory.cli.run_factory", new_callable=AsyncMock
+        ) as mock_run_factory,
+    ):
+        mock_run_factory.return_value = FactoryRunOutcome(
+            succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
+        )
+        res = CliRunner().invoke(
+            app, ["run", "--offline", "--thought-level", " high ", "some task"]
+        )
+
+    assert res.exit_code == 0
+    called_cfg = mock_run_factory.call_args.args[0]
+    assert called_cfg.agent.thought_level == "high"
 
 
 def test_prompt_resolution_prefers_local_factory_and_case_insensitive(

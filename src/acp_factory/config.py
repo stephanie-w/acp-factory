@@ -5,10 +5,10 @@ from __future__ import annotations
 import shlex
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, model_validator
 
 from .resources import (
     load_markdown_or_inline as _load_markdown_or_inline,
@@ -37,6 +37,24 @@ USER_FLEET_FILES = (
 )
 
 
+def _validate_thought_level(value: object) -> str | None:
+    """Normalize a configured ACP ``thought_level`` value.
+
+    ACP option values are agent-defined opaque strings (for example ``"low"`` or
+    ``"budget_10k"``), so only the shape is validated here. Surrounding
+    whitespace is stripped while internal casing is preserved; the value is
+    checked against the agent's advertised options at session setup time.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("thought_level must be a non-empty string")
+    return value.strip()
+
+
+ThoughtLevel = Annotated[str | None, BeforeValidator(_validate_thought_level)]
+
+
 class AgentConfig(BaseModel):
     """ACP worker agent configuration (global or stage-specific)."""
 
@@ -50,6 +68,13 @@ class AgentConfig(BaseModel):
     model: str | None = Field(default=None, description="Optional LLM model override")
     mode: str | None = Field(
         default=None, description="Optional agent mode override (e.g. 'plan', 'code')"
+    )
+    thought_level: ThoughtLevel = Field(
+        default=None,
+        description=(
+            "Optional ACP reasoning/thinking level applied via session config options "
+            "(values are agent-defined, e.g. 'low', 'medium', 'high')"
+        ),
     )
     read_only: bool = Field(
         default=False,
@@ -110,6 +135,13 @@ class CheckConfig(BaseModel):
         default=None,
         description="Optional model override for review prompt checks",
     )
+    thought_level: ThoughtLevel = Field(
+        default=None,
+        description=(
+            "Optional ACP reasoning/thinking level for review prompt checks; "
+            "inherits the active stage agent level when unset"
+        ),
+    )
     persona: str | None = Field(
         default=None,
         description="Optional persona Markdown path for review prompt checks",
@@ -169,6 +201,12 @@ class StageConfig(BaseModel):
     )
     mode: str | None = Field(
         default=None, description="Stage-specific operating mode (e.g. 'plan', 'code')"
+    )
+    thought_level: ThoughtLevel = Field(
+        default=None,
+        description=(
+            "Stage-specific ACP reasoning/thinking level; overrides [agent].thought_level"
+        ),
     )
     read_only: bool | None = Field(
         default=None, description="Enforce read-only mode during this stage"
@@ -609,6 +647,8 @@ class FactoryConfig(BaseModel):
             resolved.agent.model = stage.model
         if stage.mode is not None:
             resolved.agent.mode = stage.mode
+        if stage.thought_level is not None:
+            resolved.agent.thought_level = stage.thought_level
         if stage.read_only is not None:
             resolved.agent.read_only = stage.read_only
         if stage.persona is not None:
@@ -801,6 +841,7 @@ class FactoryConfig(BaseModel):
         agent_command: str | None = None,
         model: str | None = None,
         mode: str | None = None,
+        thought_level: str | None = None,
         read_only: bool | None = None,
         persona: str | None = None,
         skills: list[str] | None = None,
@@ -838,6 +879,8 @@ class FactoryConfig(BaseModel):
             updated.agent.model = model
         if mode is not None:
             updated.agent.mode = mode
+        if thought_level is not None:
+            updated.agent.thought_level = _validate_thought_level(thought_level)
         if read_only is not None:
             updated.agent.read_only = read_only
         if persona is not None:

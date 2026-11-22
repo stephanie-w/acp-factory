@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
+import inspect
+import logging
 import shutil
 import sys
 import uuid
@@ -16,8 +19,11 @@ from typing import Any
 from unittest.mock import patch
 
 import acpterm.acp_agent as acpterm_agent_mod
+from acpterm import agent_cache as acpterm_agent_cache
 from acpterm.acp_agent import ACPAgent
 from acpterm.config import Config as AcptermConfig
+from rich.console import Console
+from rich.markup import escape as escape_markup
 
 from ..config import AgentConfig, GuardrailsConfig
 from ..resources import (
@@ -32,6 +38,12 @@ from ..resources import (
     resolve_skill_paths as resolve_skill_paths,
 )
 from .events import TurnEventTracker, TurnSummary
+
+logger = logging.getLogger(__name__)
+console = Console(highlight=False)
+
+_BOOLEAN_TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
+_BOOLEAN_FALSE_VALUES = frozenset({"false", "0", "no", "off"})
 
 
 @dataclass
@@ -106,6 +118,7 @@ class FactoryACPClient:
         self.guardrails = guardrails or GuardrailsConfig()
         self.deny_runs = deny_runs
         self.thought_max_chars = thought_max_chars
+        self.applied_thought_level: str | None = None
 
         effective_discover = (
             discover_apm_resources
@@ -185,6 +198,24 @@ class FactoryACPClient:
         )
 
         orig_spawn = acpterm_agent_mod.spawn_stdio_transport
+        orig_cache_store = acpterm_agent_cache.store
+        handshake: dict[str, Any] = {"observed": False, "config_options": None}
+
+        def _capture_cache_store(
+            agent_name: str,
+            config_options: Any = None,
+            modes: Any = None,
+            commands: Any = None,
+        ) -> None:
+            """Record the live handshake's config options before acpterm strips them."""
+            handshake["observed"] = True
+            handshake["config_options"] = config_options
+            orig_cache_store(
+                agent_name,
+                config_options=config_options,
+                modes=modes,
+                commands=commands,
+            )
 
         def _spawn_in_workspace(
             command: str,
@@ -229,6 +260,11 @@ class FactoryACPClient:
                     "spawn_stdio_transport",
                     side_effect=_spawn_in_workspace,
                 ),
+                patch.object(
+                    acpterm_agent_cache,
+                    "store",
+                    side_effect=_capture_cache_store,
+                ),
             ):
                 await asyncio.wait_for(
                     self._agent.start(
@@ -238,9 +274,183 @@ class FactoryACPClient:
                     ),
                     timeout=self.agent_config.timeout,
                 )
+            if self.agent_config.thought_level is not None:
+                await self._apply_thought_level(
+                    self.agent_config.thought_level,
+                    observed=bool(handshake["observed"]),
+                    config_options=handshake["config_options"],
+                )
         except BaseException:
             await self.stop()
             raise
+
+    @staticmethod
+    def _option_field(option: Any, key: str, default: Any = None) -> Any:
+        """Read a config-option field from either an ACP object or a cached dict."""
+        if isinstance(option, Mapping):
+            return option.get(key, default)
+        return getattr(option, key, default)
+
+    def _resolve_config_options(
+        self, *, observed: bool, config_options: Any
+    ) -> list[Any]:
+        """Return the session's advertised config options.
+
+        A live handshake wins even when it advertises none, so stale on-disk
+        cache entries can never resurrect an option the agent no longer offers.
+        """
+        if observed:
+            return list(config_options) if config_options else []
+        agent_options = getattr(self._agent, "config_options", None)
+        if isinstance(agent_options, (list, tuple)):
+            return list(agent_options)
+        cached = acpterm_agent_cache.get_config_options(self.agent_config.name)
+        return list(cached) if cached else []
+
+    @classmethod
+    def _find_thought_level_option(cls, options: list[Any]) -> Any | None:
+        """Select the thought-level option, preferring the ACP category over its id."""
+        for option in options:
+            if cls._option_field(option, "category") == "thought_level":
+                return option
+        for option in options:
+            if cls._option_field(option, "id") == "thought_level":
+                return option
+        return None
+
+    @classmethod
+    def _select_values(cls, option: Any) -> list[str]:
+        """Extract valid value ids from flat/groups ACP options and cached dicts."""
+        values: list[str] = []
+        for item in cls._option_field(option, "options", []) or []:
+            value = cls._option_field(item, "value")
+            if isinstance(value, str):
+                values.append(value)
+                continue
+            item_id = cls._option_field(item, "id")
+            if isinstance(item_id, str):
+                values.append(item_id)
+            for sub in cls._option_field(item, "options", []) or []:
+                sub_value = cls._option_field(sub, "value")
+                if not isinstance(sub_value, str):
+                    sub_value = cls._option_field(sub, "id")
+                if isinstance(sub_value, str):
+                    values.append(sub_value)
+        return values
+
+    def _warn(self, message: str) -> None:
+        logger.warning("%s", message)
+        if not self.silent:
+            console.print(f"[yellow]Warning: {escape_markup(message)}[/yellow]")
+
+    async def _apply_thought_level(
+        self, level: str, *, observed: bool, config_options: Any
+    ) -> None:
+        """Apply ``level`` through the ACP session's ``thought_level`` config option.
+
+        Unsupported agents, unrecognized values, and RPC failures are reported as
+        warnings: a requested reasoning level must never abort an otherwise
+        healthy run.
+        """
+        options = self._resolve_config_options(
+            observed=observed, config_options=config_options
+        )
+        option = self._find_thought_level_option(options)
+        if option is None:
+            self._warn(
+                f"Agent '{self.agent_config.name}' does not advertise a "
+                f"thought_level config option; ignoring thought_level='{level}'."
+            )
+            return
+
+        option_id = self._option_field(option, "id")
+        if not isinstance(option_id, str) or not option_id:
+            self._warn(
+                f"Cannot apply thought_level '{level}' for agent "
+                f"'{self.agent_config.name}': the advertised option has no id."
+            )
+            return
+
+        coerced = self._coerce_thought_level(option, option_id, level)
+        if coerced is None:
+            return
+
+        try:
+            setter = getattr(self._agent, "set_config_option", None)
+            if inspect.iscoroutinefunction(setter):
+                await asyncio.wait_for(
+                    setter(config_id=option_id, value=coerced),
+                    timeout=self.agent_config.timeout,
+                )
+            else:
+                conn = getattr(self._agent, "_conn", None)
+                session_id = getattr(self._agent, "session_id", None)
+                conn_setter = (
+                    getattr(conn, "set_config_option", None)
+                    if conn is not None
+                    else None
+                )
+                if not (
+                    session_id
+                    and conn_setter is not None
+                    and inspect.iscoroutinefunction(conn_setter)
+                ):
+                    self._warn(
+                        f"Cannot apply thought_level '{level}' for agent "
+                        f"'{self.agent_config.name}': the ACP connection does "
+                        "not support set_config_option."
+                    )
+                    return
+                await asyncio.wait_for(
+                    conn_setter(
+                        config_id=option_id,
+                        session_id=session_id,
+                        value=coerced,
+                    ),
+                    timeout=self.agent_config.timeout,
+                )
+        except Exception as exc:
+            # Includes RequestError (-32601 method not found) and timeouts.
+            self._warn(
+                f"Failed to set thought_level '{level}' for agent "
+                f"'{self.agent_config.name}': {exc}"
+            )
+            return
+
+        self.applied_thought_level = str(coerced)
+        if not self.silent:
+            console.print(f"[dim]\\[thought_level][/dim] {escape_markup(str(coerced))}")
+
+    def _coerce_thought_level(
+        self, option: Any, option_id: str, level: str
+    ) -> str | bool | None:
+        """Validate ``level`` against the advertised option, or warn and return None."""
+        if self._option_field(option, "type") == "boolean":
+            lowered = level.casefold()
+            if lowered in _BOOLEAN_TRUE_VALUES:
+                return True
+            if lowered in _BOOLEAN_FALSE_VALUES:
+                return False
+            self._warn(
+                f"Thought level '{level}' is not a valid boolean for agent "
+                f"'{self.agent_config.name}' (option '{option_id}'); expected "
+                "one of: true, false, 1, 0, yes, no, on, off."
+            )
+            return None
+
+        valid_values = self._select_values(option)
+        if valid_values and level not in valid_values:
+            matches = difflib.get_close_matches(level, valid_values, n=1, cutoff=0.5)
+            if matches:
+                detail = f"Did you mean '{matches[0]}'?"
+            else:
+                detail = f"Available values: {', '.join(valid_values)}."
+            self._warn(
+                f"Thought level '{level}' is not recognized for agent "
+                f"'{self.agent_config.name}'. {detail}"
+            )
+            return None
+        return level
 
     @staticmethod
     def _format_resource_entry(path: Path, *, kind: str) -> str:

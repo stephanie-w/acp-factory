@@ -163,6 +163,7 @@ Each `[stages.<name>]` section accepts the following stage-specific overrides:
 | `command` | string or list | inherited | Explicit agent command. |
 | `model` | string | inherited | LLM model override. |
 | `mode` | string | inherited | Agent mode (e.g. `plan`, `code`). |
+| `thought_level` | string | inherited | ACP reasoning/thinking level applied via `session/set_config_option`. Values are agent-defined (e.g. `low`, `medium`, `high`). Inherits `[agent].thought_level`; ignored with a warning when the agent does not advertise a `thought_level` option. |
 | `read_only` | bool | inherited | Enforce read-only mode. |
 | `persona` | string | inherited | Persona Markdown path or inline text. |
 | `skills` | list | inherited | Skill paths or APM skill names. |
@@ -186,6 +187,27 @@ thought_max_chars = 0
 [stages.review]
 thought_max_chars = 1000
 ```
+
+`thought_max_chars` only controls how recorded reasoning is displayed/truncated in transcripts; it never changes how deeply the model thinks. To control the ACP agent's actual reasoning effort, set `thought_level` globally under `[agent]`, per stage, or per invocation with `acp-factory run --thought-level`:
+
+```toml
+[agent]
+name = "opencode"
+thought_level = "medium"          # Default ACP reasoning level
+
+[stages.build]
+thought_level = "low"             # Fast tool-calling loop
+thought_max_chars = 0             # Transcript only: omit thoughts
+
+[stages.review]
+thought_level = "high"            # Deep reasoning for review
+```
+
+```bash
+acp-factory run "Summarize README.md" --thought-level low
+```
+
+Stage values override `[agent].thought_level`. Because ACP option values are agent-defined, `thought_level` is validated at session setup against the options the agent advertises; agents without a `thought_level` config option (or with an unrecognized value) produce a warning and the run continues normally.
 
 ---
 

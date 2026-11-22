@@ -582,9 +582,10 @@ async def run_single_check(
             "`VERDICT: PASS` if all criteria are satisfied, or `VERDICT: FAIL` if any criteria are not met."
         )
 
-        # If the check defines a custom agent or model (cross-agent/cross-model review),
-        # spawn a dedicated read-only session for the review check.
-        if check.agent or check.model or acp_client is None:
+        # If the check defines a custom agent, model, or thought level
+        # (cross-agent/cross-model review), spawn a dedicated read-only session
+        # for the review check.
+        if check.agent or check.model or check.thought_level or acp_client is None:
             if acp_client is None and not check.agent:
                 raise RuntimeError(
                     f"Cannot execute review prompt check '{check.name}' without an active FactoryACPClient."
@@ -596,6 +597,8 @@ async def run_single_check(
                 name=base_agent_name,
                 model=check.model
                 or (acp_client.agent_config.model if acp_client else None),
+                thought_level=check.thought_level
+                or (acp_client.agent_config.thought_level if acp_client else None),
                 persona=check.persona,
                 skills=list(check.skills),
                 instructions=list(check.instructions),

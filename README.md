@@ -31,7 +31,7 @@ flowchart TD
 ## Key Capabilities
 
 - **Powered by `acpterm`**: Reuses `acpterm`'s `ACPAgent` connection engine, `~/.acpterm/config.json` agent registry, auth token resolution, permission hooks, Rich streaming output, and Markdown transcript recording.
-- **Per-Stage Agent, Persona, Instruction & `apm` Skill Customization**: Each stage (`triage`, `spec`, `build`, `review`) configures its own `agent`, `model`, `mode` (`plan` vs `code`), `read_only` enforcement, role `persona`, `instructions`, and `skills`—backed by package-bundled orchestration defaults, layered `resource_dirs`, and automatic `apm.lock.yaml` discovery for repo domain skills/instructions.
+- **Per-Stage Agent, Persona, Instruction & `apm` Skill Customization**: Each stage (`triage`, `spec`, `build`, `review`) configures its own `agent`, `model`, `mode` (`plan` vs `code`), `thought_level` (ACP reasoning effort), `read_only` enforcement, role `persona`, `instructions`, and `skills`—backed by package-bundled orchestration defaults, layered `resource_dirs`, and automatic `apm.lock.yaml` discovery for repo domain skills/instructions. Note that `thought_level` changes the agent's actual reasoning depth, whereas `thought_max_chars` only truncates/omits recorded thoughts in transcripts.
 - **Clean GitHub Integration (Zero Bot Comment Spam)**:
   - The **Issue Body** (`<!-- factory:start -->` block) is updated in-place as the single source of truth for the specification, assumptions, decisions, and any open questions.
   - **Issue Comments** are reserved strictly for humans (answering open questions or providing feedback).
@@ -231,6 +231,14 @@ Export a full Markdown transcript of all attempts:
 ```bash
 acp-factory run "Fix edge case in parser" --stage build --export transcript.md
 ```
+
+Override the agent's reasoning effort for a single invocation (values are agent-defined):
+
+```bash
+acp-factory run "Triage this change" --thought-level low --read-only
+```
+
+`--thought-level` controls the ACP agent's actual reasoning depth via `session/set_config_option`; it is distinct from `thought_max_chars`, which only controls how thoughts are recorded in transcripts.
 
 ---
 

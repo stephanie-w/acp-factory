@@ -81,6 +81,8 @@ class FactoryDisplay:
             agent_desc += f" [dim](model: {config.agent.model})[/dim]"
         if config.agent.mode:
             agent_desc += f" [dim](mode: {config.agent.mode})[/dim]"
+        if config.agent.thought_level:
+            agent_desc += f" [dim](thought_level: {config.agent.thought_level})[/dim]"
         if config.agent.read_only and not config.active_stage:
             agent_desc += " [yellow][read-only][/yellow]"
 

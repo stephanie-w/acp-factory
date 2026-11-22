@@ -529,6 +529,7 @@ def _persist_run_artifacts(
         "agent": config.agent.name,
         "model": config.agent.model,
         "mode": config.agent.mode,
+        "thought_level": config.agent.thought_level,
         "read_only": config.agent.read_only,
         "persona": config.agent.persona,
         "skills": config.agent.skills,
