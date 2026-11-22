@@ -130,6 +130,7 @@ Before signaling completion, verify:
 - `.factory/runs/<run-id>/`: Structured per-run artifacts: `run.json` (stage, `succeeded`, `attempts_used`, `usage`), `attempt-N/transcript.summary.json` (condensed `tool_calls[]` for retro/jq), `attempt-N/transcript.json`, `attempt-N/transcript.md` (raw), `attempt-N/check-<n>-<slug>.log`, and `--dry-run` proposed Issue/PR bodies.
 - `.worktrees/issue-<id>/`: Persistent git worktrees created on branch `factory/issue-<id>` during `build` and `review`, cleaned up on `done`.
 - `docs/workflow.md` & `docs/fleet-orchestration.md`: Full stage state machine and stateless fleet design specs.
+- `docs/acp-schema.json`: JSON Schema generated from the installed `agent-client-protocol` SDK (`just acp-schema`); query with `jq '."$defs".<Type>'` (e.g. `jq '."$defs" | keys' docs/acp-schema.json`) instead of reading `.venv/.../acp/schema.py`.
 
 ### Check & Validator Wiring
 - Stage check commands: `.factory/config.toml` `[checks.<name>]` vs bundled defaults in `src/acp_factory/cli.py`.

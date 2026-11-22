@@ -121,6 +121,10 @@ docs:
 docs-serve:
     {{ uv_run }} mkdocs serve
 
+# Regenerate docs/acp-schema.json from the installed agent-client-protocol SDK
+acp-schema:
+    {{ uv_run }} python -c 'import importlib.metadata, inspect, json, pathlib, pydantic, acp.schema as s; from pydantic.json_schema import models_json_schema; models = [(o, "validation") for _, o in inspect.getmembers(s, inspect.isclass) if issubclass(o, pydantic.BaseModel) and o.__module__ == "acp.schema"]; _, top = models_json_schema(models, title="Agent Client Protocol (acp.schema)"); top["x-agent-client-protocol-version"] = importlib.metadata.version("agent-client-protocol"); pathlib.Path("docs/acp-schema.json").write_text(json.dumps(top, indent=2) + "\n", encoding="utf-8")'
+
 # ========== BUILD & CLEAN ==========
 
 # Clean all build artifacts, caches, and temporary files
