@@ -19,6 +19,14 @@ Use this skill during the `spec` stage to turn a triaged ticket into a self-cont
 2. **Verify Every Reference**:
    - Every `path/file:line` you cite must exist in the repository.
    - Never guess existing function signatures, schemas, or configuration keys—read them first.
+3. **Read Economically (Bounded Slices)**:
+   - Locate targets first with `rg -n` (or `rg -n "^(def |async def |class )" <file>` for an outline), then read only bounded line ranges (`<=150` lines).
+   - Never read full files over ~200 lines or re-read lines you already read in the same turn.
+3. **Challenge the Proposed Solution Against Runtime Contracts**:
+   - Treat any `Solution` in the ticket and scope notes from `triage` as hypotheses, not binding designs.
+   - Before introducing a new wrapper, adapter, or normalization layer, inspect the **actual runtime types and capabilities of installed dependencies/SDKs** (not just local source files and test mocks/doubles) to check whether the problem is already solved upstream or is an artifact of legacy code or synthetic tests.
+   - **Internal test doubles are not immutable contracts**: synthetic unit-test mocks/stubs (e.g. `SimpleNamespace`) may be migrated to real SDK/domain models when that removes unnecessary production plumbing. Do not invent or retain a production abstraction solely to avoid updating internal test fixtures.
+   - **Escalate premise contradictions**: if runtime inspection reveals a cleaner root-cause approach that materially contradicts the ticket's explicit `Solution`, do **not** silently defer to the ticket or record an unapproved choice under `## Decisions` (`## Decisions` is only for choices already settled by a human or parent issue). Instead, escalate under `## Open Questions` (`STATUS: NEEDS_HUMAN`) with 2 concrete options and your recommended option.
 
 ## 2. Two-Tier Ambiguity & Risk Filter (`## Assumptions` vs. `## Open Questions`)
 
@@ -34,6 +42,7 @@ Evaluate every architectural decision through the **Door** and **Blast Radius** 
     - Bumping a core/shared dependency across a major version or introducing a breaking public change without deciding whether to bump the package's own `version` (and release tag/changelog) for downstream consumers.
     - Choosing missing project-wide test, build, or validation tooling.
     - Breaking public API/CLI/event/model payload contracts.
+    - Materially contradicting or replacing a ticket's explicit proposed `Solution` when runtime/SDK inspection reveals a simpler root-cause alternative.
     - Cloud/MLOps cost, compute, or security decisions (GPU/instance types, scaling bounds, IAM permissions, network exposure, data retention/deletion policies).
   - For every open question, provide **2–3 concrete options** and state your **recommended option** with a one-line rationale under a `## Open Questions` heading.
 - **Fold Answered Questions into `## Decisions`**:

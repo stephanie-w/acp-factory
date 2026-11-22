@@ -4,3 +4,4 @@ Execute the `spec-writer` skill for the supplied ticket, triage notes (the `## T
 3. Include a documentation `AC-n` row and a concrete `## How to Test` guide whenever user-facing CLI commands, flags, or configuration options change.
 4. Output ONLY the complete specification matching `skills/spec-writer/templates/spec.md` (starting with `# Specification` and ending with `STATUS: <SPEC_READY | NEEDS_HUMAN>`).
 5. Do NOT read `.factory/runs/`, `.factory/latest-*`, or prior stage transcripts — you do not have access to them. Treat the supplied GitHub Issue context and codebase as your sole source of truth.
+6. Read economically: locate symbols with `rg -n` first and read bounded line ranges (`<=150` lines); never read full files >200 lines or re-read files already read.
