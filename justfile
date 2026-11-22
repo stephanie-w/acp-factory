@@ -125,6 +125,30 @@ docs-serve:
 acp-schema:
     {{ uv_run }} python -c 'import importlib.metadata, inspect, json, pathlib, pydantic, acp.schema as s; from pydantic.json_schema import models_json_schema; models = [(o, "validation") for _, o in inspect.getmembers(s, inspect.isclass) if issubclass(o, pydantic.BaseModel) and o.__module__ == "acp.schema"]; _, top = models_json_schema(models, title="Agent Client Protocol (acp.schema)"); top["x-agent-client-protocol-version"] = importlib.metadata.version("agent-client-protocol"); pathlib.Path("docs/acp-schema.json").write_text(json.dumps(top, indent=2) + "\n", encoding="utf-8")'
 
+# Launch up to `limit` actionable factory issues in parallel Herdr tabs (run inside Herdr)
+factory-herdr limit="3" label="factory:triage" *issues:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "${HERDR_ENV:-}" != "1" ]; then
+        echo "Error: run this recipe from inside a Herdr pane (HERDR_ENV=1)." >&2
+        exit 1
+    fi
+    if [ -n "{{ issues }}" ]; then
+        read -ra targets <<< "{{ issues }}"
+    else
+        mapfile -t targets < <(gh issue list --label "{{ label }}" --limit "{{ limit }}" --json number --jq '.[].number')
+    fi
+    if [ "${#targets[@]}" -eq 0 ]; then
+        echo "No open issues found with label '{{ label }}'." >&2
+        exit 1
+    fi
+    for issue in "${targets[@]}"; do
+        pane=$(herdr tab create --cwd "$PWD" --label "issue-#${issue}" --no-focus | jq -r '.result.root_pane.pane_id')
+        herdr pane run "$pane" "acp-factory issue ${issue}"
+        echo "Launched issue #${issue} in Herdr pane ${pane}"
+        sleep 2
+    done
+
 # ========== BUILD & CLEAN ==========
 
 # Clean all build artifacts, caches, and temporary files
