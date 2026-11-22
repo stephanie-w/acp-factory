@@ -6,6 +6,7 @@ import asyncio
 import os
 import stat
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -1212,3 +1213,113 @@ async def test_readonly_gh_shim_blocks_auth_subcommands(
     _, stderr = await proc.communicate()
     assert proc.returncode == 1
     assert "disabled for agents" in stderr.decode("utf-8", errors="replace")
+
+
+class _FakeReviewClient:
+    """Async-context stand-in for a dedicated review sub-client."""
+
+    captured: dict[str, object] = {}
+
+    def __init__(self, **kwargs: object) -> None:
+        type(self).captured = kwargs
+
+    async def __aenter__(self) -> _FakeReviewClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+    async def send_prompt(self, prompt: str, timeout: int | None = None) -> TurnResult:
+        return TurnResult(
+            stop_reason="end_turn",
+            summary=TurnSummary(
+                prompt=prompt,
+                response_text="Reviewed.\nVERDICT: PASS",
+                thought_text="",
+                stop_reason="end_turn",
+                duration_seconds=0.1,
+                tool_call_count=0,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("check_kwargs", "expected_level"),
+    [
+        ({"model": "other-model"}, "high"),
+        ({"thought_level": " low "}, "low"),
+        ({"agent": "kiro", "thought_level": "high"}, "high"),
+    ],
+    ids=["inherits", "check-override", "cross-agent-override"],
+)
+async def test_review_prompt_check_propagates_thought_level(
+    tmp_path: Path, check_kwargs: dict[str, Any], expected_level: str
+) -> None:
+    """AC-5: dedicated review sub-clients inherit and can override thought_level."""
+    from acp_factory.acp.client import FactoryACPClient
+    from acp_factory.config import AgentConfig
+    from acp_factory.runner.checks import run_single_check
+
+    outer = FactoryACPClient(
+        workspace=tmp_path,
+        agent_config=AgentConfig(name="opencode", thought_level="high"),
+        resource_dirs=[],
+        discover_apm_resources=False,
+        silent=True,
+    )
+    check = CheckConfig(
+        name="Architecture Review", prompt="Check structure", **check_kwargs
+    )
+
+    with patch("acp_factory.acp.client.FactoryACPClient", _FakeReviewClient):
+        result = await run_single_check(check, tmp_path, acp_client=outer)
+
+    assert result.passed is True
+    review_agent = _FakeReviewClient.captured["agent_config"]
+    assert isinstance(review_agent, AgentConfig)
+    assert review_agent.thought_level == expected_level
+
+
+def test_persist_run_artifacts_records_thought_level(tmp_path: Path) -> None:
+    """AC-5: run.json records the resolved stage thought_level."""
+    import json
+
+    from acp_factory.runner.loop import _persist_run_artifacts
+
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Test task", agent={"thought_level": "high"})
+
+    run_dir = _persist_run_artifacts(
+        tmp_path,
+        "run-thought-level",
+        config,
+        succeeded=True,
+        attempts_used=1,
+        total_duration=0.1,
+        setup_logs=[],
+        turn_transcripts=[],
+        check_history=[],
+        failure_reason=None,
+    )
+
+    assert run_dir is not None
+    data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert data["thought_level"] == "high"
+
+
+def test_show_run_header_displays_thought_level() -> None:
+    """AC-5: the run header surfaces the configured thought level."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from acp_factory.config import AgentConfig
+    from acp_factory.ui.display import FactoryDisplay
+
+    cfg = FactoryConfig(agent=AgentConfig(name="opencode", thought_level="high"))
+    buf = StringIO()
+    FactoryDisplay(
+        custom_console=Console(file=buf, width=200, highlight=False)
+    ).show_run_header(cfg, Path("/tmp/repo"))
+
+    assert "(thought_level: high)" in buf.getvalue()

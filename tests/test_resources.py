@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -495,3 +498,313 @@ def test_guardrails_main_parses_pathsep_factory_resources_dirs(
     with pytest.raises(SystemExit) as exc_info:
         guardrails_main([])
     assert exc_info.value.code == 0
+
+
+def _thought_level_option(
+    *,
+    option_id: str = "thought_level",
+    category: str | None = "thought_level",
+    values: tuple[str, ...] = ("low", "medium", "high"),
+    grouped: bool = False,
+) -> SimpleNamespace:
+    """Build a stand-in for an ACP SessionConfigOptionSelect (flat or grouped)."""
+    if grouped:
+        items = [
+            SimpleNamespace(
+                group="effort",
+                name="Effort",
+                options=[SimpleNamespace(value=value, name=value) for value in values],
+            )
+        ]
+    else:
+        items = [SimpleNamespace(value=value, name=value) for value in values]
+    return SimpleNamespace(
+        id=option_id,
+        name="Thought level",
+        type="select",
+        category=category,
+        options=items,
+    )
+
+
+async def _start_client_with_handshake(
+    tmp_path: Path,
+    thought_level: str | None,
+    *,
+    options: list[object] | None,
+    cached_options: list[object] | None = None,
+    conn: SimpleNamespace | None = None,
+    agent_setter: object | None = None,
+    console_buf: StringIO | None = None,
+    observe_handshake: bool = True,
+) -> tuple[FactoryACPClient, MagicMock, SimpleNamespace, MagicMock, MagicMock]:
+    """Start a client whose mocked agent reports ``options`` in its session handshake."""
+    from acpterm import agent_cache as acpterm_agent_cache
+
+    client = FactoryACPClient(
+        workspace=tmp_path,
+        agent_config=AgentConfig(name="opencode", thought_level=thought_level),
+        resource_dirs=[],
+        discover_apm_resources=False,
+        silent=console_buf is None,
+    )
+    fake_conn = conn or SimpleNamespace(set_config_option=AsyncMock())
+    agent = MagicMock()
+    agent.session_id = "sess-1"
+    agent._conn = fake_conn
+    agent.stop = AsyncMock()
+    if agent_setter is not None:
+        agent.set_config_option = agent_setter
+
+    async def _fake_start(**_kwargs: object) -> None:
+        # Mirror acpterm's post-handshake cache write so the client can capture it.
+        if observe_handshake:
+            acpterm_agent_cache.store("opencode", config_options=options)
+
+    agent.start = AsyncMock(side_effect=_fake_start)
+
+    cached_mock = MagicMock(return_value=cached_options)
+    store_mock = MagicMock()
+    patches = [
+        patch("acp_factory.acp.client.ACPAgent", return_value=agent),
+        patch(
+            "acp_factory.acp.client.resolve_factory_agent_command",
+            return_value=["python3", "-c", "pass"],
+        ),
+        patch("acpterm.agent_cache.store", new=store_mock),
+        patch(
+            "acp_factory.acp.client.acpterm_agent_cache.get_config_options",
+            cached_mock,
+        ),
+    ]
+    if console_buf is not None:
+        from rich.console import Console
+
+        patches.append(
+            patch(
+                "acp_factory.acp.client.console",
+                Console(file=console_buf, width=200, highlight=False),
+            )
+        )
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        await client.start()
+
+    return client, agent, fake_conn, cached_mock, store_mock
+
+
+def _console_text(buf: StringIO) -> str:
+    """Normalize Rich's terminal-width-dependent line wrapping before assertions."""
+    return " ".join(buf.getvalue().split())
+
+
+async def test_thought_level_applied_from_live_handshake(tmp_path: Path) -> None:
+    """AC-3: the live handshake's category="thought_level" option is preferred by id."""
+    buf = StringIO()
+    category_option = _thought_level_option(option_id="reasoning")
+    id_only_option = _thought_level_option(option_id="thought_level", category=None)
+
+    client, _, conn, _, _ = await _start_client_with_handshake(
+        tmp_path, "high", options=[category_option, id_only_option], console_buf=buf
+    )
+
+    conn.set_config_option.assert_awaited_once_with(
+        config_id="reasoning", session_id="sess-1", value="high"
+    )
+    assert client.applied_thought_level == "high"
+    assert "[thought_level]" in _console_text(buf)
+    assert "high" in _console_text(buf)
+
+
+@pytest.mark.parametrize("grouped", [False, True], ids=["flat", "grouped"])
+async def test_thought_level_matches_option_id_and_grouped_values(
+    tmp_path: Path, grouped: bool
+) -> None:
+    """AC-3: id matches work for flat and grouped select option lists."""
+    option = _thought_level_option(
+        option_id="thought_level",
+        category=None,
+        values=("low", "medium"),
+        grouped=grouped,
+    )
+
+    client, _, conn, _, _ = await _start_client_with_handshake(
+        tmp_path, "medium", options=[option]
+    )
+
+    conn.set_config_option.assert_awaited_once_with(
+        config_id="thought_level", session_id="sess-1", value="medium"
+    )
+    assert client.applied_thought_level == "medium"
+
+
+async def test_thought_level_boolean_option_coercion(tmp_path: Path) -> None:
+    """AC-3: boolean thought_level options receive a real boolean value."""
+    option = SimpleNamespace(
+        id="thinking", name="Thinking", type="boolean", category="thought_level"
+    )
+
+    client, _, conn, _, _ = await _start_client_with_handshake(
+        tmp_path, "ON", options=[option]
+    )
+
+    conn.set_config_option.assert_awaited_once_with(
+        config_id="thinking", session_id="sess-1", value=True
+    )
+    assert client.applied_thought_level == "True"
+
+
+async def test_thought_level_prefers_agent_coroutine_setter(tmp_path: Path) -> None:
+    """AC-3: a future ACPAgent.set_config_option coroutine is used when available."""
+    setter = AsyncMock()
+    option = _thought_level_option()
+
+    await _start_client_with_handshake(
+        tmp_path, "low", options=[option], agent_setter=setter
+    )
+
+    setter.assert_awaited_once_with(config_id="thought_level", value="low")
+
+
+async def test_thought_level_unset_is_a_noop(tmp_path: Path) -> None:
+    """AC-3: no thought_level means no cache lookups and no RPC calls."""
+    option = _thought_level_option()
+
+    client, _, conn, cached_mock, _ = await _start_client_with_handshake(
+        tmp_path, None, options=[option], cached_options=[option]
+    )
+
+    conn.set_config_option.assert_not_called()
+    cached_mock.assert_not_called()
+    assert client.applied_thought_level is None
+
+
+async def test_thought_level_unsupported_agent_warns_and_continues(
+    tmp_path: Path,
+) -> None:
+    """AC-4: an agent without the option produces a warning instead of a crash."""
+    buf = StringIO()
+    model_option = SimpleNamespace(
+        id="model", name="Model", type="select", category="model", options=[]
+    )
+
+    client, _, conn, _, _ = await _start_client_with_handshake(
+        tmp_path, "high", options=[model_option], console_buf=buf
+    )
+
+    conn.set_config_option.assert_not_called()
+    assert "does not advertise a thought_level config option" in _console_text(buf)
+    assert client.applied_thought_level is None
+
+
+async def test_thought_level_ignores_stale_cache_when_live_options_empty(
+    tmp_path: Path,
+) -> None:
+    """AC-4: an empty live handshake never falls back to a stale on-disk cache."""
+    buf = StringIO()
+    cached_option = _thought_level_option()
+
+    client, _, conn, cached_mock, _ = await _start_client_with_handshake(
+        tmp_path,
+        "high",
+        options=None,
+        cached_options=[cached_option],
+        console_buf=buf,
+    )
+
+    cached_mock.assert_not_called()
+    conn.set_config_option.assert_not_called()
+    assert "does not advertise a thought_level config option" in _console_text(buf)
+    assert client.applied_thought_level is None
+
+
+@pytest.mark.parametrize(
+    ("level", "expected_detail"),
+    [
+        ("hight", "Did you mean 'high'?"),
+        ("maximum", "Available values: low, high."),
+    ],
+)
+async def test_thought_level_invalid_value_warns_without_rpc(
+    tmp_path: Path, level: str, expected_detail: str
+) -> None:
+    """AC-4: values outside the advertised options warn and skip the RPC call."""
+    buf = StringIO()
+    option = _thought_level_option(values=("low", "high"))
+
+    client, _, conn, _, _ = await _start_client_with_handshake(
+        tmp_path, level, options=[option], console_buf=buf
+    )
+
+    conn.set_config_option.assert_not_called()
+    output = _console_text(buf)
+    assert expected_detail in output
+    assert client.applied_thought_level is None
+
+
+async def test_thought_level_invalid_boolean_warns_without_rpc(tmp_path: Path) -> None:
+    """AC-4: unrecognized boolean strings warn instead of coercing silently."""
+    buf = StringIO()
+    option = SimpleNamespace(
+        id="thinking", name="Thinking", type="boolean", category="thought_level"
+    )
+
+    await _start_client_with_handshake(
+        tmp_path, "sometimes", options=[option], console_buf=buf
+    )
+
+    assert "not a valid boolean" in _console_text(buf)
+
+
+@pytest.mark.parametrize("error", [RuntimeError("boom"), TimeoutError("slow")])
+async def test_thought_level_rpc_errors_are_non_fatal(
+    tmp_path: Path, error: Exception
+) -> None:
+    """AC-4: RPC errors (including timeouts) are warned about and swallowed."""
+    buf = StringIO()
+    conn = SimpleNamespace(set_config_option=AsyncMock(side_effect=error))
+    option = _thought_level_option()
+
+    client, _, _, _, _ = await _start_client_with_handshake(
+        tmp_path, "high", options=[option], conn=conn, console_buf=buf
+    )
+
+    assert "Failed to set thought_level" in _console_text(buf)
+    assert client.applied_thought_level is None
+    assert client.session_id == "sess-1"
+
+
+async def test_thought_level_unsupported_connection_warns(tmp_path: Path) -> None:
+    """AC-4: agents without a config-option RPC surface degrade gracefully."""
+    buf = StringIO()
+    option = _thought_level_option()
+
+    await _start_client_with_handshake(
+        tmp_path,
+        "high",
+        options=[option],
+        conn=SimpleNamespace(),
+        console_buf=buf,
+    )
+
+    assert "does not support set_config_option" in _console_text(buf)
+
+
+async def test_thought_level_falls_back_to_cached_options(tmp_path: Path) -> None:
+    """AC-3: without a live observation, acpterm's cached options are used."""
+    option = _thought_level_option(values=("low", "high"))
+
+    client, _, conn, cached_mock, _ = await _start_client_with_handshake(
+        tmp_path,
+        "low",
+        options=None,
+        cached_options=[option],
+        observe_handshake=False,
+    )
+
+    cached_mock.assert_called_once_with("opencode")
+    conn.set_config_option.assert_awaited_once_with(
+        config_id="thought_level", session_id="sess-1", value="low"
+    )
+    assert client.applied_thought_level == "low"

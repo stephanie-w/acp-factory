@@ -446,6 +446,16 @@ def run_cmd(
             help="Override the active agent mode for the ACP session.",
         ),
     ] = None,
+    thought_level: Annotated[
+        str | None,
+        typer.Option(
+            "--thought-level",
+            help=(
+                "Override the ACP agent reasoning/thinking level for the session "
+                "(agent-defined values, e.g. 'low', 'medium', 'high')."
+            ),
+        ),
+    ] = None,
     read_only: Annotated[
         bool | None,
         typer.Option(
@@ -599,6 +609,7 @@ def run_cmd(
             agent_command=agent_cmd,
             model=model,
             mode=mode,
+            thought_level=thought_level,
             read_only=read_only,
             persona=persona,
             skills=skill,
