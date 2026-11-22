@@ -17,6 +17,7 @@ Use this skill during the `triage` stage to ensure the builder never starts from
    - Read the issue title, description, and any human comments or linked parent issues.
    - Read the repository's agent guidance (`AGENTS.md`, `CLAUDE.md`, `README.md`) and inspect the actual files and modules the ticket touches.
    - Verify every claim about current behavior against the code. For bug reports, trace the root cause in the codebase.
+   - Report observed facts and existing touched files only: do **not** prescribe new module names or implementation designs (leave solution architecture to `spec`), and distinguish actual runtime behavior from synthetic test doubles/mocks.
 
 2. **Check for Duplicates & Related Work**:
    - Inspect existing open and recently closed issues and pull requests (`gh issue list --state all --limit 100`, `gh pr list --state all --limit 50`).
