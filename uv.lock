@@ -24,7 +24,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "acpterm", git = "https://github.com/stephanie-w/acpterm.git?rev=fe14d8bc7d70434101ac46c8dcf6c27630ca9b99" },
+    { name = "acpterm", git = "https://github.com/stephanie-w/acpterm.git?rev=99aa571111ce39ebb9082e002da742c2c339f6ff" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=15.0.0" },
@@ -42,7 +42,7 @@ dev = [
 [[package]]
 name = "acpterm"
 version = "0.2.0"
-source = { git = "https://github.com/stephanie-w/acpterm.git?rev=fe14d8bc7d70434101ac46c8dcf6c27630ca9b99#fe14d8bc7d70434101ac46c8dcf6c27630ca9b99" }
+source = { git = "https://github.com/stephanie-w/acpterm.git?rev=99aa571111ce39ebb9082e002da742c2c339f6ff#99aa571111ce39ebb9082e002da742c2c339f6ff" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "pydantic" },
