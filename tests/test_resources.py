@@ -594,6 +594,11 @@ async def _start_client_with_handshake(
     return client, agent, fake_conn, cached_mock, store_mock
 
 
+def _console_text(buf: StringIO) -> str:
+    """Normalize Rich's terminal-width-dependent line wrapping before assertions."""
+    return " ".join(buf.getvalue().split())
+
+
 async def test_thought_level_applied_from_live_handshake(tmp_path: Path) -> None:
     """AC-3: the live handshake's category="thought_level" option is preferred by id."""
     buf = StringIO()
@@ -608,8 +613,8 @@ async def test_thought_level_applied_from_live_handshake(tmp_path: Path) -> None
         config_id="reasoning", session_id="sess-1", value="high"
     )
     assert client.applied_thought_level == "high"
-    assert "[thought_level]" in buf.getvalue()
-    assert "high" in buf.getvalue()
+    assert "[thought_level]" in _console_text(buf)
+    assert "high" in _console_text(buf)
 
 
 @pytest.mark.parametrize("grouped", [False, True], ids=["flat", "grouped"])
@@ -689,7 +694,7 @@ async def test_thought_level_unsupported_agent_warns_and_continues(
     )
 
     conn.set_config_option.assert_not_called()
-    assert "does not advertise a thought_level config option" in buf.getvalue()
+    assert "does not advertise a thought_level config option" in _console_text(buf)
     assert client.applied_thought_level is None
 
 
@@ -710,7 +715,7 @@ async def test_thought_level_ignores_stale_cache_when_live_options_empty(
 
     cached_mock.assert_not_called()
     conn.set_config_option.assert_not_called()
-    assert "does not advertise a thought_level config option" in buf.getvalue()
+    assert "does not advertise a thought_level config option" in _console_text(buf)
     assert client.applied_thought_level is None
 
 
@@ -733,7 +738,7 @@ async def test_thought_level_invalid_value_warns_without_rpc(
     )
 
     conn.set_config_option.assert_not_called()
-    output = buf.getvalue()
+    output = _console_text(buf)
     assert expected_detail in output
     assert client.applied_thought_level is None
 
@@ -749,7 +754,7 @@ async def test_thought_level_invalid_boolean_warns_without_rpc(tmp_path: Path) -
         tmp_path, "sometimes", options=[option], console_buf=buf
     )
 
-    assert "not a valid boolean" in buf.getvalue()
+    assert "not a valid boolean" in _console_text(buf)
 
 
 @pytest.mark.parametrize("error", [RuntimeError("boom"), TimeoutError("slow")])
@@ -765,7 +770,7 @@ async def test_thought_level_rpc_errors_are_non_fatal(
         tmp_path, "high", options=[option], conn=conn, console_buf=buf
     )
 
-    assert "Failed to set thought_level" in buf.getvalue()
+    assert "Failed to set thought_level" in _console_text(buf)
     assert client.applied_thought_level is None
     assert client.session_id == "sess-1"
 
@@ -783,7 +788,7 @@ async def test_thought_level_unsupported_connection_warns(tmp_path: Path) -> Non
         console_buf=buf,
     )
 
-    assert "does not support set_config_option" in buf.getvalue()
+    assert "does not support set_config_option" in _console_text(buf)
 
 
 async def test_thought_level_falls_back_to_cached_options(tmp_path: Path) -> None:
