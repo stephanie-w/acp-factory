@@ -1,6 +1,6 @@
 # Exploring `transcript.summary.json` with `jq`
 
-Each attempt in `.factory/runs/<run-id>/attempt-<N>/` writes three transcript files:
+Each attempt in `<runs-dir>/<run-id>/attempt-<N>/` writes three transcript files. `<runs-dir>` is the resolved `runs_dir` (`FACTORY_RUNS_DIR` > `runs_dir` config > repo-scoped XDG data directory); `history`, `inspect`, and `stats` also read legacy `<workspace>/.factory/runs/` directories as a fallback.
 
 - `transcript.summary.json` — compact structured summary (previews, tool calls, file operations, permissions, usage/duration).
 - `transcript.json` — full raw ACP event/tool-call payload.
@@ -13,7 +13,9 @@ Each attempt in `.factory/runs/<run-id>/attempt-<N>/` writes three transcript fi
 Set a shell variable to the summary you want to inspect (for example, the newest run's first attempt):
 
 ```bash
-SUMMARY="$(ls -td .factory/runs/20* | head -n 1)/attempt-1/transcript.summary.json"
+# Set this to FACTORY_RUNS_DIR, the configured runs_dir, or a legacy .factory/runs.
+RUNS_DIR="${FACTORY_RUNS_DIR:-.factory/runs}"
+SUMMARY="$(ls -td "$RUNS_DIR"/20* 2>/dev/null | head -n 1)/attempt-1/transcript.summary.json"
 ```
 
 ## Top-Level Structure
@@ -210,7 +212,7 @@ jq '.permissions[] | select(.outcome != "approved")' "$SUMMARY"
 ### 8. Compare Across All Attempts in a Run
 
 ```bash
-RUN_DIR="$(ls -td .factory/runs/20* | head -n 1)"
+RUN_DIR="$(ls -td "$RUNS_DIR"/20* | head -n 1)"
 jq -s 'to_entries[] | {attempt: (.key + 1), summary: .value.summary}' "$RUN_DIR"/attempt-*/transcript.summary.json
 ```
 
@@ -222,16 +224,16 @@ When evaluating prompt changes, CLI environment flags, tool shims, or model swap
 
 ### 1. Identify Candidate Run IDs
 
-List recent runs in chronological order (`acp-factory history` sorts newest-first from `.factory/runs/20*/run.json`):
+List recent runs in chronological order (`acp-factory history` sorts newest-first across the resolved `runs_dir` and any legacy `<workspace>/.factory/runs/` entries):
 
 ```bash
 uv run acp-factory history --limit 15
 ```
 
-Or filter runs for a specific stage (e.g., `triage`, `spec`, `build`, `review`) directly from `.factory/runs/`:
+Or filter runs for a specific stage (e.g., `triage`, `spec`, `build`, `review`) directly from the resolved `runs_dir`:
 
 ```bash
-for d in $(ls -td .factory/runs/20* | head -n 15); do
+for d in $(ls -td "$RUNS_DIR"/20* | head -n 15); do
   jq -c '{run_id, stage, issue_id, model, succeeded, attempts_used, duration_seconds, tokens: .usage.total_tokens}' "$d/run.json"
 done
 ```
@@ -244,7 +246,7 @@ To compare two configurations, prompts, or models on the **exact same GitHub Iss
    ```bash
    uv run acp-factory issue <ISSUE_ID> --stage triage --dry-run
    ```
-   *(Note: `--dry-run` writes its output artifacts to `.factory/runs/dry-run/`. If you want full persisted run directories under `.factory/runs/<timestamp>-<id>/`, run without `--dry-run` on a test issue or copy `.factory/runs/<run-id>` before re-running.)*
+   *(Note: `--dry-run` writes its proposed Issue/PR bodies to `<runs-dir>/dry-run/`. Full run directories under `<runs-dir>/<timestamp>-<id>/` are written by every execution, including dry runs; copy `<runs-dir>/<run-id>` before re-running if you want to preserve it.)*
 2. **Apply Optimization / Switch Model (B)** and run the same stage again.
 
 ### 3. Compare Token Breakdown & Tool Output Volume (`acp-factory stats`)

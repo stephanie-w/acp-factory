@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from acp_factory.cli import app
 from acp_factory.inspect import (
+    compute_runs_stats,
     compute_transcript_stats,
     extract_tool_exit_code,
     filter_tool_calls,
@@ -20,13 +21,23 @@ from acp_factory.inspect import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolate both resolved `runs_dir` sources from the developer's real data home."""
+    monkeypatch.delenv("FACTORY_RUNS_DIR", raising=False)
+    xdg_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    return xdg_home
+
+
 def _write_sample_run(
     workspace: Path,
     run_id: str = "20261115-120000-abcdef",
     *,
     timestamp: str = "2026-11-15T12:00:00+00:00",
+    runs_dir: Path | None = None,
 ) -> Path:
-    run_dir = workspace / ".factory" / "runs" / run_id
+    run_dir = (runs_dir or workspace / ".factory" / "runs") / run_id
     attempt_dir = run_dir / "attempt-1"
     attempt_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run.json").write_text(
@@ -489,3 +500,76 @@ def test_cli_inspect_shows_output_size(tmp_path: Path) -> None:
 
     detail_output = _invoke_inspect("--workspace", str(tmp_path), "--call", "0")
     assert "output: 1,234 chars" in detail_output
+
+
+def test_resolve_transcript_path_primary_and_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: explicit/prefix lookups span resolved runs_dir and legacy `.factory/runs/`."""
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    primary = _write_sample_run(
+        tmp_path,
+        "20261115-120000-primary",
+        timestamp="2026-11-15T12:00:00+00:00",
+        runs_dir=external,
+    )
+    legacy = _write_sample_run(
+        tmp_path,
+        "20261115-110000-legacy",
+        timestamp="2026-11-15T11:00:00+00:00",
+    )
+
+    assert resolve_transcript_path("20261115-120000-p", workspace=tmp_path) == primary
+    assert resolve_transcript_path("20261115-110000-l", workspace=tmp_path) == legacy
+    assert resolve_transcript_path(None, workspace=tmp_path) == primary
+
+
+def test_resolve_transcript_path_ambiguous_prefix_across_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: a prefix matching runs in both directories is reported as ambiguous."""
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    _write_sample_run(tmp_path, "20261115-120000-aaaa", runs_dir=external)
+    _write_sample_run(tmp_path, "20261115-120000-bbbb")
+
+    with pytest.raises(FileNotFoundError, match="Ambiguous run ID prefix"):
+        resolve_transcript_path("20261115-120000", workspace=tmp_path)
+
+
+def test_compute_runs_stats_reads_primary_and_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: aggregate stats locate transcripts in both resolved and legacy runs."""
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    _write_sample_run(tmp_path, "20261115-110000-legacy")
+    legacy_only = compute_runs_stats(tmp_path)
+    assert legacy_only["total_runs"] == 1
+
+    _write_sample_run(tmp_path, "20261115-120000-primary", runs_dir=external)
+    combined = compute_runs_stats(tmp_path)
+
+    assert combined["total_runs"] == 2
+    assert combined["total_estimated_tokens"] == (
+        2 * legacy_only["total_estimated_tokens"]
+    )
+
+
+def test_cli_inspect_and_stats_read_factory_runs_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: CLI `inspect` and `stats` honor the resolved runs_dir."""
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    _write_sample_run(tmp_path, "20261115-120000-cli", runs_dir=external)
+
+    inspect_out = _invoke_inspect("20261115-120000-cli", "--workspace", str(tmp_path))
+    assert "Fetch release notes" in inspect_out
+
+    res = CliRunner().invoke(app, ["stats", "--workspace", str(tmp_path), "--json"])
+    assert res.exit_code == 0
+    agg = json.loads(res.stdout)
+    assert agg["total_runs"] == 1
+    assert agg["top_token_runs"][0]["run_id"] == "20261115-120000-cli"

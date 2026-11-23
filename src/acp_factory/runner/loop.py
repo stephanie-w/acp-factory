@@ -16,7 +16,7 @@ from typing import Any
 
 from ..acp.client import FactoryACPClient
 from ..acp.events import UsageTotals
-from ..config import BudgetConfig, CheckConfig, FactoryConfig
+from ..config import BudgetConfig, CheckConfig, FactoryConfig, resolve_runs_dir
 from ..github import (
     DryRunPlan,
     build_dry_run_gh_plan,
@@ -55,6 +55,7 @@ from ..task import (
 from ..ui.display import FactoryDisplay
 from .checks import CheckResult, run_checks_sequential, run_shell_command
 from .worktree import (
+    WorktreeError,
     WorktreeManager,
     detect_default_branch,
     ensure_fleet_repo_checkout,
@@ -403,9 +404,9 @@ def _extract_implementation_notes(response_text: str) -> str | None:
     return notes or None
 
 
-def _update_latest_run_symlink(factory_dir: Path, run_id: str) -> None:
-    """Point `.factory/runs/latest` at the newest run directory."""
-    latest_run = factory_dir / "runs" / "latest"
+def _update_latest_run_symlink(runs_dir: Path, run_id: str) -> None:
+    """Point `runs_dir/latest` at the newest run directory."""
+    latest_run = runs_dir / "latest"
 
     try:
         if latest_run.is_symlink() or latest_run.exists():
@@ -415,8 +416,29 @@ def _update_latest_run_symlink(factory_dir: Path, run_id: str) -> None:
         logger.debug("Could not update latest run symlink: %s", exc)
 
 
+def _artifact_pointer_filenames(
+    kind: str,
+    *,
+    issue_number: int | None,
+    branch: str | None,
+) -> list[str]:
+    """Return the scoped `latest-*` pointer names for an issue and/or branch.
+
+    Issue builds also update their branch pointer so a later standalone review of
+    the same branch sees the notes, while disjoint branches stay isolated.
+    """
+    filenames: list[str] = []
+    if issue_number is not None:
+        filenames.append(f"latest-{kind}-issue-{issue_number}.md")
+    if branch and branch.strip():
+        filenames.append(f"latest-{kind}-branch-{_slugify(branch)}.md")
+    if not filenames:
+        filenames.append(f"latest-{kind}.md")
+    return filenames
+
+
 def _update_latest_artifact_pointer(
-    factory_dir: Path,
+    runs_dir: Path,
     run_id: str,
     *,
     filename: str,
@@ -428,12 +450,12 @@ def _update_latest_artifact_pointer(
     Symlinks are preferred; when the platform forbids them, the text is copied to
     the artifact so callers always have a discoverable file.
     """
-    latest_artifact = factory_dir / filename
+    latest_artifact = runs_dir / filename
 
     try:
         if latest_artifact.is_symlink() or latest_artifact.exists():
             latest_artifact.unlink()
-        latest_artifact.symlink_to(Path("runs") / run_id / relative_target)
+        latest_artifact.symlink_to(Path(run_id) / relative_target)
     except OSError as exc:
         logger.debug("Could not symlink %s, writing a copy instead: %s", filename, exc)
         try:
@@ -442,22 +464,141 @@ def _update_latest_artifact_pointer(
             logger.warning("Could not write %s pointer: %s", filename, write_exc)
 
 
-def _resolve_prior_build_notes(workspace: Path) -> str | None:
-    """Return the most recent build notes for a workspace, or None when unavailable."""
-    factory_dir = workspace / ".factory"
-    candidates = (
-        factory_dir / "latest-build-notes.md",
-        factory_dir / "runs" / "latest" / "implementation-notes.md",
-    )
-    for candidate in candidates:
+def _read_sibling_run_metadata(notes_path: Path) -> dict[str, Any] | None:
+    """Return the `run.json` metadata in the artifact's run directory, if any."""
+    run_json = notes_path.parent / "run.json"
+    try:
+        data = json.loads(run_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _build_notes_metadata_matches(
+    data: dict[str, Any],
+    *,
+    branch: str | None,
+    head_sha: str | None,
+) -> bool:
+    """Return True when run metadata belongs to the reviewed build branch/HEAD."""
+    if data.get("stage") != "build":
+        return False
+    recorded_branch = data.get("branch")
+    if not recorded_branch or recorded_branch != branch:
+        return False
+    recorded_sha = data.get("head_sha")
+    # A missing SHA on either side means the build predates SHA recording; the
+    # branch match is the strongest evidence available in that case.
+    return not (head_sha and recorded_sha and recorded_sha != head_sha)
+
+
+def _scan_matching_build_notes(
+    runs_dir: Path,
+    *,
+    branch: str | None,
+    head_sha: str | None,
+) -> str | None:
+    """Return notes from the newest build run matching `branch` and `head_sha`."""
+    if not branch:
+        return None
+
+    matches: list[tuple[str, Path]] = []
+    for run_json in runs_dir.glob("*/run.json"):
+        run_dir = run_json.parent
+        if run_dir.name in {"latest", "dry-run"}:
+            continue
+        meta = _read_sibling_run_metadata(run_dir / "implementation-notes.md")
+        if meta is None or not _build_notes_metadata_matches(
+            meta, branch=branch, head_sha=head_sha
+        ):
+            continue
+        matches.append((str(meta.get("timestamp") or run_dir.name), run_dir))
+
+    for _timestamp, run_dir in sorted(matches, reverse=True):
+        candidate = run_dir / "implementation-notes.md"
         try:
-            if candidate.is_file():
-                notes = candidate.read_text(encoding="utf-8").strip()
-                if notes:
-                    return notes
+            notes = candidate.read_text(encoding="utf-8").strip()
         except OSError as exc:
             logger.debug("Could not read prior build notes at %s: %s", candidate, exc)
+            continue
+        if notes:
+            return notes
     return None
+
+
+def _resolve_prior_build_notes(
+    workspace: Path,
+    *,
+    runs_dir: Path | None = None,
+    issue_number: int | None = None,
+    branch: str | None = None,
+    head_sha: str | None = None,
+    require_match: bool = False,
+) -> str | None:
+    """Return scoped build notes from `runs_dir`, or None when none apply.
+
+    Never falls back to repo-wide `<workspace>/.factory/` pointers: issue and
+    branch scope are required so stale notes cannot leak into unrelated reviews.
+    With ``require_match`` the backing run must belong to ``branch`` (and share
+    ``head_sha`` when both sides record one), otherwise no notes are returned.
+    """
+    effective_runs_dir = runs_dir or resolve_runs_dir(workspace)
+    candidates: list[Path] = []
+    if issue_number is not None:
+        candidates.append(
+            effective_runs_dir / f"latest-build-notes-issue-{issue_number}.md"
+        )
+    if branch and branch.strip():
+        candidates.append(
+            effective_runs_dir / f"latest-build-notes-branch-{_slugify(branch)}.md"
+        )
+    if not candidates:
+        candidates.append(effective_runs_dir / "latest-build-notes.md")
+
+    for candidate in candidates:
+        try:
+            if not candidate.is_file():
+                continue
+            notes = candidate.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.debug("Could not read prior build notes at %s: %s", candidate, exc)
+            continue
+        if not notes:
+            continue
+
+        target = candidate.resolve() if candidate.is_symlink() else candidate
+        meta = _read_sibling_run_metadata(target)
+        if meta is None:
+            # A plain-copy pointer has no sibling run.json; only a copy is safe
+            # to trust when no branch/HEAD verification was requested.
+            if require_match:
+                continue
+        else:
+            if issue_number is not None and meta.get("issue_number") not in (
+                None,
+                issue_number,
+            ):
+                continue
+            if require_match and not _build_notes_metadata_matches(
+                meta, branch=branch, head_sha=head_sha
+            ):
+                continue
+        return notes
+
+    if require_match:
+        return _scan_matching_build_notes(
+            effective_runs_dir, branch=branch, head_sha=head_sha
+        )
+    return None
+
+
+async def _capture_head_sha(cwd: Path) -> str | None:
+    """Return `HEAD` for `cwd`, or None when the directory is not a usable repo."""
+    try:
+        return await get_head_sha(cwd)
+    except WorktreeError as exc:
+        logger.debug("Could not capture HEAD SHA for run artifacts: %s", exc)
+        return None
 
 
 def _persist_run_artifacts(
@@ -482,14 +623,12 @@ def _persist_run_artifacts(
     branch: str | None = None,
     base_ref: str | None = None,
     session_id: str | None = None,
-) -> Path | None:
-    """Write structured run logs into `.factory/runs/<run-id>/` if `.factory/` is present."""
-    factory_dir = workspace / ".factory"
-    if not factory_dir.is_dir():
-        return None
-
+    head_sha: str | None = None,
+) -> Path:
+    """Write structured run logs into the resolved `runs_dir/<run-id>/` directory."""
+    runs_dir = config.resolve_runs_dir(workspace)
     usage = usage or UsageTotals()
-    run_dir = factory_dir / "runs" / run_id
+    run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if setup_logs:
@@ -541,6 +680,7 @@ def _persist_run_artifacts(
         "branch": branch,
         "base_ref": base_ref,
         "session_id": session_id,
+        "head_sha": head_sha,
         "succeeded": succeeded,
         "attempts_used": attempts_used,
         "max_attempts": config.retry.max_attempts,
@@ -562,19 +702,22 @@ def _persist_run_artifacts(
 
     has_transcripts = bool(turn_transcripts or turn_summaries or turn_condensed)
     if not config.dry_run and has_transcripts:
-        _update_latest_run_symlink(factory_dir, run_id)
+        _update_latest_run_symlink(runs_dir, run_id)
 
     if config.active_stage == "review" and last_response_text.strip():
         report_text = _build_review_report(last_response_text)
         if report_text:
             (run_dir / "report.md").write_text(report_text, encoding="utf-8")
-            _update_latest_artifact_pointer(
-                factory_dir,
-                run_id,
-                filename="latest-report.md",
-                relative_target=Path("report.md"),
-                text=report_text,
-            )
+            for filename in _artifact_pointer_filenames(
+                "report", issue_number=issue_number, branch=branch
+            ):
+                _update_latest_artifact_pointer(
+                    runs_dir,
+                    run_id,
+                    filename=filename,
+                    relative_target=Path("report.md"),
+                    text=report_text,
+                )
 
     if config.active_stage == "build":
         notes_text = _extract_implementation_notes(last_response_text)
@@ -582,13 +725,16 @@ def _persist_run_artifacts(
             (run_dir / "implementation-notes.md").write_text(
                 notes_text, encoding="utf-8"
             )
-            _update_latest_artifact_pointer(
-                factory_dir,
-                run_id,
-                filename="latest-build-notes.md",
-                relative_target=Path("implementation-notes.md"),
-                text=notes_text,
-            )
+            for filename in _artifact_pointer_filenames(
+                "build-notes", issue_number=issue_number, branch=branch
+            ):
+                _update_latest_artifact_pointer(
+                    runs_dir,
+                    run_id,
+                    filename=filename,
+                    relative_target=Path("implementation-notes.md"),
+                    text=notes_text,
+                )
 
     return run_dir
 
@@ -642,6 +788,7 @@ async def run_factory(
     turn_condensed: list[dict[str, Any]] = []
     preserved_wt: Path | None = None
     session_id: str | None = None
+    head_sha: str | None = None
 
     active_cwd = await wt_manager.create(base_ref=base_ref)
     # Spill files for truncated check output outlive retry attempts but are removed
@@ -678,6 +825,7 @@ async def run_factory(
                 if not passed:
                     failure_reason = f"Setup command failed (exit {rc}): {setup_cmd}"
                     total_duration = max(0.0, time.monotonic() - start_time)
+                    head_sha = await _capture_head_sha(active_cwd)
                     preserved_wt = await wt_manager.cleanup(succeeded=False)
                     run_dir = _persist_run_artifacts(
                         workspace,
@@ -697,6 +845,7 @@ async def run_factory(
                         branch=branch or wt_manager.branch_name,
                         base_ref=base_ref,
                         session_id=session_id,
+                        head_sha=head_sha,
                     )
                     ui.show_final_summary(
                         succeeded=False,
@@ -902,6 +1051,9 @@ async def run_factory(
     except Exception as exc:
         failure_reason = f"Unhandled error: {exc}"
     finally:
+        # The worktree (and its HEAD) disappears during cleanup, so snapshot the
+        # commit under review before removing it.
+        head_sha = await _capture_head_sha(active_cwd)
         spill_tmp_dir.cleanup()
         preserved_wt = await wt_manager.cleanup(succeeded=succeeded)
 
@@ -927,6 +1079,7 @@ async def run_factory(
         branch=branch or wt_manager.branch_name,
         base_ref=base_ref,
         session_id=session_id,
+        head_sha=head_sha,
     )
     report_path = (
         run_dir / "report.md"
@@ -1029,7 +1182,12 @@ async def run_issue_stage(
             summary=f"Cleaned up worktree for Issue #{issue_number} and set {LABEL_COMPLETED}.",
         )
         if effective_dry_run:
-            plan = build_dry_run_gh_plan(task, verdict, workspace=resolved_workspace)
+            plan = build_dry_run_gh_plan(
+                task,
+                verdict,
+                workspace=resolved_workspace,
+                runs_dir=base_cfg.resolve_runs_dir(resolved_workspace),
+            )
             ui.show_dry_run_plan(plan)
             duration = max(0.0, time.monotonic() - start_time)
             return FactoryRunOutcome(
@@ -1114,7 +1272,13 @@ async def run_issue_stage(
                 }"
             )
 
-        prior_build_notes = _resolve_prior_build_notes(resolved_workspace)
+        prior_build_notes = _resolve_prior_build_notes(
+            resolved_workspace,
+            runs_dir=base_cfg.resolve_runs_dir(resolved_workspace),
+            issue_number=issue_number,
+            branch=f"factory/issue-{issue_number}",
+            head_sha=pre_review_sha,
+        )
         if prior_build_notes:
             task_context_md = (
                 f"{task_context_md}\n\n"
@@ -1221,6 +1385,7 @@ async def run_issue_stage(
                     fail_verdict,
                     workspace=resolved_workspace,
                     run_dir=outcome.run_dir,
+                    runs_dir=base_cfg.resolve_runs_dir(resolved_workspace),
                 )
                 outcome.dry_run_plan = plan
                 ui.show_dry_run_plan(plan)
@@ -1248,6 +1413,7 @@ async def run_issue_stage(
                 fail_verdict,
                 workspace=resolved_workspace,
                 run_dir=outcome.run_dir,
+                runs_dir=base_cfg.resolve_runs_dir(resolved_workspace),
             )
             outcome.dry_run_plan = plan
             ui.show_dry_run_plan(plan)
@@ -1316,6 +1482,7 @@ async def run_issue_stage(
             verdict,
             workspace=resolved_workspace,
             run_dir=outcome.run_dir,
+            runs_dir=base_cfg.resolve_runs_dir(resolved_workspace),
             reviewed_sha=pre_review_sha,
         )
         outcome.dry_run_plan = plan
@@ -1418,7 +1585,18 @@ async def run_branch_review(
         f"{desc_text}"
     )
 
-    prior_build_notes = _resolve_prior_build_notes(resolved_workspace)
+    # Pre-review integrity snapshot (standalone review runs in the working tree)
+    pre_review_sha = await get_head_sha(resolved_workspace)
+
+    # Standalone reviews only trust notes recorded for this exact branch/HEAD;
+    # otherwise notes from unrelated runs would masquerade as this diff's own.
+    prior_build_notes = _resolve_prior_build_notes(
+        resolved_workspace,
+        runs_dir=base_cfg.resolve_runs_dir(resolved_workspace),
+        branch=effective_branch,
+        head_sha=pre_review_sha,
+        require_match=True,
+    )
     if prior_build_notes:
         review_context_md = (
             f"{review_context_md}\n\n"
@@ -1428,8 +1606,6 @@ async def run_branch_review(
             f"{prior_build_notes}"
         )
 
-    # Pre-review integrity snapshot (standalone review runs in the working tree)
-    pre_review_sha = await get_head_sha(resolved_workspace)
     if not await is_worktree_clean(resolved_workspace):
         return FactoryRunOutcome(
             succeeded=False,
@@ -1511,6 +1687,7 @@ async def run_branch_review(
             verdict=verdict,
             workspace=resolved_workspace,
             run_dir=outcome.run_dir,
+            runs_dir=base_cfg.resolve_runs_dir(resolved_workspace),
             create_pr=create_pr,
         )
         outcome.dry_run_plan = plan

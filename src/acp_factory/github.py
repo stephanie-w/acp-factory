@@ -10,6 +10,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .config import resolve_runs_dir
 from .task import (
     ALL_FACTORY_STAGE_LABELS,
     LABEL_PR_READY,
@@ -664,10 +665,11 @@ def build_dry_run_standalone_pr_plan(
     verdict: StageVerdict,
     workspace: Path,
     run_dir: Path | None = None,
+    runs_dir: Path | None = None,
     create_pr: bool = False,
 ) -> DryRunPlan:
     """Save standalone review/PR body locally and build manual `git`/`gh` commands for `--dry-run`."""
-    out_dir = run_dir or (workspace / ".factory" / "runs" / "dry-run")
+    out_dir = run_dir or ((runs_dir or resolve_runs_dir(workspace)) / "dry-run")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cwd = Path.cwd().resolve()
@@ -728,10 +730,11 @@ def build_dry_run_gh_plan(
     *,
     workspace: Path,
     run_dir: Path | None = None,
+    runs_dir: Path | None = None,
     reviewed_sha: str | None = None,
 ) -> DryRunPlan:
     """Save proposed Issue/PR bodies locally and return the exact `gh` commands for the human."""
-    out_dir = run_dir or (workspace / ".factory" / "runs" / "dry-run")
+    out_dir = run_dir or ((runs_dir or resolve_runs_dir(workspace)) / "dry-run")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cwd = Path.cwd().resolve()
