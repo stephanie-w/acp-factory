@@ -10,7 +10,7 @@ from typing import Any
 
 from .acp.events import extract_usage_metrics
 from .config import resolve_runs_dir
-from .history import _candidate_runs_dirs, list_run_history
+from .history import candidate_runs_dirs, list_run_history
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def resolve_transcript_path(
     """Resolve a run ID, prefix, directory, or file path to a transcript JSON file."""
     ws = workspace.resolve()
     primary_runs_dir = (runs_dir or resolve_runs_dir(ws)).resolve()
-    candidates = _candidate_runs_dirs(ws, primary_runs_dir)
+    candidates = candidate_runs_dirs(ws, primary_runs_dir)
 
     if target is None:
         records = list_run_history(ws, runs_dir=primary_runs_dir)
@@ -326,7 +326,7 @@ def compute_runs_stats(
     """Aggregate run-level and tool-call stats across recent resolved/legacy runs."""
     ws = workspace.resolve()
     primary_runs_dir = (runs_dir or resolve_runs_dir(ws)).resolve()
-    candidates = _candidate_runs_dirs(ws, primary_runs_dir)
+    candidates = candidate_runs_dirs(ws, primary_runs_dir)
     records = list_run_history(ws, runs_dir=primary_runs_dir)[:limit]
 
     total_duration = 0.0

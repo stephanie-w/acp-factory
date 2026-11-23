@@ -24,7 +24,7 @@ def _sort_records(records: list[dict[str, Any]]) -> None:
     )
 
 
-def _candidate_runs_dirs(workspace: Path, runs_dir: Path | None = None) -> list[Path]:
+def candidate_runs_dirs(workspace: Path, runs_dir: Path | None = None) -> list[Path]:
     """Return existing run directories to search, primary first.
 
     The resolved `runs_dir` wins, then the legacy `<workspace>/.factory/runs/`
@@ -62,7 +62,7 @@ def list_run_history(
     records: list[dict[str, Any]] = []
     seen_run_ids: set[str] = set()
 
-    for candidate_dir in _candidate_runs_dirs(workspace, runs_dir):
+    for candidate_dir in candidate_runs_dirs(workspace, runs_dir):
         for run_json in sorted(candidate_dir.glob("*/run.json")):
             run_dir = run_json.parent
             if run_dir.name in _SKIP_DIRS:

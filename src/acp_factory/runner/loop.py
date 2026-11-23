@@ -464,9 +464,9 @@ def _update_latest_artifact_pointer(
             logger.warning("Could not write %s pointer: %s", filename, write_exc)
 
 
-def _read_sibling_run_metadata(notes_path: Path) -> dict[str, Any] | None:
-    """Return the `run.json` metadata in the artifact's run directory, if any."""
-    run_json = notes_path.parent / "run.json"
+def _read_run_metadata(run_dir: Path) -> dict[str, Any] | None:
+    """Return the parsed `run.json` metadata for `run_dir`, if any."""
+    run_json = run_dir / "run.json"
     try:
         data = json.loads(run_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -507,7 +507,7 @@ def _scan_matching_build_notes(
         run_dir = run_json.parent
         if run_dir.name in {"latest", "dry-run"}:
             continue
-        meta = _read_sibling_run_metadata(run_dir / "implementation-notes.md")
+        meta = _read_run_metadata(run_dir)
         if meta is None or not _build_notes_metadata_matches(
             meta, branch=branch, head_sha=head_sha
         ):
@@ -567,7 +567,7 @@ def _resolve_prior_build_notes(
             continue
 
         target = candidate.resolve() if candidate.is_symlink() else candidate
-        meta = _read_sibling_run_metadata(target)
+        meta = _read_run_metadata(target.parent)
         if meta is None:
             # A plain-copy pointer has no sibling run.json; only a copy is safe
             # to trust when no branch/HEAD verification was requested.
@@ -1277,6 +1277,8 @@ async def run_issue_stage(
             runs_dir=base_cfg.resolve_runs_dir(resolved_workspace),
             issue_number=issue_number,
             branch=f"factory/issue-{issue_number}",
+            # Issue review is scoped by `issue_number`, so HEAD is informational
+            # here and only consulted when `require_match` is requested.
             head_sha=pre_review_sha,
         )
         if prior_build_notes:
