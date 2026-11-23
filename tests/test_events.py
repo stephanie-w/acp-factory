@@ -6,11 +6,14 @@ import json
 import os
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from rich.console import Console
 
+from acp_factory.acp.client import FactoryACPClient
 from acp_factory.acp.events import (
     TurnEventTracker,
     TurnSummary,
@@ -18,7 +21,7 @@ from acp_factory.acp.events import (
     _safe_json_value,
     _truncate_text,
 )
-from acp_factory.config import FactoryConfig, resolve_runs_dir
+from acp_factory.config import AgentConfig, FactoryConfig, resolve_runs_dir
 from acp_factory.runner.loop import (
     FactoryRunOutcome,
     _persist_run_artifacts,
@@ -308,6 +311,126 @@ def test_turn_event_tracker_resets_usage_between_turns() -> None:
     assert turn2.cost_usd == 0.0
     assert tracker.cumulative_tokens() == 500
     assert tracker.cumulative_cost_usd() == 0.001
+
+
+@pytest.mark.parametrize(
+    ("reported_title", "expected"),
+    [
+        ("ACP Session e61e0ea7", "ACP Session e61e0ea7"),
+        ("  Padded Title  ", "Padded Title"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+    ],
+)
+async def test_factory_acp_client_get_session_title(
+    tmp_path: Path, reported_title: str | None, expected: str | None
+) -> None:
+    """AC-5: return the matching session's trimmed title, normalizing blanks to None."""
+    from acp.schema import ListSessionsResponse, SessionInfo
+
+    client = FactoryACPClient(
+        workspace=tmp_path, agent_config=AgentConfig(discover_apm_resources=False)
+    )
+    sessions = [
+        SessionInfo(sessionId="ses_other", cwd=str(tmp_path), title="Other"),
+        SessionInfo(sessionId="ses_abc", cwd=str(tmp_path), title=reported_title),
+    ]
+    conn = SimpleNamespace(
+        list_sessions=AsyncMock(return_value=ListSessionsResponse(sessions=sessions))
+    )
+    client._agent = cast(Any, SimpleNamespace(session_id="ses_abc", _conn=conn))
+
+    assert await client.get_session_title() == expected
+    conn.list_sessions.assert_awaited_once_with(cwd=str(client.workspace))
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [None, SimpleNamespace(session_id="ses_abc")],
+    ids=["unstarted", "missing-connection"],
+)
+async def test_get_session_title_fallback_null(
+    tmp_path: Path, agent: object | None
+) -> None:
+    """AC-2: unresolved connections, unsupported methods, and unknown ids yield None."""
+    client = FactoryACPClient(
+        workspace=tmp_path, agent_config=AgentConfig(discover_apm_resources=False)
+    )
+    if agent is not None:
+        client._agent = cast(Any, agent)
+    assert await client.get_session_title() is None
+
+    failing_conn = SimpleNamespace(
+        list_sessions=AsyncMock(side_effect=RuntimeError("session/list unsupported"))
+    )
+    client._agent = cast(Any, SimpleNamespace(session_id="ses_abc", _conn=failing_conn))
+    assert await client.get_session_title() is None
+
+    from acp.schema import ListSessionsResponse, SessionInfo
+
+    empty_conn = SimpleNamespace(
+        list_sessions=AsyncMock(
+            return_value=ListSessionsResponse(
+                sessions=[SessionInfo(sessionId="ses_other", cwd=str(tmp_path))]
+            )
+        )
+    )
+    client._agent = cast(Any, SimpleNamespace(session_id="ses_abc", _conn=empty_conn))
+    assert await client.get_session_title() is None
+
+
+@pytest.mark.parametrize(
+    ("reported_title", "expected"),
+    [("ACP Session e61e0ea7", "ACP Session e61e0ea7"), (None, None)],
+)
+async def test_run_factory_persists_session_title(
+    tmp_path: Path, reported_title: str | None, expected: str | None
+) -> None:
+    """AC-1/AC-2: run.json records the resolved title or null before shutdown."""
+    (tmp_path / ".factory").mkdir()
+    config = FactoryConfig(task="Persist session title", active_stage="triage")
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.session_id = "ses_deadbeef"
+            self.tracker = AsyncMock()
+            self.tracker.history = []
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def get_session_title(self) -> str | None:
+            return reported_title
+
+        async def send_prompt(self, prompt: str, **kwargs: object) -> object:
+            return type(
+                "TurnResult",
+                (),
+                {
+                    "stop_reason": "end_turn",
+                    "summary": TurnSummary(
+                        prompt=prompt,
+                        response_text="done",
+                        thought_text="",
+                        stop_reason="end_turn",
+                        duration_seconds=0.01,
+                        tool_call_count=0,
+                    ),
+                },
+            )()
+
+    with patch("acp_factory.runner.loop.FactoryACPClient", FakeClient):
+        outcome = await run_factory(config, tmp_path)
+
+    assert outcome.succeeded is True
+    assert outcome.run_dir is not None
+    data = json.loads((outcome.run_dir / "run.json").read_text(encoding="utf-8"))
+    assert data["session_id"] == "ses_deadbeef"
+    assert data["session_title"] == expected
 
 
 def test_persist_run_artifacts_json(tmp_path: Path) -> None:

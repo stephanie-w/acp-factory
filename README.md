@@ -130,7 +130,7 @@ Or automatically process the next actionable issue in the repository queue:
 acp-factory next
 ```
 
-View a chronological history of local runs (from the resolved `runs_dir`, plus legacy `<workspace>/.factory/runs/` entries) as a table showing each run's stage, model, issue, repo, branch, retry attempts, and usage; `--json` exposes full metadata including agent, model, and session id:
+View a chronological history of local runs (from the resolved `runs_dir`, plus legacy `<workspace>/.factory/runs/` entries) as a table showing each run's stage, model, issue, repo, branch, retry attempts, and usage; `--json` exposes full metadata including agent, model, `session_id`, and the agent-reported `session_title` (nullable for agents that do not expose titles):
 
 ```bash
 acp-factory history

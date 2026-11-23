@@ -268,7 +268,7 @@ acp-factory run \
 ### B. Structured Run Artifacts & Fast Querying with `jq`
 
 Each execution stores structured artifacts under `<runs-dir>/<run-id>/`, where `<runs-dir>` is the resolved `runs_dir` (see `README.md` for precedence). Runs are persisted unconditionally, including in target repositories that have no `.factory/` directory:
-- **`run.json`**: Top-level run metadata (attempts used, total duration, stage outcome, failure reason, and the `head_sha` of the working tree when the run finished). Its `usage` block records only the token, cost, and turn consumption of this single run; cumulative issue totals across stages are tracked separately in the issue's `<!-- factory:meta -->` block.
+- **`run.json`**: Top-level run metadata (attempts used, total duration, stage outcome, failure reason, the `head_sha` of the working tree when the run finished, and the agent's `session_id` with its human-readable `session_title` when the agent reports one via `session/list`). Its `usage` block records only the token, cost, and turn consumption of this single run; cumulative issue totals across stages are tracked separately in the issue's `<!-- factory:meta -->` block. Legacy runs without `session_title` parse unchanged.
 - **`attempt-<N>/transcript.summary.json`**: Condensed event snapshot with truncated tool output previews and omitted raw scratchpads. Tailored for token efficiency during `retro`.
 - **`attempt-<N>/transcript.json`**: Complete structured JSON event tree containing all tool invocations, inputs, file operations, permissions, and duration.
 - **`attempt-<N>/transcript.md`**: Full raw Markdown transcript for human deep dives.
