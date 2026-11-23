@@ -30,15 +30,6 @@ from acp_factory.task import StageVerdict, TaskContext
 from acp_factory.ui.display import FactoryDisplay
 
 
-@pytest.fixture(autouse=True)
-def _isolated_runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Keep run artifacts in the test's temp tree instead of the developer's data home."""
-    monkeypatch.delenv("FACTORY_RUNS_DIR", raising=False)
-    xdg_home = tmp_path / "xdg-data"
-    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
-    return xdg_home
-
-
 def _runs_dir(workspace: Path) -> Path:
     return resolve_runs_dir(workspace)
 

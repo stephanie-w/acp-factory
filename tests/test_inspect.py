@@ -21,15 +21,6 @@ from acp_factory.inspect import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _isolated_runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolate both resolved `runs_dir` sources from the developer's real data home."""
-    monkeypatch.delenv("FACTORY_RUNS_DIR", raising=False)
-    xdg_home = tmp_path / "xdg-data"
-    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
-    return xdg_home
-
-
 def _write_sample_run(
     workspace: Path,
     run_id: str = "20261115-120000-abcdef",

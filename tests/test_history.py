@@ -17,15 +17,6 @@ from acp_factory.history import list_fleet_run_history, list_run_history
 from acp_factory.runner.loop import _persist_run_artifacts
 
 
-@pytest.fixture(autouse=True)
-def _isolated_runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolate both resolved `runs_dir` sources from the developer's real data home."""
-    monkeypatch.delenv("FACTORY_RUNS_DIR", raising=False)
-    xdg_home = tmp_path / "xdg-data"
-    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
-    return xdg_home
-
-
 def _write_run(runs_dir: Path, run_id: str, timestamp: str, **extra: object) -> None:
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True)

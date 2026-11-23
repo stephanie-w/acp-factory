@@ -1101,7 +1101,15 @@ async def test_run_factory_threads_keep_env_to_setup_and_client(tmp_path: Path) 
     host_path = os.environ.get("PATH", "")
     with (
         patch.dict(
-            "os.environ", {"CUSTOM_TOKEN": "host-secret", "PATH": host_path}, clear=True
+            "os.environ",
+            {
+                "CUSTOM_TOKEN": "host-secret",
+                "PATH": host_path,
+                # Keep run-artifact isolation from tests/conftest.py intact.
+                "HOME": str(tmp_path / "home"),
+                "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+            },
+            clear=True,
         ),
         patch("acp_factory.runner.loop.FactoryACPClient", FakeACPClient),
     ):
