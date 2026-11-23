@@ -148,10 +148,19 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
 
 def test_history_json_surfaces_session_title(tmp_path: Path) -> None:
     runs_dir = tmp_path / ".factory" / "runs"
-    _write_run(
-        runs_dir,
+    # Derive the titled record through the persistence path so this test also
+    # fails if `run_factory` ever stops writing `session_title`.
+    _persist_run_artifacts(
+        tmp_path,
         "run-titled",
-        "2026-11-13T17:00:00+00:00",
+        FactoryConfig(task="Persist session title"),
+        succeeded=True,
+        attempts_used=1,
+        total_duration=0.5,
+        setup_logs=[],
+        turn_transcripts=[],
+        check_history=[],
+        failure_reason=None,
         session_id="ses_deadbeef",
         session_title="ACP Session e61e0ea7",
     )

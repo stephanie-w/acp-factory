@@ -167,12 +167,21 @@ class FactoryACPClient:
         and missing/blank titles all degrade to None so run persistence never fails.
         """
         session_id = self.session_id
-        conn = getattr(self._agent, "_conn", None)
-        if conn is None or session_id is None:
+        agent = self._agent
+        if agent is None or session_id is None:
+            return None
+
+        # acpterm 99aa571 has no public `list_sessions` accessor yet; prefer one
+        # if it lands, then fall back to the connection handle.
+        list_sessions = getattr(agent, "list_sessions", None)
+        if not callable(list_sessions):
+            conn = getattr(agent, "_conn", None)
+            list_sessions = getattr(conn, "list_sessions", None)
+        if not callable(list_sessions):
             return None
 
         try:
-            response = await conn.list_sessions(cwd=str(self.workspace))
+            response = await list_sessions(cwd=str(self.workspace))
         except Exception as exc:  # Unsupported method or transport failure.
             logger.debug("Could not list ACP sessions for title lookup: %s", exc)
             return None

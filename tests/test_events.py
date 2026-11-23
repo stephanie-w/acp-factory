@@ -345,6 +345,37 @@ async def test_factory_acp_client_get_session_title(
     conn.list_sessions.assert_awaited_once_with(cwd=str(client.workspace))
 
 
+async def test_get_session_title_prefers_public_agent_accessor(tmp_path: Path) -> None:
+    """Prefer a public ACPAgent accessor over the private connection when available."""
+    from acp.schema import ListSessionsResponse, SessionInfo
+
+    client = FactoryACPClient(
+        workspace=tmp_path, agent_config=AgentConfig(discover_apm_resources=False)
+    )
+    public_list = AsyncMock(
+        return_value=ListSessionsResponse(
+            sessions=[
+                SessionInfo(
+                    sessionId="ses_abc", cwd=str(tmp_path), title="Public Title"
+                )
+            ]
+        )
+    )
+    private_list = AsyncMock()
+    client._agent = cast(
+        Any,
+        SimpleNamespace(
+            session_id="ses_abc",
+            list_sessions=public_list,
+            _conn=SimpleNamespace(list_sessions=private_list),
+        ),
+    )
+
+    assert await client.get_session_title() == "Public Title"
+    public_list.assert_awaited_once_with(cwd=str(client.workspace))
+    private_list.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "agent",
     [None, SimpleNamespace(session_id="ses_abc")],
