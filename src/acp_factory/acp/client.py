@@ -159,6 +159,42 @@ class FactoryACPClient:
     def session_id(self) -> str | None:
         return self._agent.session_id if self._agent else None
 
+    async def get_session_title(self) -> str | None:
+        """Return the active session's human-readable title, or None when unavailable.
+
+        `NewSessionResponse` carries no title, so the title is looked up through the
+        ACP `session/list` method. Agents that do not implement it, transport errors,
+        and missing/blank titles all degrade to None so run persistence never fails.
+        """
+        session_id = self.session_id
+        agent = self._agent
+        if agent is None or session_id is None:
+            return None
+
+        # acpterm 99aa571 has no public `list_sessions` accessor yet; prefer one
+        # if it lands, then fall back to the connection handle.
+        list_sessions = getattr(agent, "list_sessions", None)
+        if not callable(list_sessions):
+            conn = getattr(agent, "_conn", None)
+            list_sessions = getattr(conn, "list_sessions", None)
+        if not callable(list_sessions):
+            return None
+
+        try:
+            response = await list_sessions(cwd=str(self.workspace))
+        except Exception as exc:  # Unsupported method or transport failure.
+            logger.debug("Could not list ACP sessions for title lookup: %s", exc)
+            return None
+
+        for session in getattr(response, "sessions", None) or []:
+            if getattr(session, "session_id", None) != session_id:
+                continue
+            title = getattr(session, "title", None)
+            if isinstance(title, str) and title.strip():
+                return title.strip()
+            return None
+        return None
+
     async def start(self, *, load_existing: bool = False) -> None:
         """Spawn the ACP agent process in the target workspace and initialize a session."""
         cmd = resolve_factory_agent_command(self.agent_config)

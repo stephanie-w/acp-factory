@@ -623,6 +623,7 @@ def _persist_run_artifacts(
     branch: str | None = None,
     base_ref: str | None = None,
     session_id: str | None = None,
+    session_title: str | None = None,
     head_sha: str | None = None,
 ) -> Path:
     """Write structured run logs into the resolved `runs_dir/<run-id>/` directory."""
@@ -680,6 +681,7 @@ def _persist_run_artifacts(
         "branch": branch,
         "base_ref": base_ref,
         "session_id": session_id,
+        "session_title": session_title,
         "head_sha": head_sha,
         "succeeded": succeeded,
         "attempts_used": attempts_used,
@@ -788,6 +790,7 @@ async def run_factory(
     turn_condensed: list[dict[str, Any]] = []
     preserved_wt: Path | None = None
     session_id: str | None = None
+    session_title: str | None = None
     head_sha: str | None = None
 
     active_cwd = await wt_manager.create(base_ref=base_ref)
@@ -1038,6 +1041,11 @@ async def run_factory(
             turn_condensed = [
                 turn.to_condensed_dict() for turn in acp_client.tracker.history
             ]
+            # Resolve the title before the client context closes and the agent
+            # shuts down; agents may finalize session titles after the last turn.
+            title_getter = getattr(acp_client, "get_session_title", None)
+            if callable(title_getter):
+                session_title = await title_getter()
             if export_transcript and turn_transcripts:
                 export_path = export_transcript.resolve()
                 export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1082,6 +1090,7 @@ async def run_factory(
         branch=branch or wt_manager.branch_name,
         base_ref=base_ref,
         session_id=session_id,
+        session_title=session_title,
         head_sha=head_sha,
     )
     report_path = (

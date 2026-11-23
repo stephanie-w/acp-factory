@@ -115,6 +115,7 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
         branch="factory/issue-42",
         base_ref="origin/main",
         session_id="ses_deadbeef",
+        session_title="ACP Session e61e0ea7",
     )
 
     assert run_dir is not None
@@ -125,6 +126,62 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
     assert data["branch"] == "factory/issue-42"
     assert data["base_ref"] == "origin/main"
     assert data["session_id"] == "ses_deadbeef"
+    assert data["session_title"] == "ACP Session e61e0ea7"
+
+    # Runs that never resolved a title persist null, never an empty string.
+    no_title_dir = _persist_run_artifacts(
+        tmp_path,
+        "run-2",
+        config,
+        succeeded=True,
+        attempts_used=1,
+        total_duration=0.5,
+        setup_logs=[],
+        turn_transcripts=[],
+        check_history=[],
+        failure_reason=None,
+        session_id="ses_untitled",
+    )
+    no_title_data = json.loads((no_title_dir / "run.json").read_text(encoding="utf-8"))
+    assert no_title_data["session_title"] is None
+
+
+def test_history_json_surfaces_session_title(tmp_path: Path) -> None:
+    runs_dir = tmp_path / ".factory" / "runs"
+    # Derive the titled record through the persistence path so this test also
+    # fails if `run_factory` ever stops writing `session_title`.
+    _persist_run_artifacts(
+        tmp_path,
+        "run-titled",
+        FactoryConfig(task="Persist session title"),
+        succeeded=True,
+        attempts_used=1,
+        total_duration=0.5,
+        setup_logs=[],
+        turn_transcripts=[],
+        check_history=[],
+        failure_reason=None,
+        session_id="ses_deadbeef",
+        session_title="ACP Session e61e0ea7",
+    )
+    _write_run(
+        runs_dir,
+        "run-legacy",
+        "2026-11-13T16:00:00+00:00",
+        session_id="ses_legacy",
+    )
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(workspace=tmp_path, limit=None, json_output=True)
+
+    records = {record["run_id"]: record for record in json.loads(out.getvalue())}
+    assert records["run-titled"]["session_title"] == "ACP Session e61e0ea7"
+    # Legacy runs lacking the field remain serializable and simply omit it.
+    assert "session_title" not in records["run-legacy"]
 
 
 def test_history_cmd_json_respects_limit(tmp_path: Path) -> None:
