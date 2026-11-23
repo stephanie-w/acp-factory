@@ -878,6 +878,7 @@ async def run_factory(
         merged_instructions = list(
             dict.fromkeys([*config.instructions, *config.agent.instructions])
         )
+        is_retro = config.active_stage == "retro"
         async with FactoryACPClient(
             workspace=active_cwd,
             agent_config=config.agent,
@@ -886,7 +887,9 @@ async def run_factory(
             instructions=merged_instructions,
             discover_apm_resources=effective_discover,
             guardrails=config.guardrails,
-            deny_runs=bool(config.active_stage and config.active_stage != "retro"),
+            runs_dir=config.resolve_runs_dir(workspace),
+            deny_runs=bool(config.active_stage and not is_retro),
+            allow_runs=is_retro,
             verbose=verbose,
             silent=ui.quiet,
             extra_env=config.env or None,

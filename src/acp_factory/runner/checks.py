@@ -540,7 +540,7 @@ async def run_single_check(
         from ..acp.client import (
             FactoryACPClient as _FactoryACPClient,
         )
-        from ..config import AgentConfig
+        from ..config import AgentConfig, resolve_runs_dir
         from ..resources import resolve_resource_dirs, resolve_resources
 
         start = time.monotonic()
@@ -626,6 +626,11 @@ async def run_single_check(
                 read_only=True,
                 silent=acp_client.silent if acp_client else False,
                 deny_runs=True,
+                runs_dir=(
+                    acp_client.runs_dir
+                    if acp_client is not None and acp_client.runs_dir is not None
+                    else resolve_runs_dir(cwd)
+                ),
                 extra_env=extra_env,
                 strip_env=strip_env,
                 keep_env=keep_env,

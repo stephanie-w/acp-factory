@@ -16,7 +16,8 @@ When `guardrails.enabled` is `true` (default), [`FactoryACPClient.start()`](../s
 - **External & bundled resources catalogs (read-only):** When `kind` is `read` or `view`, reading from configured `resource_dirs` / `resources_dir` (`--resources-dir` / `FACTORY_RESOURCES_DIRS` / `FACTORY_RESOURCES_DIR`) and `acp-factory`'s package-bundled resources is permitted.
 - **Explicit allowlist:** Paths listed in `[guardrails].allowed_paths` (`--allow-path` / `FACTORY_GUARDRAILS_ALLOWED_PATHS`) are permitted.
 - **Custom blocked paths:** Paths or directories listed in `[guardrails].blocked_paths` (`--block-path` / `FACTORY_GUARDRAILS_BLOCKED_PATHS`) are denied for direct access and file-dump commands.
-- **Run artifact isolation (`--deny-runs`):** In all stages except `retro`, access to `.factory/runs/`, `.factory/latest-report.md`, and `.factory/latest-build-notes.md` is denied so agents do not read prior run transcripts or reports directly from disk.
+- **Run artifact isolation (`--deny-runs` + `--runs-dir`):** In all stages except `retro`, access to the resolved run artifacts directory (`FACTORY_RUNS_DIR` / `runs_dir` / repo-scoped XDG bucket) is denied, even when it lives outside the workspace, inside the workspace, behind a symlink, or under an allowed path. Legacy `.factory/runs/`, `.factory/latest-report.md`, and `.factory/latest-build-notes.md` remain blocked as well.
+- **Read-only run artifact access for `retro` (`--allow-runs --runs-dir`):** The `retro` stage may read transcripts and artifacts inside the resolved `runs_dir`, but writes there stay denied. The `runs_dir` is not added to `allowed_paths`, so it never grants write access.
 
 ### Command & Sensitive Path Filtering (`is_command_safe`)
 For `execute` / `command` / `bash` requests, commands are checked against:
@@ -39,7 +40,7 @@ For `execute` / `command` / `bash` requests, commands are checked against:
 - **Broad `find` redirection:** When `fd` (or `fdfind`) is available on `PATH`, workspace-wide `find` invocations (`find`, `find .`, `find ./`, `find $PWD`) without `-maxdepth` or with `-maxdepth` greater than 1 are denied in favour of `fd`. Shallow bounded scans (`find . -maxdepth 1`) and targeted subdirectory scans (`find src -name '*.py'`) remain permitted.
 - **Environment-dumping commands:** Bare `env` / `/usr/bin/env` (no target command), bare `printenv` / `/usr/bin/printenv` (no specific variable names), `export` / `export -p`, and inline Python `-c` probes that dump `os.environ` / `os.environb` are blocked. The check also descends through shell prefixes and wrappers (`eval`, `command`, `builtin`, `time`, `exec`, `nice`, `nohup`, `xargs`, `busybox env`) and process substitution (`cat <(env)`), so one-word prefixes cannot bypass it. Launcher forms such as `env FOO=bar pytest`, specific-variable queries such as `printenv USER`, assignments such as `export FOO=bar`, single-variable Python reads such as `os.environ.get("USER")`, and repository searches such as `rg os.environ` remain allowed.
 - **Custom denied patterns:** Case-insensitive substring matches from `[guardrails].denied_commands` (`--deny-cmd` / `FACTORY_GUARDRAILS_DENIED_COMMANDS`).
-- **Run artifact commands (`--deny-runs`):** Shell commands referencing `.factory/runs`, `.factory/latest-report.md`, or `.factory/latest-build-notes.md` are blocked outside `retro`.
+- **Run artifact commands (`--deny-runs`):** Shell commands referencing `.factory/runs`, `.factory/latest-report.md`, `.factory/latest-build-notes.md`, `$FACTORY_RUNS_DIR`, the default `acp-factory/runs` bucket, or the resolved `runs_dir` (including its `~` form under `$HOME`) are blocked outside `retro`. Boundary-checked matching keeps sibling directories such as `<runs_dir>-other` readable.
 
 ---
 
