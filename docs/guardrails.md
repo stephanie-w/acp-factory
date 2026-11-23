@@ -17,7 +17,7 @@ When `guardrails.enabled` is `true` (default), [`FactoryACPClient.start()`](../s
 - **Explicit allowlist:** Paths listed in `[guardrails].allowed_paths` (`--allow-path` / `FACTORY_GUARDRAILS_ALLOWED_PATHS`) are permitted.
 - **Custom blocked paths:** Paths or directories listed in `[guardrails].blocked_paths` (`--block-path` / `FACTORY_GUARDRAILS_BLOCKED_PATHS`) are denied for direct access and file-dump commands.
 - **Run artifact isolation (`--deny-runs` + `--runs-dir`):** In all stages except `retro`, access to the resolved run artifacts directory (`FACTORY_RUNS_DIR` / `runs_dir` / repo-scoped XDG bucket) is denied, even when it lives outside the workspace, inside the workspace, behind a symlink, or under an allowed path. Legacy `.factory/runs/`, `.factory/latest-report.md`, and `.factory/latest-build-notes.md` remain blocked as well.
-- **Read-only run artifact access for `retro` (`--allow-runs --runs-dir`):** The `retro` stage may read transcripts and artifacts inside the resolved `runs_dir`, but writes there stay denied. The `runs_dir` is not added to `allowed_paths`, so it never grants write access.
+- **Read-only run artifact access for `retro` (`--allow-runs --runs-dir`):** The `retro` stage may read transcripts and artifacts inside the resolved `runs_dir`, while writes to an external `runs_dir` stay denied (a workspace-internal custom `runs_dir` is governed by normal workspace containment and `retro`'s `read_only` stage mode). The `runs_dir` is not added to `allowed_paths`, so it never grants external write access.
 
 ### Command & Sensitive Path Filtering (`is_command_safe`)
 For `execute` / `command` / `bash` requests, commands are checked against:
