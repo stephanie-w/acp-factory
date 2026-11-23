@@ -1329,10 +1329,11 @@ def history_cmd(
     base_cfg = FactoryConfig.discover(resolved_workspace, config_file)
     use_fleet = _resolve_use_fleet(fleet, fleet_config_file, base_cfg)
 
+    runs_dir = base_cfg.resolve_runs_dir(resolved_workspace)
     if use_fleet:
         records = list_fleet_run_history(base_cfg.with_fleet_overlay(fleet_config_file))
     else:
-        records = list_run_history(resolved_workspace)
+        records = list_run_history(resolved_workspace, runs_dir=runs_dir)
 
     limited = records[: limit or 50]
     if json_output:
@@ -1343,7 +1344,7 @@ def history_cmd(
         if use_fleet:
             console.print("[dim]No factory runs found across fleet repositories.[/dim]")
         else:
-            console.print("[dim]No factory runs found under `.factory/runs/`.[/dim]")
+            console.print(f"[dim]No factory runs found under `{runs_dir}`.[/dim]")
         return
 
     table = Table(title="acp-factory Run History")
@@ -1511,9 +1512,13 @@ def inspect_cmd(
     ] = False,
 ) -> None:
     """Explore thoughts, tool calls, and responses from a local transcript."""
+    resolved_workspace = workspace.resolve()
+    runs_dir = FactoryConfig.discover(resolved_workspace).resolve_runs_dir(
+        resolved_workspace
+    )
     try:
         transcript_path = resolve_transcript_path(
-            target, workspace=workspace, attempt=attempt
+            target, workspace=resolved_workspace, attempt=attempt, runs_dir=runs_dir
         )
         data = load_transcript(transcript_path)
     except Exception as exc:
@@ -1695,10 +1700,17 @@ def stats_cmd(
     ] = False,
 ) -> None:
     """Analyze run durations, tool-call mix, slowest calls, and largest outputs."""
+    resolved_workspace = workspace.resolve()
+    runs_dir = FactoryConfig.discover(resolved_workspace).resolve_runs_dir(
+        resolved_workspace
+    )
     if target is not None:
         try:
             transcript_path = resolve_transcript_path(
-                target, workspace=workspace, attempt=attempt
+                target,
+                workspace=resolved_workspace,
+                attempt=attempt,
+                runs_dir=runs_dir,
             )
             data = load_transcript(transcript_path)
         except Exception as exc:
@@ -1793,13 +1805,15 @@ def stats_cmd(
             console.print(big_table)
         return
 
-    agg = compute_runs_stats(workspace.resolve(), limit=limit, top=top)
+    agg = compute_runs_stats(
+        resolved_workspace, limit=limit, top=top, runs_dir=runs_dir
+    )
     if json_output:
         typer.echo(json.dumps(agg, indent=2))
         return
 
     if agg["total_runs"] == 0:
-        console.print("[dim]No factory runs found under `.factory/runs/`.[/dim]")
+        console.print(f"[dim]No factory runs found under `{runs_dir}`.[/dim]")
         return
 
     def _tok_cell(tokens: int, est_tokens: int) -> str:

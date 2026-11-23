@@ -71,6 +71,8 @@ Run artifacts are stored outside the workspace. `runs_dir` (top-level) selects t
 ${XDG_DATA_HOME:-~/.local/share}/acp-factory/runs/<repo-slug>-<sha256[:12]>
 ```
 
+Every run persists its artifacts (`run.json`, attempts, reports, and implementation notes) to the resolved `runs_dir` even when the target repository has no `.factory/` directory. `latest` pointers live there too, scoped as `latest-report-issue-<n>.md` / `latest-report-branch-<slug>.md` and `latest-build-notes-issue-<n>.md` / `latest-build-notes-branch-<slug>.md` (unscoped `latest-*.md` only when neither is known), so build notes never leak into unrelated reviews. `history`, `inspect`, and `stats` read the resolved `runs_dir` and also surface legacy `<workspace>/.factory/runs/` entries.
+
 ```toml
 version = "1"
 runs_dir = ".factory/runs"   # overridden by FACTORY_RUNS_DIR when set
@@ -128,7 +130,7 @@ Or automatically process the next actionable issue in the repository queue:
 acp-factory next
 ```
 
-View a chronological history of local runs (from `.factory/runs/*/run.json`) as a table showing each run's stage, model, issue, repo, branch, retry attempts, and usage; `--json` exposes full metadata including agent, model, and session id:
+View a chronological history of local runs (from the resolved `runs_dir`, plus legacy `<workspace>/.factory/runs/` entries) as a table showing each run's stage, model, issue, repo, branch, retry attempts, and usage; `--json` exposes full metadata including agent, model, and session id:
 
 ```bash
 acp-factory history
@@ -205,7 +207,7 @@ acp-factory history --fleet-config /path/to/custom-fleet.toml
    ```bash
    acp-factory next --fleet -n 1 --dry-run
    ```
-   *Expected*: The orchestrator selects the next actionable issue, runs its stage in dry-run mode, logs the active repository/issue/stage in the terminal header, saves proposed run artifacts under `.factory/runs/<run-id>/`, and prints manual `gh` commands without mutating GitHub.
+   *Expected*: The orchestrator selects the next actionable issue, runs its stage in dry-run mode, logs the active repository/issue/stage in the terminal header, saves proposed run artifacts under the resolved `runs_dir` (`<runs-dir>/<run-id>/` and `<runs-dir>/dry-run/`), and prints manual `gh` commands without mutating GitHub.
 
 ### 3. Review a Standalone Working Branch (With Optional PR Creation)
 
@@ -264,7 +266,7 @@ max_cost_usd = 2.00           # cumulative cost cap in USD (optional, disabled w
 max_turns = 10                # maximum agent turns per run (optional, disabled when omitted)
 ```
 
-Each cap is optional and disabled when omitted. Note that in GitHub issue lifecycle mode (`issue` / `next`), `tokens`, `cost`, and `turns` counters accumulate across stages in the issue factory meta comment for telemetry and auditing, while `max_turns` is evaluated as a per-run execution budget cap. When a cap is breached mid-run, execution halts deterministically, the run is marked failed, and (in issue workflow mode) the issue is escalated to `factory:needs-human` with a `## Budget Escalation` banner. Cumulative tokens, cost, and turns are recorded in `.factory/runs/<run-id>/run.json` under `"usage"` and `"budget"`.
+Each cap is optional and disabled when omitted. Note that in GitHub issue lifecycle mode (`issue` / `next`), `tokens`, `cost`, and `turns` counters accumulate across stages in the issue factory meta comment for telemetry and auditing, while `max_turns` is evaluated as a per-run execution budget cap. When a cap is breached mid-run, execution halts deterministically, the run is marked failed, and (in issue workflow mode) the issue is escalated to `factory:needs-human` with a `## Budget Escalation` banner. Cumulative tokens, cost, and turns are recorded in `<runs-dir>/<run-id>/run.json` under `"usage"` and `"budget"`.
 
 The same limits can be overridden per invocation with CLI flags on `acp-factory` (global) or on subcommands (`run`, `issue`, `next`):
 

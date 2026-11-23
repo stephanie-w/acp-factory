@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .acp.events import extract_usage_metrics
-from .history import list_run_history
+from .config import resolve_runs_dir
+from .history import candidate_runs_dirs, list_run_history
 
 logger = logging.getLogger(__name__)
 
@@ -28,27 +29,31 @@ def resolve_transcript_path(
     *,
     workspace: Path,
     attempt: int = 1,
+    runs_dir: Path | None = None,
 ) -> Path:
     """Resolve a run ID, prefix, directory, or file path to a transcript JSON file."""
     ws = workspace.resolve()
-    runs_dir = ws / ".factory" / "runs"
+    primary_runs_dir = (runs_dir or resolve_runs_dir(ws)).resolve()
+    candidates = candidate_runs_dirs(ws, primary_runs_dir)
 
     if target is None:
-        records = list_run_history(ws)
+        records = list_run_history(ws, runs_dir=primary_runs_dir)
         if records:
             run_id = str(records[0]["run_id"])
-            found = _pick_transcript_in_attempt(
-                runs_dir / run_id / f"attempt-{attempt}"
+            for candidate_dir in candidates:
+                found = _pick_transcript_in_attempt(
+                    candidate_dir / run_id / f"attempt-{attempt}"
+                )
+                if found is not None:
+                    return found
+        for candidate_dir in candidates:
+            latest_found = _pick_transcript_in_attempt(
+                candidate_dir / "latest" / f"attempt-{attempt}"
             )
-            if found is not None:
-                return found
-        latest_found = _pick_transcript_in_attempt(
-            runs_dir / "latest" / f"attempt-{attempt}"
-        )
-        if latest_found is not None:
-            return latest_found
+            if latest_found is not None:
+                return latest_found
         raise FileNotFoundError(
-            f"No transcript found for attempt-{attempt} under {runs_dir}."
+            f"No transcript found for attempt-{attempt} under {primary_runs_dir}."
         )
 
     explicit = Path(target).expanduser()
@@ -63,14 +68,24 @@ def resolve_transcript_path(
             return nested
         raise FileNotFoundError(f"No transcript JSON found in {explicit}.")
 
-    run_dir = runs_dir / target
-    if not run_dir.is_dir() and runs_dir.is_dir():
+    run_dir = next(
+        (
+            candidate_dir / target
+            for candidate_dir in candidates
+            if (candidate_dir / target).is_dir()
+        ),
+        None,
+    )
+    if run_dir is None:
         matches = sorted(
-            p
-            for p in runs_dir.iterdir()
-            if p.is_dir()
-            and p.name not in ("latest", "dry-run")
-            and p.name.startswith(target)
+            {
+                candidate_dir / p.name
+                for candidate_dir in candidates
+                for p in candidate_dir.iterdir()
+                if p.is_dir()
+                and p.name not in ("latest", "dry-run")
+                and p.name.startswith(target)
+            }
         )
         if len(matches) == 1:
             run_dir = matches[0]
@@ -80,12 +95,13 @@ def resolve_transcript_path(
                 f"Ambiguous run ID prefix {target!r}; matches: {names}"
             )
 
-    found = _pick_transcript_in_attempt(run_dir / f"attempt-{attempt}")
-    if found is not None:
-        return found
+    if run_dir is not None:
+        found = _pick_transcript_in_attempt(run_dir / f"attempt-{attempt}")
+        if found is not None:
+            return found
 
     raise FileNotFoundError(
-        f"No transcript found for {target!r} (attempt-{attempt}) under {runs_dir}."
+        f"No transcript found for {target!r} (attempt-{attempt}) under {primary_runs_dir}."
     )
 
 
@@ -301,12 +317,17 @@ def compute_transcript_stats(data: dict[str, Any], *, top: int = 10) -> dict[str
 
 
 def compute_runs_stats(
-    workspace: Path, *, limit: int = 20, top: int = 10
+    workspace: Path,
+    *,
+    limit: int = 20,
+    top: int = 10,
+    runs_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Aggregate run-level and tool-call stats across recent runs under `.factory/runs/`."""
+    """Aggregate run-level and tool-call stats across recent resolved/legacy runs."""
     ws = workspace.resolve()
-    runs_dir = ws / ".factory" / "runs"
-    records = list_run_history(ws)[:limit]
+    primary_runs_dir = (runs_dir or resolve_runs_dir(ws)).resolve()
+    candidates = candidate_runs_dirs(ws, primary_runs_dir)
+    records = list_run_history(ws, runs_dir=primary_runs_dir)[:limit]
 
     total_duration = 0.0
     total_tokens = 0
@@ -356,8 +377,15 @@ def compute_runs_stats(
                 total_cost += run_cost
 
         run_estimated_tokens = 0
-        run_dir = runs_dir / run_id
-        if run_dir.is_dir():
+        run_dir = next(
+            (
+                candidate_dir / run_id
+                for candidate_dir in candidates
+                if (candidate_dir / run_id).is_dir()
+            ),
+            None,
+        )
+        if run_dir is not None:
             for attempt_dir in sorted(run_dir.glob("attempt-*")):
                 t_path = _pick_transcript_in_attempt(attempt_dir)
                 if t_path is None:

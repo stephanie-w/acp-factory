@@ -12,9 +12,18 @@ import pytest
 from rich.console import Console
 
 from acp_factory.cli import history_cmd
-from acp_factory.config import FactoryConfig, FleetConfig
+from acp_factory.config import FactoryConfig, FleetConfig, resolve_runs_dir
 from acp_factory.history import list_fleet_run_history, list_run_history
 from acp_factory.runner.loop import _persist_run_artifacts
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolate both resolved `runs_dir` sources from the developer's real data home."""
+    monkeypatch.delenv("FACTORY_RUNS_DIR", raising=False)
+    xdg_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    return xdg_home
 
 
 def _write_run(runs_dir: Path, run_id: str, timestamp: str, **extra: object) -> None:
@@ -422,3 +431,76 @@ def test_list_fleet_run_history_limit(tmp_path: Path) -> None:
 
     data = json.loads(out.getvalue())
     assert [r["run_id"] for r in data] == ["a-new", "b-mid"]
+
+
+def test_list_run_history_reads_resolved_runs_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: the resolved runs_dir is read even without a legacy `.factory/runs/`."""
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    _write_run(external, "resolved", "2026-11-13T16:00:00+00:00", stage="review")
+
+    records = list_run_history(tmp_path)
+
+    assert [r["run_id"] for r in records] == ["resolved"]
+    assert not (tmp_path / ".factory" / "runs").exists()
+
+
+def test_list_run_history_merges_resolved_and_legacy_dedupes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: legacy runs still surface, and the resolved copy wins run_id collisions."""
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    legacy = tmp_path / ".factory" / "runs"
+    _write_run(external, "shared", "2026-11-13T10:00:00+00:00", stage="review")
+    _write_run(legacy, "shared", "2026-11-13T10:00:00+00:00", stage="build")
+    _write_run(legacy, "legacy-only", "2026-11-13T12:00:00+00:00", stage="triage")
+
+    records = list_run_history(tmp_path)
+
+    assert [r["run_id"] for r in records] == ["legacy-only", "shared"]
+    by_id = {r["run_id"]: r for r in records}
+    assert by_id["shared"]["stage"] == "review"
+
+
+def test_list_fleet_run_history_includes_resolved_and_legacy(
+    tmp_path: Path,
+) -> None:
+    """AC-5: fleet aggregation spans resolved runs_dir and legacy `.factory/runs/`."""
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    _write_run(resolve_runs_dir(repo_a), "resolved", "2026-11-13T16:00:00+00:00")
+    _write_run(repo_b / ".factory" / "runs", "legacy", "2026-11-13T17:00:00+00:00")
+
+    records = list_fleet_run_history(
+        _fleet_config({"demo/repo-a": str(repo_a), "demo/repo-b": str(repo_b)})
+    )
+
+    assert [r["run_id"] for r in records] == ["legacy", "resolved"]
+    assert {r["run_id"]: r["repo_slug"] for r in records} == {
+        "legacy": "demo/repo-b",
+        "resolved": "demo/repo-a",
+    }
+
+
+def test_history_cmd_reads_resolved_runs_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: `history` reads the resolved runs_dir."""
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    _write_run(external, "external-run", "2026-11-13T16:00:00+00:00")
+
+    out = StringIO()
+    with patch(
+        "acp_factory.cli.console",
+        new=Console(file=out, force_terminal=False, width=200),
+    ):
+        history_cmd(workspace=tmp_path, limit=10, json_output=True)
+
+    data = json.loads(out.getvalue())
+    assert [r["run_id"] for r in data] == ["external-run"]

@@ -18,7 +18,7 @@ from acp_factory.acp.events import (
     _safe_json_value,
     _truncate_text,
 )
-from acp_factory.config import FactoryConfig
+from acp_factory.config import FactoryConfig, resolve_runs_dir
 from acp_factory.runner.loop import (
     FactoryRunOutcome,
     _persist_run_artifacts,
@@ -28,6 +28,19 @@ from acp_factory.runner.loop import (
 )
 from acp_factory.task import StageVerdict, TaskContext
 from acp_factory.ui.display import FactoryDisplay
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep run artifacts in the test's temp tree instead of the developer's data home."""
+    monkeypatch.delenv("FACTORY_RUNS_DIR", raising=False)
+    xdg_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    return xdg_home
+
+
+def _runs_dir(workspace: Path) -> Path:
+    return resolve_runs_dir(workspace)
 
 
 def test_turn_summary_to_dict_basic() -> None:
@@ -307,9 +320,6 @@ def test_turn_event_tracker_resets_usage_between_turns() -> None:
 
 
 def test_persist_run_artifacts_json(tmp_path: Path) -> None:
-    factory_dir = tmp_path / ".factory"
-    factory_dir.mkdir(parents=True)
-
     config = FactoryConfig(task="Test task")
     summary = TurnSummary(
         prompt="Task prompt",
@@ -341,9 +351,13 @@ def test_persist_run_artifacts_json(tmp_path: Path) -> None:
         failure_reason=None,
         turn_summaries=[summary.to_dict()],
         turn_condensed=[summary.to_condensed_dict()],
+        head_sha="deadbeefcafe",
     )
 
     assert run_dir is not None
+    assert run_dir.parent == _runs_dir(tmp_path)
+    metadata = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert metadata["head_sha"] == "deadbeefcafe"
     attempt_dir = run_dir / "attempt-1"
     assert (attempt_dir / "transcript.md").exists()
     assert (attempt_dir / "transcript.json").exists()
@@ -495,12 +509,13 @@ def test_latest_artifact_pointer_symlink_and_fallback(
     )
     assert run_dir is not None
 
-    latest_run = tmp_path / ".factory" / "runs" / "latest"
-    latest_pointer = tmp_path / ".factory" / pointer_name
+    runs_dir = _runs_dir(tmp_path)
+    latest_run = runs_dir / "latest"
+    latest_pointer = runs_dir / pointer_name
     assert latest_run.is_symlink()
     assert os.readlink(latest_run) == "run-abc"
     assert latest_pointer.is_symlink()
-    assert os.readlink(latest_pointer) == str(Path("runs") / "run-abc" / artifact_name)
+    assert os.readlink(latest_pointer) == str(Path("run-abc") / artifact_name)
     assert latest_pointer.read_text(encoding="utf-8") == (
         run_dir / artifact_name
     ).read_text(encoding="utf-8")
@@ -518,8 +533,7 @@ def test_latest_artifact_pointer_symlink_and_fallback(
 
 
 def test_persist_run_artifacts_non_review_stage(tmp_path: Path) -> None:
-    """AC-3: non-review stages and missing `.factory/` never write a report or raise."""
-    (tmp_path / ".factory").mkdir()
+    """AC-1: non-review stages never write a report, even without `.factory/`."""
     config = FactoryConfig(task="Build it", active_stage="build")
 
     run_dir = _persist(
@@ -529,22 +543,25 @@ def test_persist_run_artifacts_non_review_stage(tmp_path: Path) -> None:
         response_text="# Build report\nSTATUS: DONE",
     )
     assert run_dir is not None
+    assert run_dir.parent == _runs_dir(tmp_path)
     assert not (run_dir / "report.md").exists()
-    assert not (tmp_path / ".factory" / "latest-report.md").exists()
-    assert os.readlink(tmp_path / ".factory" / "runs" / "latest") == "run-build"
+    assert not (_runs_dir(tmp_path) / "latest-report.md").exists()
+    assert os.readlink(_runs_dir(tmp_path) / "latest") == "run-build"
 
-    # A workspace without `.factory/` is a no-op, not an error.
+    # A workspace without `.factory/` is still persisted, not silently dropped.
     bare_workspace = tmp_path / "bare"
     bare_workspace.mkdir()
-    assert (
-        _persist(
-            bare_workspace,
-            config=FactoryConfig(task="Review", active_stage="review"),
-            run_id="run-bare",
-            response_text="# Review\nVERDICT: ACCEPTED",
-        )
-        is None
+    bare_run_dir = _persist(
+        bare_workspace,
+        config=FactoryConfig(task="Review", active_stage="review"),
+        run_id="run-bare",
+        response_text="# Review\nVERDICT: ACCEPTED",
     )
+    assert bare_run_dir is not None
+    assert bare_run_dir.parent == _runs_dir(bare_workspace)
+    assert not (bare_workspace / ".factory").exists()
+    assert (bare_run_dir / "report.md").is_file()
+    assert (bare_run_dir / "run.json").is_file()
 
 
 @pytest.mark.parametrize(
@@ -555,14 +572,13 @@ def test_persist_run_artifacts_non_review_stage(tmp_path: Path) -> None:
 def test_persist_run_artifacts_updates_latest_symlink_for_all_stages(
     tmp_path: Path, stage: str | None
 ) -> None:
-    """AC-1: every completed run refreshes `.factory/runs/latest`."""
-    (tmp_path / ".factory").mkdir()
+    """AC-1: every completed run refreshes `runs_dir/latest`."""
     config = FactoryConfig(task="Run stage", active_stage=stage)
 
     run_dir = _persist(tmp_path, config=config, run_id="run-newest")
 
     assert run_dir is not None
-    latest = tmp_path / ".factory" / "runs" / "latest"
+    latest = _runs_dir(tmp_path) / "latest"
     assert latest.is_symlink()
     assert os.readlink(latest) == "run-newest"
 
@@ -584,14 +600,14 @@ def test_persist_run_artifacts_dry_run_or_setup_failure(
     )
 
     assert run_dir is not None
-    assert not (tmp_path / ".factory" / "runs" / "latest").exists()
+    assert not (_runs_dir(tmp_path) / "latest").exists()
 
 
 def test_persist_run_artifacts_keeps_latest_when_first_turn_produced_no_transcript(
     tmp_path: Path,
 ) -> None:
     """AC-3: a first-turn timeout (attempts_used=1, no transcript) leaves latest intact."""
-    runs_dir = tmp_path / ".factory" / "runs"
+    runs_dir = _runs_dir(tmp_path)
     (runs_dir / "run-old").mkdir(parents=True)
     latest = runs_dir / "latest"
     latest.symlink_to("run-old", target_is_directory=True)
@@ -692,6 +708,54 @@ async def test_factory_run_outcome_artifact_path(
         succeeded=True, exit_code=0, attempts_used=1, total_duration_seconds=0.0
     )
     assert getattr(default_outcome, attr_name) is None
+
+
+async def test_run_factory_records_tracked_head_sha(tmp_path: Path) -> None:
+    """AC-1: `run.json` records the working-tree HEAD captured before worktree cleanup."""
+    config = FactoryConfig(task="Snapshot HEAD", active_stage="triage")
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.tracker = AsyncMock()
+            self.tracker.history = []
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def send_prompt(self, prompt: str, **kwargs: object) -> object:
+            from acp_factory.acp.events import TurnSummary
+
+            return type(
+                "TurnResult",
+                (),
+                {
+                    "stop_reason": "end_turn",
+                    "summary": TurnSummary(
+                        prompt=prompt,
+                        response_text="done",
+                        thought_text="",
+                        stop_reason="end_turn",
+                        duration_seconds=0.01,
+                        tool_call_count=0,
+                    ),
+                },
+            )()
+
+    with (
+        patch("acp_factory.runner.loop.FactoryACPClient", FakeClient),
+        patch(
+            "acp_factory.runner.loop.get_head_sha",
+            new=AsyncMock(return_value="feedface1234"),
+        ),
+    ):
+        outcome = await run_factory(config, tmp_path)
+
+    assert outcome.run_dir is not None
+    metadata = json.loads((outcome.run_dir / "run.json").read_text(encoding="utf-8"))
+    assert metadata["head_sha"] == "feedface1234"
 
 
 @pytest.mark.parametrize(
@@ -858,7 +922,7 @@ def test_persist_run_artifacts_build_notes(tmp_path: Path) -> None:
     )
     assert review_dir is not None
     assert not (review_dir / "implementation-notes.md").exists()
-    assert not (review_ws / ".factory" / "latest-build-notes.md").exists()
+    assert not (_runs_dir(review_ws) / "latest-build-notes.md").exists()
 
     plain_ws = _factory_workspace(tmp_path, "plain")
     plain_dir = _persist(
@@ -869,16 +933,106 @@ def test_persist_run_artifacts_build_notes(tmp_path: Path) -> None:
     )
     assert plain_dir is not None
     assert not (plain_dir / "implementation-notes.md").exists()
-    assert not (plain_ws / ".factory" / "latest-build-notes.md").exists()
-    assert os.readlink(plain_ws / ".factory" / "runs" / "latest") == "run-build-plain"
+    assert not (_runs_dir(plain_ws) / "latest-build-notes.md").exists()
+    assert os.readlink(_runs_dir(plain_ws) / "latest") == "run-build-plain"
+
+
+def _seed_build_run(
+    runs_dir: Path,
+    run_id: str,
+    *,
+    notes: str,
+    issue_number: int | None = None,
+    branch: str | None = None,
+    head_sha: str | None = None,
+) -> Path:
+    """Write a build run directory holding implementation notes and metadata."""
+    run_dir = runs_dir / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "implementation-notes.md").write_text(notes, encoding="utf-8")
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "timestamp": "2026-11-20T10:00:00+00:00",
+                "stage": "build",
+                "issue_number": issue_number,
+                "branch": branch,
+                "head_sha": head_sha,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return run_dir
+
+
+def test_scoped_latest_artifact_pointers(tmp_path: Path) -> None:
+    """AC-2: pointers are issue/branch scoped inside runs_dir, never under `.factory/`."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    runs_dir = _runs_dir(workspace)
+    notes = "### Implementation Summary\n- **Files Modified**: `src/app.py`\n"
+
+    build_dir = _persist_run_artifacts(
+        workspace,
+        "run-build",
+        FactoryConfig(task="Build it", active_stage="build"),
+        succeeded=True,
+        attempts_used=1,
+        total_duration=0.1,
+        setup_logs=[],
+        turn_transcripts=["# attempt"],
+        check_history=[],
+        failure_reason=None,
+        issue_number=12,
+        branch="factory/issue-12",
+        last_response_text=notes + "STATUS: DONE",
+    )
+    assert build_dir == runs_dir / "run-build"
+    assert not (workspace / ".factory").exists()
+
+    for pointer in (
+        runs_dir / "latest-build-notes-issue-12.md",
+        runs_dir / "latest-build-notes-branch-factory-issue-12.md",
+    ):
+        assert pointer.is_symlink()
+        assert os.readlink(pointer) == str(
+            Path("run-build") / "implementation-notes.md"
+        )
+        assert "Implementation Summary" in pointer.read_text(encoding="utf-8")
+
+    _persist_run_artifacts(
+        workspace,
+        "run-review",
+        FactoryConfig(task="Review it", active_stage="review"),
+        succeeded=True,
+        attempts_used=1,
+        total_duration=0.1,
+        setup_logs=[],
+        turn_transcripts=["# attempt"],
+        check_history=[],
+        failure_reason=None,
+        issue_number=12,
+        branch="factory/issue-12",
+        last_response_text="# Review Report\n\nVERDICT: ACCEPTED\n",
+    )
+    report_pointer = runs_dir / "latest-report-issue-12.md"
+    assert report_pointer.is_symlink()
+    assert os.readlink(report_pointer) == str(Path("run-review") / "report.md")
 
 
 async def test_review_stage_injects_prior_build_notes(tmp_path: Path) -> None:
-    """AC-6: `run_issue_stage` feeds latest build notes into the review context."""
-    (tmp_path / ".factory").mkdir()
-    (tmp_path / ".factory" / "latest-build-notes.md").write_text(
-        "### Implementation Summary\n- **Files Modified**: `src/app.py`\n",
-        encoding="utf-8",
+    """AC-3: `run_issue_stage` feeds issue-scoped build notes into the review context."""
+    runs_dir = _runs_dir(tmp_path)
+    _seed_build_run(
+        runs_dir,
+        "run-build",
+        notes="### Implementation Summary\n- **Files Modified**: `src/app.py`\n",
+        issue_number=7,
+        branch="factory/issue-7",
+    )
+    (runs_dir / "latest-build-notes-issue-7.md").symlink_to(
+        Path("run-build") / "implementation-notes.md"
     )
     task = TaskContext(issue_number=7, title="Review me", labels=["factory:review"])
     captured: list[FactoryConfig] = []
@@ -914,17 +1068,35 @@ async def test_review_stage_injects_prior_build_notes(tmp_path: Path) -> None:
     assert "- **Files Modified**: `src/app.py`" in injected
 
 
-async def test_branch_review_injects_prior_build_notes(tmp_path: Path) -> None:
-    """AC-6: `run_branch_review` resolves build notes via `runs/latest` fallback."""
-    run_dir = tmp_path / ".factory" / "runs" / "run-x"
-    run_dir.mkdir(parents=True)
-    (run_dir / "implementation-notes.md").write_text(
-        "### Implementation Summary\n- **Evidence**: `1 passed`\n",
-        encoding="utf-8",
+_BRANCH_REVIEW_NOTES = "### Implementation Summary\n- **Evidence**: `1 passed`\n"
+
+
+@pytest.mark.parametrize(
+    ("recorded_branch", "recorded_sha", "pointer_name", "expect_notes"),
+    [
+        ("feature", "abc1234", "latest-build-notes-branch-feature.md", True),
+        ("other-branch", "abc1234", "latest-build-notes-branch-feature.md", False),
+        ("feature", "old9999", "latest-build-notes-branch-feature.md", False),
+    ],
+    ids=["matching_branch_and_head", "stale_branch", "stale_head_sha"],
+)
+async def test_branch_review_injects_only_matching_build_notes(
+    tmp_path: Path,
+    recorded_branch: str,
+    recorded_sha: str,
+    pointer_name: str,
+    expect_notes: bool,
+) -> None:
+    """AC-3: standalone review only attaches notes matching the reviewed branch/HEAD."""
+    runs_dir = _runs_dir(tmp_path)
+    _seed_build_run(
+        runs_dir,
+        "run-x",
+        notes=_BRANCH_REVIEW_NOTES,
+        branch=recorded_branch,
+        head_sha=recorded_sha,
     )
-    (tmp_path / ".factory" / "runs" / "latest").symlink_to(
-        "run-x", target_is_directory=True
-    )
+    (runs_dir / pointer_name).symlink_to(Path("run-x") / "implementation-notes.md")
     captured: list[FactoryConfig] = []
 
     async def fake_run_factory(
@@ -962,8 +1134,100 @@ async def test_branch_review_injects_prior_build_notes(tmp_path: Path) -> None:
     assert outcome.succeeded is False
     assert captured
     injected = captured[0].task
-    assert "## Builder Implementation Notes" in injected
-    assert "- **Evidence**: `1 passed`" in injected
+    if expect_notes:
+        assert "## Builder Implementation Notes" in injected
+        assert "- **Evidence**: `1 passed`" in injected
+    else:
+        assert "## Builder Implementation Notes" not in injected
+
+
+async def test_review_stage_skips_notes_owned_by_another_issue(
+    tmp_path: Path,
+) -> None:
+    """AC-3: an issue pointer whose backing run belongs to another issue is ignored."""
+    runs_dir = _runs_dir(tmp_path)
+    _seed_build_run(
+        runs_dir,
+        "run-other",
+        notes=_BRANCH_REVIEW_NOTES,
+        issue_number=99,
+        branch="factory/issue-7",
+    )
+    (runs_dir / "latest-build-notes-issue-7.md").symlink_to(
+        Path("run-other") / "implementation-notes.md"
+    )
+    task = TaskContext(issue_number=7, title="Review me", labels=["factory:review"])
+    captured: list[FactoryConfig] = []
+
+    async def fake_run_factory(
+        config: FactoryConfig, workspace: Path, **kwargs: object
+    ) -> FactoryRunOutcome:
+        captured.append(config)
+        return FactoryRunOutcome(
+            succeeded=False,
+            exit_code=1,
+            attempts_used=1,
+            total_duration_seconds=0.0,
+            failure_reason="stop",
+        )
+
+    with (
+        patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
+        patch(
+            "acp_factory.runner.loop.FactoryConfig.discover",
+            return_value=FactoryConfig(task="base"),
+        ),
+        patch("acp_factory.runner.loop.run_factory", new=fake_run_factory),
+        patch("acp_factory.runner.loop.transition_issue_label", new=AsyncMock()),
+    ):
+        await run_issue_stage(tmp_path, 7, stage_override="review")
+
+    assert captured
+    assert "## Builder Implementation Notes" not in captured[0].task
+
+
+async def test_branch_review_ignores_legacy_repo_wide_notes(tmp_path: Path) -> None:
+    """AC-3: a repo-wide `.factory/latest-build-notes.md` never leaks into a review."""
+    (tmp_path / ".factory").mkdir()
+    (tmp_path / ".factory" / "latest-build-notes.md").write_text(
+        _BRANCH_REVIEW_NOTES, encoding="utf-8"
+    )
+    captured: list[FactoryConfig] = []
+
+    async def fake_run_factory(
+        config: FactoryConfig, workspace: Path, **kwargs: object
+    ) -> FactoryRunOutcome:
+        captured.append(config)
+        return FactoryRunOutcome(
+            succeeded=False,
+            exit_code=1,
+            attempts_used=1,
+            total_duration_seconds=0.0,
+        )
+
+    with (
+        patch(
+            "acp_factory.runner.loop.FactoryConfig.discover",
+            return_value=FactoryConfig(task="base"),
+        ),
+        patch("acp_factory.runner.loop.run_factory", new=fake_run_factory),
+        patch(
+            "acp_factory.runner.loop.get_head_sha",
+            new=AsyncMock(return_value="abc1234"),
+        ),
+        patch(
+            "acp_factory.runner.loop.is_worktree_clean",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "acp_factory.runner.worktree._run_git",
+            new=AsyncMock(return_value=(0, "subject", "")),
+        ),
+    ):
+        await run_branch_review(tmp_path, branch="feature", description="fix")
+
+    assert captured
+    assert "## Builder Implementation Notes" not in captured[0].task
 
 
 def test_agent_turn_status_quiet_mode_only() -> None:

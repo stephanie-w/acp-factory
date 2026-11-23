@@ -30,6 +30,7 @@ from acp_factory.task import (
     LABEL_SPEC,
     LABEL_SPEC_READY,
     IssueComment,
+    StageVerdict,
     TaskContext,
     _clean_markdown_stage_body,
     clean_spec_block,
@@ -2119,3 +2120,61 @@ def test_import_order_has_no_cycle(order: tuple[str, str]) -> None:
         [sys.executable, "-c", f"import {order[0]}; import {order[1]}"],
         check=True,
     )
+
+
+def test_build_dry_run_gh_plan_defaults_to_resolved_runs_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: dry-run staging falls back to `<runs_dir>/dry-run`, not `.factory/runs/`."""
+    from acp_factory.github import build_dry_run_gh_plan
+
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    task = TaskContext(
+        issue_number=41,
+        title="Dry run",
+        original_body="orig",
+        factory_block="## Specification\n- Keep it.",
+        labels=[LABEL_REVIEW],
+    )
+    verdict = parse_stage_verdict(
+        "review",
+        "## Summary\nLooks good.\nSTATUS: ACCEPTED",
+        current_factory_block=task.factory_block,
+    )
+
+    plan = build_dry_run_gh_plan(task, verdict, workspace=tmp_path)
+
+    assert plan.pr_body_file is not None
+    assert plan.pr_body_file.parent == external / "dry-run"
+    assert plan.pr_body_file.is_file()
+    assert not (tmp_path / ".factory" / "runs" / "dry-run").exists()
+
+
+def test_build_dry_run_standalone_plan_defaults_to_resolved_runs_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: standalone review dry-run staging uses the resolved runs_dir."""
+    from acp_factory.github import build_dry_run_standalone_pr_plan
+
+    external = tmp_path / "external-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(external))
+    verdict = StageVerdict(
+        stage="review",
+        status="accepted",
+        target_label=LABEL_PR_READY,
+        updated_factory_block="",
+        summary="ok",
+    )
+
+    plan = build_dry_run_standalone_pr_plan(
+        "feature/x",
+        pr_title="Review",
+        pr_body="body",
+        verdict=verdict,
+        workspace=tmp_path,
+    )
+
+    assert plan.pr_body_file == external / "dry-run" / "pr-feature-x-body.md"
+    assert plan.pr_body_file.is_file()
+    assert not (tmp_path / ".factory" / "runs" / "dry-run").exists()

@@ -127,7 +127,7 @@ Before signaling completion, verify:
 
 ### Runtime & Artifact Directories
 - `.factory/config.toml`: Central multi-stage (`triage`, `spec`, `build`, `review`, `retro`) and `[fleet]` configuration.
-- `.factory/runs/<run-id>/`: Structured per-run artifacts: `run.json` (stage, `succeeded`, `attempts_used`, `usage`), `attempt-N/transcript.summary.json` (condensed `tool_calls[]` for retro/jq), `attempt-N/transcript.json`, `attempt-N/transcript.md` (raw), `attempt-N/check-<n>-<slug>.log`, and `--dry-run` proposed Issue/PR bodies.
+- `<runs-dir>/<run-id>/`: Structured per-run artifacts, where `<runs-dir>` is the resolved `runs_dir` (`FACTORY_RUNS_DIR` > `FactoryConfig.runs_dir` > repo-scoped `$XDG_DATA_HOME/acp-factory/runs/<slug>-<hash12>`): `run.json` (stage, `succeeded`, `attempts_used`, `head_sha`, `usage`), `attempt-N/transcript.summary.json` (condensed `tool_calls[]` for retro/jq), `attempt-N/transcript.json`, `attempt-N/transcript.md` (raw), `attempt-N/check-<n>-<slug>.log`, and `--dry-run` proposed Issue/PR bodies under `<runs-dir>/dry-run/`. Runs persist even when the workspace has no `.factory/` directory.
 - `.worktrees/issue-<id>/`: Persistent git worktrees created on branch `factory/issue-<id>` during `build` and `review`, cleaned up on `done`.
 - `docs/workflow.md` & `docs/fleet-orchestration.md`: Full stage state machine and stateless fleet design specs.
 - `docs/acp-schema.json`: JSON Schema generated from the installed `agent-client-protocol` SDK (`just acp-schema`); query with `jq '."$defs".<Type>'` (e.g. `jq '."$defs" | keys' docs/acp-schema.json`) instead of reading `.venv/.../acp/schema.py`.
@@ -136,7 +136,9 @@ Before signaling completion, verify:
 - Stage check commands: `.factory/config.toml` `[checks.<name>]` vs bundled defaults in `src/acp_factory/cli.py`.
 - Validator scripts live externally in `$FACTORY_SKILLS_DIR/<skill>/scripts/validate_*.py` (e.g. `issue-triage/scripts/validate_triage.py`).
 - `justfile` recipes (`just test`, `just test-fast`, `just fix`, `just typecheck`) vs `[checks.*]` — note `[checks.test]` runs `pytest -m 'not slow'`.
-- `.factory/runs/latest/` is a symlink pointing to the most recent run directory for every completed non-dry-run stage (use `.factory/runs/latest/attempt-1/transcript.summary.json` directly with `jq`).
+- `<runs-dir>/latest/` is a symlink pointing to the most recent run directory for every completed non-dry-run stage (use `<runs-dir>/latest/attempt-1/transcript.summary.json` directly with `jq`).
+- `<runs-dir>/latest-report-issue-<n>.md` / `latest-report-branch-<slug>.md` and `latest-build-notes-issue-<n>.md` / `latest-build-notes-branch-<slug>.md` are scoped stage pointers (symlinks with a plain-copy fallback); unscoped `latest-*.md` is written only when neither issue nor branch is known. Standalone `acp-factory review` injects prior build notes only when the build run's recorded `branch` (and `head_sha` when both are present) matches, preventing stale-note leakage.
+- `history` (including `--fleet`), `inspect`, and `stats` read the resolved `runs_dir` and still surface legacy `<workspace>/.factory/runs/` entries (resolved `run_id`s win collisions).
 - `acp-factory inspect [TARGET]` defaults to the latest run and lists tool calls by default; supported view/filter flags are `--calls` (`-c`), `--thoughts` (`-t`), `--response` (`-r`), `--call <index>`, `--kind` (`-k`), `--failed`, `--grep` (`-g`), `--attempt` (`-a`), and `--json` (there is no `--view` option).
 - `docs/transcript-inspection.md`: `jq` recipes and reproducible Before/After (A/B) token & performance benchmarking workflow using `acp-factory history`, `acp-factory stats <run-id> [--json]`, and `acp-factory inspect <run-id>`.
 

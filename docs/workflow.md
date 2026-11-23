@@ -224,7 +224,7 @@ acp-factory review "Short claim/description of what the branch does" \
 
 # If REVISION_NEEDED, run a fresh builder revision round on the branch:
 acp-factory run \
-  "Revision round: Read .factory/runs/<run-id>/pr-<branch>-body.md, fix [blocking]/[major] findings, and commit." \
+  "Revision round: Read <runs-dir>/<run-id>/pr-<branch>-body.md, fix [blocking]/[major] findings, and commit." \
   --stage build \
   --skill tdd-builder \
   --workspace /path/to/repo
@@ -240,7 +240,7 @@ While tuning personas, stage prompts, and `apm` skills, you can run in **Dry-Run
    - Worker and reviewer agents are spawned with a `gh` PATH shim that allows read subcommands (`gh issue view`, `gh issue list`, `gh pr view`, `gh search`) and **blocks all mutating `gh` subcommands** (`edit`, `create`, `comment`, `close`, `merge`).
 2. **Human-Only GitHub Writes (`--dry-run`)**:
    - `acp-factory issue 42 --dry-run` fetches Issue `#42` and runs the full ACP stage live in your terminal.
-   - Instead of mutating GitHub, it saves the proposed Issue Body to `.factory/runs/<run-id>/issue-42-body.md` (and PR body if applicable) and prints a **Manual GitHub Commands** panel with the exact `gh issue edit` / `gh pr create` commands for you to execute manually.
+   - Instead of mutating GitHub, it saves the proposed Issue Body to `<runs-dir>/dry-run/issue-42-body.md` (and PR body if applicable) and prints a **Manual GitHub Commands** panel with the exact `gh issue edit` / `gh pr create` commands for you to execute manually. `<runs-dir>` is the resolved `runs_dir` (`FACTORY_RUNS_DIR` > `runs_dir` config > repo-scoped XDG data directory), so repositories without a `.factory/` directory still stage dry-run plans.
 
 ---
 
@@ -253,7 +253,7 @@ Retrospectives close the continuous improvement loop by having an architect agen
 You can trigger a retrospective directly via the CLI:
 
 ```bash
-# Run retro against recent .factory/runs/ in the current workspace:
+# Run retro against recent resolved runs_dir artifacts in the current workspace:
 acp-factory run --stage retro
 
 # Target a specific workspace:
@@ -261,14 +261,14 @@ acp-factory run --stage retro --workspace /path/to/repo
 
 # Run an ad-hoc retrospective focusing on a specific run ID:
 acp-factory run \
-  "Execute retro against run .factory/runs/20261112-120000-abc123 and AGENTS.md" \
+  "Execute retro against run <runs-dir>/20261112-120000-abc123 and AGENTS.md" \
   --stage retro
 ```
 
 ### B. Structured Run Artifacts & Fast Querying with `jq`
 
-Each execution stores structured artifacts under `.factory/runs/<run-id>/`:
-- **`run.json`**: Top-level run metadata (attempts used, total duration, stage outcome, and failure reason). Its `usage` block records only the token, cost, and turn consumption of this single run; cumulative issue totals across stages are tracked separately in the issue's `<!-- factory:meta -->` block.
+Each execution stores structured artifacts under `<runs-dir>/<run-id>/`, where `<runs-dir>` is the resolved `runs_dir` (see `README.md` for precedence). Runs are persisted unconditionally, including in target repositories that have no `.factory/` directory:
+- **`run.json`**: Top-level run metadata (attempts used, total duration, stage outcome, failure reason, and the `head_sha` of the working tree when the run finished). Its `usage` block records only the token, cost, and turn consumption of this single run; cumulative issue totals across stages are tracked separately in the issue's `<!-- factory:meta -->` block.
 - **`attempt-<N>/transcript.summary.json`**: Condensed event snapshot with truncated tool output previews and omitted raw scratchpads. Tailored for token efficiency during `retro`.
 - **`attempt-<N>/transcript.json`**: Complete structured JSON event tree containing all tool invocations, inputs, file operations, permissions, and duration.
 - **`attempt-<N>/transcript.md`**: Full raw Markdown transcript for human deep dives.
@@ -277,39 +277,40 @@ Each execution stores structured artifacts under `.factory/runs/<run-id>/`:
 - **`implementation-notes.md`**: Standalone clean Markdown implementation summary (acceptance-criteria test mapping, Before/After evidence, Door & Blast Radius, and tested edge cases) extracted from the builder's response when the `build` stage completes. Non-build stages, or build responses without an `### Implementation Summary`, do not produce it.
 
 Every completed non-dry-run execution with at least one attempt refreshes the run directory pointer, regardless of stage:
-- **`.factory/runs/latest`**: Symlink to the newest run directory (all stages).
+- **`<runs-dir>/latest`**: Symlink to the newest run directory (all stages).
 
-Stage-specific pointers surface the newest report or notes without scanning run IDs:
-- **`.factory/latest-report.md`**: Symlink to `runs/<run-id>/report.md` (or a direct copy when the platform refuses symlinks), written for `review` runs.
-- **`.factory/latest-build-notes.md`**: Symlink to `runs/<run-id>/implementation-notes.md` (or a direct copy when the platform refuses symlinks), written for `build` runs.
+Stage-specific pointers surface the newest report or notes without scanning run IDs. They live inside `<runs-dir>` and are scoped per issue and/or branch so notes from unrelated runs cannot leak into a review:
+- **`<runs-dir>/latest-report-issue-<n>.md`** / **`latest-report-branch-<slug>.md`**: Symlinks to `<run-id>/report.md` (or a direct copy when the platform refuses symlinks), written for `review` runs. Unscoped `latest-report.md` is used only when neither issue nor branch is known.
+- **`<runs-dir>/latest-build-notes-issue-<n>.md`** / **`latest-build-notes-branch-<slug>.md`**: Symlinks to `<run-id>/implementation-notes.md` (or a direct copy when the platform refuses symlinks), written for `build` runs. An issue build on `factory/issue-<n>` updates both its issue and branch pointers; unscoped `latest-build-notes.md` is used only when neither issue nor branch is known.
+- Standalone `acp-factory review` only injects prior build notes when the backing build run records the same branch and (when both sides have one) the same `head_sha`, so earlier commits or unrelated branches never attach stale notes.
 
 ```bash
-cat .factory/runs/latest/report.md
+cat <runs-dir>/latest/report.md
 # or
-cat .factory/latest-report.md
+cat <runs-dir>/latest-report-issue-42.md
 
-cat .factory/runs/latest/implementation-notes.md
+cat <runs-dir>/latest/implementation-notes.md
 # or
-cat .factory/latest-build-notes.md
+cat <runs-dir>/latest-build-notes-issue-42.md
 ```
 
 You can easily query and analyze transcripts using `jq`:
 
 ```bash
 # Quick attempt summary (duration, stop reason, tool count, tokens):
-jq '.summary' .factory/runs/<run-id>/attempt-1/transcript.summary.json
+jq '.summary' <runs-dir>/<run-id>/attempt-1/transcript.summary.json
 
 # List all tool calls with status and title:
-jq '.tool_calls[] | {title: .title, status: .status}' .factory/runs/<run-id>/attempt-1/transcript.json
+jq '.tool_calls[] | {title: .title, status: .status}' <runs-dir>/<run-id>/attempt-1/transcript.json
 
 # Find failed tool calls:
-jq '.tool_calls[] | select(.status != "completed")' .factory/runs/<run-id>/attempt-1/transcript.json
+jq '.tool_calls[] | select(.status != "completed")' <runs-dir>/<run-id>/attempt-1/transcript.json
 
 # Calculate tool frequencies (tool economy):
-jq '.tool_calls | group_by(.title) | map({tool: .[0].title, count: length})' .factory/runs/<run-id>/attempt-1/transcript.json
+jq '.tool_calls | group_by(.title) | map({tool: .[0].title, count: length})' <runs-dir>/<run-id>/attempt-1/transcript.json
 
 # List unique files touched during the turn:
-jq '.file_operations | map(.path) | unique' .factory/runs/<run-id>/attempt-1/transcript.summary.json
+jq '.file_operations | map(.path) | unique' <runs-dir>/<run-id>/attempt-1/transcript.summary.json
 ```
 
 ### C. The 7 Retrospective Categories
