@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import re
 import shlex
 import tomllib
 from pathlib import Path
@@ -408,6 +411,58 @@ def discover_fleet_config(fleet_config_path: Path | None = None) -> FleetConfig 
     return None
 
 
+def _normalize_runs_dir(raw: str | Path, workspace: Path) -> Path:
+    """Expand and anchor an explicit runs directory at the main repository root."""
+    candidate = Path(str(raw).strip()).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    # Function-local import: acp_factory.runner re-exports loop.py, which imports
+    # this module, so a top-level import would create a circular dependency.
+    from .runner.worktree import resolve_main_repo_root
+
+    return (resolve_main_repo_root(workspace) / candidate).resolve()
+
+
+def _default_runs_dir(workspace: Path) -> Path:
+    """Return the repo-scoped XDG data directory used when no runs_dir is configured."""
+    # Function-local import to avoid the config -> runner -> loop -> config cycle.
+    from .runner.worktree import resolve_main_repo_root
+
+    xdg_raw = os.environ.get("XDG_DATA_HOME", "").strip()
+    xdg_home = Path(xdg_raw).expanduser() if xdg_raw else None
+    data_home = (
+        xdg_home
+        if xdg_home is not None and xdg_home.is_absolute()
+        else Path.home() / ".local" / "share"
+    )
+
+    main_root = resolve_main_repo_root(workspace)
+    slug = re.sub(r"[^a-z0-9._-]+", "-", main_root.name.lower()).strip("-._") or "repo"
+    digest = hashlib.sha256(str(main_root).encode("utf-8")).hexdigest()[:12]
+    return (data_home / "acp-factory" / "runs" / f"{slug}-{digest}").resolve()
+
+
+def resolve_runs_dir(
+    workspace: Path,
+    *,
+    runs_dir: str | Path | None = None,
+) -> Path:
+    """Resolve the directory that stores run artifacts for ``workspace``.
+
+    Precedence (highest first): the ``FACTORY_RUNS_DIR`` environment variable,
+    the explicit ``runs_dir`` argument, then a repo-scoped directory under the
+    XDG data home. Blank values are treated as unset. Explicit relative paths
+    anchor at the main repository root so linked worktrees share one bucket.
+    This function performs no filesystem writes.
+    """
+    env_runs_dir = os.environ.get("FACTORY_RUNS_DIR", "").strip()
+    if env_runs_dir:
+        return _normalize_runs_dir(env_runs_dir, workspace)
+    if runs_dir is not None and str(runs_dir).strip():
+        return _normalize_runs_dir(runs_dir, workspace)
+    return _default_runs_dir(workspace)
+
+
 class FactoryConfig(BaseModel):
     """Top-level configuration for an acp-factory run."""
 
@@ -417,6 +472,14 @@ class FactoryConfig(BaseModel):
         description=(
             "Optional path to external AI resources catalog (agents/, prompts/, skills/). "
             "Can also be provided via the FACTORY_RESOURCES_DIR environment variable."
+        ),
+    )
+    runs_dir: str | None = Field(
+        default=None,
+        description=(
+            "Optional directory for run artifacts. Relative paths anchor at the main "
+            "repository root. FACTORY_RUNS_DIR takes precedence; when unset, a repo-scoped "
+            "directory under the XDG data home is used."
         ),
     )
     resource_dirs: list[str] = Field(
@@ -503,6 +566,14 @@ class FactoryConfig(BaseModel):
             resource_dirs=self.resource_dirs,
             config_dir=self._config_dir,
         )
+
+    def resolve_runs_dir(self, workspace: Path) -> Path:
+        """Return the resolved run-artifact directory for ``workspace``.
+
+        Delegates to the module-level :func:`resolve_runs_dir`, honoring the
+        ``FACTORY_RUNS_DIR`` environment variable before ``self.runs_dir``.
+        """
+        return resolve_runs_dir(workspace, runs_dir=self.runs_dir)
 
     @property
     def effective_max_review_rounds(self) -> int:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -861,3 +863,310 @@ def test_prompt_resolution_prefers_local_factory_and_case_insensitive(
         "retro.md", config_dir=factory_dir, workspace=tmp_path
     )
     assert res_short == "Local Retro Prompt"
+
+
+# ---------------------------------------------------------------------------
+# External, repo-scoped runs_dir resolution (issue #74)
+# ---------------------------------------------------------------------------
+
+
+def _isolate_runs_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Clear runs-related env vars and pin HOME to a temporary directory."""
+    monkeypatch.delenv("FACTORY_RUNS_DIR", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _make_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    _git(path, "init", "-q")
+    _git(path, "config", "user.email", "test@example.com")
+    _git(path, "config", "user.name", "Test User")
+    (path / "tracked.txt").write_text("content\n", encoding="utf-8")
+    _git(path, "add", "tracked.txt")
+    _git(path, "commit", "-qm", "init")
+    return path.resolve()
+
+
+def _make_worktree(repo: Path, worktree: Path) -> Path:
+    _git(repo, "worktree", "add", "-q", "-b", "test-branch", str(worktree))
+    return worktree.resolve()
+
+
+@pytest.mark.parametrize("suffix", [".toml", ".yaml"])
+def test_runs_dir_config_parsing(tmp_path: Path, suffix: str) -> None:
+    """AC-1: runs_dir parses from TOML/YAML and defaults to None."""
+    config_file = tmp_path / f"config{suffix}"
+    body = 'version: "1"\nruns_dir: ".factory/runs"\n'
+    if suffix == ".toml":
+        body = 'version = "1"\nruns_dir = ".factory/runs"\n'
+    config_file.write_text(body, encoding="utf-8")
+
+    assert FactoryConfig.from_file(config_file).runs_dir == ".factory/runs"
+    assert FactoryConfig().runs_dir is None
+
+
+@pytest.mark.parametrize("bad_value", [1, 1.5, True, ["a"], {"a": 1}])
+def test_runs_dir_rejects_non_string_values(bad_value: Any) -> None:
+    """AC-1: non-string, non-None runs_dir values are rejected explicitly."""
+    with pytest.raises(ValidationError):
+        FactoryConfig(runs_dir=bad_value)
+
+
+def test_runs_dir_precedence_env_over_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: FACTORY_RUNS_DIR wins over FactoryConfig.runs_dir."""
+    from acp_factory.config import resolve_runs_dir
+
+    _isolate_runs_env(monkeypatch, tmp_path)
+    env_dir = tmp_path / "env-runs"
+    monkeypatch.setenv("FACTORY_RUNS_DIR", str(env_dir))
+    config = FactoryConfig(runs_dir=str(tmp_path / "config-runs"))
+
+    assert resolve_runs_dir(tmp_path, runs_dir=config.runs_dir) == env_dir.resolve()
+    assert config.resolve_runs_dir(tmp_path) == env_dir.resolve()
+
+
+@pytest.mark.parametrize("blank_env", [None, "", "   "])
+def test_runs_dir_blank_env_falls_back_to_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blank_env: str | None,
+) -> None:
+    """AC-1: an unset/blank FACTORY_RUNS_DIR falls through to the config value."""
+    from acp_factory.config import resolve_runs_dir
+
+    _isolate_runs_env(monkeypatch, tmp_path)
+    if blank_env is not None:
+        monkeypatch.setenv("FACTORY_RUNS_DIR", blank_env)
+    config_dir = tmp_path / "config-runs"
+
+    result = resolve_runs_dir(tmp_path, runs_dir=str(config_dir))
+
+    assert result == config_dir.resolve()
+
+
+@pytest.mark.parametrize("blank_config", [None, "", "   "])
+def test_runs_dir_blank_config_falls_back_to_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blank_config: str | None,
+) -> None:
+    """AC-1: a None/blank config value falls through to the XDG default."""
+    from acp_factory.config import resolve_runs_dir
+
+    home = _isolate_runs_env(monkeypatch, tmp_path)
+
+    result = resolve_runs_dir(tmp_path, runs_dir=blank_config)
+
+    assert result.parent == (home / ".local" / "share" / "acp-factory" / "runs")
+    assert not result.exists()
+
+
+def test_runs_dir_xdg_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-2: absolute XDG_DATA_HOME anchors the external default path."""
+    from acp_factory.config import resolve_runs_dir
+
+    _isolate_runs_env(monkeypatch, tmp_path)
+    xdg_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = resolve_runs_dir(workspace)
+
+    assert result.parent == (xdg_home / "acp-factory" / "runs")
+    assert re.fullmatch(r"workspace-[0-9a-f]{12}", result.name)
+    assert not result.exists()
+    assert not result.is_relative_to(workspace.resolve())
+
+
+@pytest.mark.parametrize("xdg_value", [None, "", "   ", "relative/data"])
+def test_runs_dir_xdg_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    xdg_value: str | None,
+) -> None:
+    """AC-2: unset/blank/relative XDG_DATA_HOME falls back to ~/.local/share."""
+    from acp_factory.config import resolve_runs_dir
+
+    home = _isolate_runs_env(monkeypatch, tmp_path)
+    if xdg_value is not None:
+        monkeypatch.setenv("XDG_DATA_HOME", xdg_value)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = resolve_runs_dir(workspace)
+
+    assert result.parent == (home / ".local" / "share" / "acp-factory" / "runs")
+    assert re.fullmatch(r"workspace-[0-9a-f]{12}", result.name)
+    assert not result.exists()
+
+
+def test_runs_dir_xdg_isolates_same_basename_repos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: two distinct repos sharing a basename resolve to different buckets."""
+    from acp_factory.config import resolve_runs_dir
+
+    _isolate_runs_env(monkeypatch, tmp_path)
+    first = tmp_path / "one" / "project"
+    second = tmp_path / "two" / "project"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+
+    first_runs = resolve_runs_dir(first)
+    second_runs = resolve_runs_dir(second)
+
+    assert first_runs != second_runs
+    assert first_runs.name.startswith("project-")
+    assert second_runs.name.startswith("project-")
+
+
+@pytest.mark.parametrize(
+    ("basename", "expected_slug"),
+    [("My Repo!!", "my-repo"), ("!!!", "repo"), ("UPPER_case.name", "upper_case.name")],
+)
+def test_runs_dir_xdg_slug_sanitization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    basename: str,
+    expected_slug: str,
+) -> None:
+    """AC-2: repo slugs are sanitized, with an explicit `repo` fallback."""
+    from acp_factory.config import resolve_runs_dir
+
+    _isolate_runs_env(monkeypatch, tmp_path)
+    workspace = tmp_path / basename
+    workspace.mkdir()
+
+    result = resolve_runs_dir(workspace)
+
+    assert result.name.startswith(f"{expected_slug}-")
+    assert re.fullmatch(rf"{re.escape(expected_slug)}-[0-9a-f]{{12}}", result.name)
+
+
+def test_runs_dir_xdg_deterministic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: repeated resolution of the same repo is deterministic."""
+    from acp_factory.config import resolve_runs_dir
+
+    _isolate_runs_env(monkeypatch, tmp_path)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    assert resolve_runs_dir(workspace) == resolve_runs_dir(workspace)
+
+
+@pytest.mark.parametrize("relative", [".factory/runs", "../shared-runs", "runs"])
+def test_runs_dir_relative_worktree_consistency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    """AC-3: relative runs_dir anchors at the main repo from every location."""
+    from acp_factory.config import resolve_runs_dir
+
+    _isolate_runs_env(monkeypatch, tmp_path)
+    repo = _make_repo(tmp_path / "repo")
+    worktree = _make_worktree(repo, tmp_path / "repo" / ".worktrees" / "issue-74")
+    subdir = repo / "src"
+    subdir.mkdir()
+
+    expected = (repo / relative).resolve()
+    assert resolve_runs_dir(repo, runs_dir=relative) == expected
+    assert resolve_runs_dir(subdir, runs_dir=relative) == expected
+    assert resolve_runs_dir(worktree, runs_dir=relative) == expected
+
+
+@pytest.mark.parametrize("env_value", ["{abs}", "relative-runs"])
+def test_runs_dir_env_worktree_consistency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_value: str
+) -> None:
+    """AC-3: FACTORY_RUNS_DIR resolves identically from main repo and worktree."""
+    from acp_factory.config import FactoryConfig, resolve_runs_dir
+
+    _isolate_runs_env(monkeypatch, tmp_path)
+    repo = _make_repo(tmp_path / "repo")
+    worktree = _make_worktree(repo, tmp_path / "repo" / ".worktrees" / "issue-74")
+    raw = str(tmp_path / "absolute-runs") if env_value == "{abs}" else env_value
+    monkeypatch.setenv("FACTORY_RUNS_DIR", raw)
+    expected = (
+        (tmp_path / "absolute-runs").resolve()
+        if env_value == "{abs}"
+        else (repo / raw).resolve()
+    )
+
+    assert resolve_runs_dir(repo) == expected
+    assert resolve_runs_dir(worktree) == expected
+    assert FactoryConfig().resolve_runs_dir(worktree) == expected
+
+
+def test_runs_dir_worktree_xdg_consistency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: the default XDG bucket is shared by main repo, subdir, and worktree."""
+    from acp_factory.config import resolve_runs_dir
+
+    home = _isolate_runs_env(monkeypatch, tmp_path)
+    repo = _make_repo(tmp_path / "repo")
+    worktree = _make_worktree(repo, tmp_path / "repo" / ".worktrees" / "issue-74")
+    subdir = repo / "src"
+    subdir.mkdir()
+
+    expected = resolve_runs_dir(repo)
+    assert expected.parent == (home / ".local" / "share" / "acp-factory" / "runs")
+    assert re.fullmatch(r"repo-[0-9a-f]{12}", expected.name)
+    assert resolve_runs_dir(subdir) == expected
+    assert resolve_runs_dir(worktree) == expected
+
+
+def test_runs_dir_config_relative_path_from_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a repo-local config's relative runs_dir anchors at the main repo."""
+    _isolate_runs_env(monkeypatch, tmp_path)
+    repo = _make_repo(tmp_path / "repo")
+    worktree = _make_worktree(repo, tmp_path / "repo" / ".worktrees" / "issue-74")
+    (repo / ".factory").mkdir()
+    (repo / ".factory" / "config.toml").write_text(
+        'version = "1"\nruns_dir = ".factory/runs"\n', encoding="utf-8"
+    )
+
+    main_config = FactoryConfig.from_file(repo / ".factory" / "config.toml")
+    (worktree / ".factory").mkdir()
+    (worktree / ".factory" / "config.toml").write_text(
+        'version = "1"\nruns_dir = ".factory/runs"\n', encoding="utf-8"
+    )
+    worktree_config = FactoryConfig.from_file(worktree / ".factory" / "config.toml")
+
+    assert main_config.resolve_runs_dir(repo) == (repo / ".factory" / "runs").resolve()
+    assert (
+        worktree_config.resolve_runs_dir(worktree)
+        == (repo / ".factory" / "runs").resolve()
+    )
+
+
+def test_config_import_does_not_trigger_runner_cycle() -> None:
+    """AC-4: importing acp_factory.config works in a fresh interpreter."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; "
+            "from acp_factory.config import FactoryConfig, resolve_runs_dir; "
+            "print(resolve_runs_dir(Path('.')))",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

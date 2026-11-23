@@ -65,6 +65,17 @@ uv tool install -e .
 
 Persona, prompt, and skill paths in a config file resolve relative to that config file's directory, so a user-level config can reference shared assets without copying them into every repository. Fleet runs intentionally skip the user-level fallback so bare target repos never inherit the operator's personal `pre`/`checks` settings.
 
+Run artifacts are stored outside the workspace. `runs_dir` (top-level) selects the run-artifact directory, and `FACTORY_RUNS_DIR` takes precedence over it. Relative values anchor at the main repository root, so the main checkout and `.worktrees/issue-*` worktrees share one directory. When both are unset, artifacts go to a repo-scoped XDG data directory:
+
+```text
+${XDG_DATA_HOME:-~/.local/share}/acp-factory/runs/<repo-slug>-<sha256[:12]>
+```
+
+```toml
+version = "1"
+runs_dir = ".factory/runs"   # overridden by FACTORY_RUNS_DIR when set
+```
+
 Example `~/.acp-factory/config.toml`:
 
 ```toml
