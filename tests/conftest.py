@@ -23,6 +23,8 @@ def _isolate_run_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     ``test_config``'s ``_isolate_runs_env`` helper can still ``mkdir`` it.
     """
     monkeypatch.delenv("FACTORY_RUNS_DIR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("CLICOLOR_FORCE", raising=False)
     xdg_home = tmp_path / "xdg-data"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

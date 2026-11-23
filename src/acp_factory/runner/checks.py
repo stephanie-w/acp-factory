@@ -108,6 +108,9 @@ DEFAULT_HOST_ENV_STRIP: tuple[str, ...] = (
     "GEM_HOME",
     "GEM_PATH",
     "RUBYOPT",
+    # Terminal / color forcing (Rich treats any non-empty FORCE_COLOR, even "0", as truthy)
+    "FORCE_COLOR",
+    "CLICOLOR_FORCE",
 )
 
 # Case-insensitive patterns identifying host credentials that must never leak
@@ -140,7 +143,6 @@ DEFAULT_LOW_NOISE_ENV: dict[str, str] = {
     "NO_COLOR": "1",
     "TERM": "dumb",
     "CLICOLOR": "0",
-    "FORCE_COLOR": "0",
     "GIT_PAGER": "cat",
     "PAGER": "cat",
     "UV_NO_PROGRESS": "1",

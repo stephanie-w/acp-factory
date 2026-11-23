@@ -990,6 +990,8 @@ def test_build_workspace_env_injects_low_noise_and_ripgrep_defaults(
         "TERM": "xterm-256color",
         "PAGER": "less",
         "PATH": "/usr/bin",
+        "FORCE_COLOR": "1",
+        "CLICOLOR_FORCE": "1",
     }
     with patch.dict("os.environ", mock_env, clear=True):
         env = build_workspace_env(tmp_path)
@@ -997,7 +999,8 @@ def test_build_workspace_env_injects_low_noise_and_ripgrep_defaults(
     assert env["NO_COLOR"] == "1"
     assert env["TERM"] == "dumb"
     assert env["CLICOLOR"] == "0"
-    assert env["FORCE_COLOR"] == "0"
+    assert "FORCE_COLOR" not in env
+    assert "CLICOLOR_FORCE" not in env
     assert env["GIT_PAGER"] == "cat"
     assert env["PAGER"] == "cat"
     assert env["UV_NO_PROGRESS"] == "1"
