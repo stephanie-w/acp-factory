@@ -7,6 +7,7 @@ import os
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -531,7 +532,7 @@ async def _start_client_with_handshake(
     tmp_path: Path,
     thought_level: str | None,
     *,
-    options: list[object] | None,
+    options: list[Any] | None,
     cached_options: list[object] | None = None,
     conn: SimpleNamespace | None = None,
     agent_setter: object | None = None,
