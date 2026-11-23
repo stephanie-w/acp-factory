@@ -5,11 +5,16 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from acp_factory.config import AgentConfig, FactoryConfig, GuardrailsConfig
+from acp_factory.config import (
+    AgentConfig,
+    CheckConfig,
+    FactoryConfig,
+    GuardrailsConfig,
+)
 from acp_factory.runner.guardrails import (
     is_command_safe,
     is_path_contained,
@@ -907,3 +912,356 @@ def test_guardrails_main_blocked_paths(tmp_path: Path) -> None:
     ):
         guardrails_main([])
     assert exc.value.code == 1
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["external", "workspace_relative", "symlink", "under_allowed_paths"],
+)
+def test_runs_dir_path_denied_for_restricted_stage(tmp_path: Path, layout: str) -> None:
+    """AC-1: deny_runs blocks every route into a resolved runs_dir."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    allowed_paths: list[str | Path] | None
+    if layout == "external":
+        runs_dir = tmp_path / "external-runs"
+        target = runs_dir / "latest" / "transcript.md"
+        allowed_paths = None
+    elif layout == "workspace_relative":
+        runs_dir = ws / ".custom-runs"
+        target = runs_dir / "run-1" / "transcript.md"
+        allowed_paths = None
+    elif layout == "symlink":
+        runs_dir = tmp_path / "external-runs"
+        target = runs_dir / "latest" / "transcript.md"
+        allowed_paths = None
+    else:
+        runs_dir = ws / "allowed-root" / "runs"
+        target = runs_dir / "latest" / "transcript.md"
+        allowed_paths = [ws / "allowed-root"]
+    target.parent.mkdir(parents=True)
+    target.touch()
+
+    probe = target
+    if layout == "symlink":
+        probe = ws / "linked-runs"
+        probe.symlink_to(runs_dir, target_is_directory=True)
+        probe = probe / "latest" / "transcript.md"
+
+    safe, reason = is_path_contained(
+        probe,
+        ws,
+        is_read=True,
+        deny_runs=True,
+        runs_dir=runs_dir,
+        allowed_paths=allowed_paths,
+    )
+
+    assert safe is False
+    assert str(runs_dir.resolve()) in (reason or "")
+
+
+def test_runs_dir_allow_runs_is_read_only_for_retro(tmp_path: Path) -> None:
+    """AC-1: allow_runs grants reads but never writes inside runs_dir."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    runs_dir = tmp_path / "external-runs"
+    transcript = runs_dir / "latest" / "attempt-1" / "transcript.md"
+    transcript.parent.mkdir(parents=True)
+    transcript.touch()
+
+    assert is_path_contained(
+        transcript,
+        ws,
+        is_read=True,
+        deny_runs=False,
+        allow_runs=True,
+        runs_dir=runs_dir,
+    ) == (True, None)
+
+    safe, reason = is_path_contained(
+        transcript,
+        ws,
+        is_read=False,
+        deny_runs=False,
+        allow_runs=True,
+        runs_dir=runs_dir,
+    )
+    assert safe is False
+    assert str(transcript) in (reason or "") or "escapes workspace" in (reason or "")
+
+
+@pytest.mark.parametrize(
+    ("runs_dir_builder", "command"),
+    [
+        (
+            lambda tmp: tmp / "external-runs",
+            "cat {runs}/latest/attempt-1/transcript.md",
+        ),
+        (lambda tmp: tmp / "external-runs", 'jq . "$FACTORY_RUNS_DIR/latest/x.json"'),
+        (
+            lambda tmp: tmp / "external-runs",
+            "cat ${FACTORY_RUNS_DIR}/latest/x.json",
+        ),
+        (
+            lambda tmp: tmp / "external-runs",
+            "ls ~/.local/share/acp-factory/runs",
+        ),
+    ],
+    ids=["resolved_path", "factory_runs_dir_var", "braced_var", "xdg_bucket"],
+)
+def test_runs_dir_command_denied_for_restricted_stage(
+    tmp_path: Path, runs_dir_builder: Any, command: str
+) -> None:
+    """AC-2: deny_runs blocks shell references to the resolved runs_dir."""
+    runs_dir = runs_dir_builder(tmp_path)
+    cmd = command.replace("{runs}", str(runs_dir))
+
+    safe, reason = is_command_safe(cmd, deny_runs=True, runs_dir=runs_dir)
+
+    assert safe is False
+    assert str(runs_dir.resolve()) in (reason or "")
+    assert is_command_safe(cmd, deny_runs=False, runs_dir=runs_dir) == (True, None)
+
+
+def test_runs_dir_command_tilde_form_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a runs_dir under $HOME is also blocked through its ``~`` form."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+
+    safe, reason = is_command_safe(
+        "cat ~/runs/latest/transcript.md", deny_runs=True, runs_dir=runs_dir
+    )
+
+    assert safe is False
+    assert str(runs_dir.resolve()) in (reason or "")
+
+
+def test_runs_dir_command_sibling_prefix_allowed(tmp_path: Path) -> None:
+    """AC-2: boundary checks keep look-alike sibling directories readable."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+
+    for probe in (
+        f"cat {runs_dir}-other/notes.txt",
+        f"cat {runs_dir}other/notes.txt",
+        f"cat /mnt{runs_dir}/notes.txt",
+    ):
+        assert is_command_safe(probe, deny_runs=True, runs_dir=runs_dir) == (True, None)
+
+
+@pytest.mark.parametrize("blank_runs_dir", ["", "   ", None])
+def test_blank_runs_dir_disables_isolation(blank_runs_dir: str | None) -> None:
+    """AC-2: blank runs_dir values are treated as unset, not as the CWD."""
+    assert is_command_safe(
+        "cat /tmp/anything/notes.txt",
+        deny_runs=True,
+        runs_dir=blank_runs_dir,
+    ) == (True, None)
+
+
+def test_guardrails_main_runs_dir_flags(tmp_path: Path) -> None:
+    """AC-3: --deny-runs and --allow-runs gate runs_dir read/write access."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    runs_dir = tmp_path / "external-runs"
+    transcript = runs_dir / "latest" / "attempt-1" / "transcript.md"
+    transcript.parent.mkdir(parents=True)
+    transcript.touch()
+
+    def run(env: dict[str, str], argv: list[str]) -> int:
+        with (
+            patch.dict("os.environ", env, clear=True),
+            pytest.raises(SystemExit) as exc,
+        ):
+            guardrails_main(argv)
+        assert isinstance(exc.value.code, int)
+        return exc.value.code
+
+    deny_argv = ["--deny-runs", "--runs-dir", str(runs_dir)]
+    read_env = {
+        "ACPTERM_PERMISSION_KIND": "read",
+        "ACPTERM_PERMISSION_PATH": str(transcript),
+        "ACPTERM_CWD": str(ws),
+    }
+    execute_env = {
+        "ACPTERM_PERMISSION_KIND": "execute",
+        "ACPTERM_PERMISSION_TITLE": f"jq . {transcript}",
+        "ACPTERM_CWD": str(ws),
+    }
+    assert run(read_env, deny_argv) == 1
+    assert run(execute_env, deny_argv) == 1
+
+    allow_argv = ["--allow-runs", "--runs-dir", str(runs_dir)]
+    assert run(read_env, allow_argv) == 0
+    assert run({**read_env, "ACPTERM_PERMISSION_KIND": "edit"}, allow_argv) == 1
+
+
+@pytest.mark.parametrize(
+    ("client_kwargs", "expected_present", "expected_absent"),
+    [
+        (
+            {"deny_runs": True},
+            ["--deny-runs", '--runs-dir "{runs}"'],
+            ["--allow-runs", '--allow-path "{runs}"'],
+        ),
+        (
+            {"allow_runs": True},
+            ["--allow-runs", '--runs-dir "{runs}"'],
+            ["--deny-runs", '--allow-path "{runs}"'],
+        ),
+    ],
+    ids=["restricted_stage", "retro_stage"],
+)
+async def test_factory_acp_client_runs_dir_hook_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    client_kwargs: dict[str, Any],
+    expected_present: list[str],
+    expected_absent: list[str],
+) -> None:
+    """AC-4: hook command renders deny/allow runs_dir flags without allow-path."""
+    from acp_factory.acp import client as client_mod
+
+    captured_hooks: list[Any] = []
+
+    class FakeAgent:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args
+            self.session_id = None
+            captured_hooks.extend(cast(list[Any], kwargs.get("permission_hooks", [])))
+
+        async def start(self, **kwargs: object) -> None:
+            _ = kwargs
+
+    monkeypatch.setattr(client_mod, "ACPAgent", FakeAgent)
+    monkeypatch.setattr(
+        client_mod,
+        "resolve_factory_agent_command",
+        lambda _cfg: ["python3", "-c", "pass"],
+    )
+    runs_dir = tmp_path / "external-runs"
+
+    client = client_mod.FactoryACPClient(
+        workspace=tmp_path,
+        agent_config=AgentConfig(name="opencode"),
+        guardrails=GuardrailsConfig(enabled=True),
+        runs_dir=runs_dir,
+        **client_kwargs,
+    )
+    await client.start()
+
+    assert client.runs_dir == runs_dir.resolve()
+    hook_run = captured_hooks[0].run
+    for fragment in expected_present:
+        assert fragment.format(runs=runs_dir.resolve()) in hook_run
+    for fragment in expected_absent:
+        assert fragment.format(runs=runs_dir.resolve()) not in hook_run
+
+
+class _RecordingClient:
+    """Minimal ACP client stand-in capturing constructor kwargs."""
+
+    captured: list[dict[str, object]] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        _ = args
+        type(self).captured.append(kwargs)
+        from acp_factory.acp.client import TurnResult
+        from acp_factory.acp.events import TurnSummary
+
+        self._turn_result = TurnResult(
+            stop_reason="end_turn",
+            summary=TurnSummary(
+                prompt="",
+                response_text="Done.\nSTATUS: RETRO_COMPLETE",
+                thought_text="",
+                stop_reason="end_turn",
+                duration_seconds=0.01,
+                tool_call_count=0,
+            ),
+        )
+        self.tracker = AsyncMock()
+        self.tracker.history = []
+
+    async def __aenter__(self) -> _RecordingClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+    async def send_prompt(self, prompt: str, **_kwargs: object) -> Any:
+        return self._turn_result
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_deny", "expected_allow"),
+    [("spec", True, False), ("retro", False, True), (None, False, False)],
+    ids=["non_retro", "retro", "standalone"],
+)
+async def test_run_factory_client_wires_runs_dir(
+    tmp_path: Path, stage: str | None, expected_deny: bool, expected_allow: bool
+) -> None:
+    """AC-4: run_factory passes resolved runs_dir plus deny/allow flags."""
+    from acp_factory.runner.loop import run_factory
+
+    runs_dir = tmp_path / "external-runs"
+    cfg = FactoryConfig(
+        task="Summarize the run",
+        active_stage=stage,
+        runs_dir=str(runs_dir),
+    )
+    _RecordingClient.captured.clear()
+
+    with patch("acp_factory.runner.loop.FactoryACPClient", _RecordingClient):
+        await run_factory(cfg, tmp_path)
+
+    kwargs = _RecordingClient.captured[0]
+    assert kwargs["runs_dir"] == runs_dir.resolve()
+    assert kwargs["deny_runs"] is expected_deny
+    assert kwargs["allow_runs"] is expected_allow
+
+
+async def test_review_check_client_uses_runs_dir(tmp_path: Path) -> None:
+    """AC-4: dedicated review check sub-clients inherit runs_dir isolation."""
+    from acp_factory.acp.client import FactoryACPClient, TurnResult
+    from acp_factory.acp.events import TurnSummary
+    from acp_factory.runner.checks import run_single_check
+
+    class FakeReviewClient(_RecordingClient):
+        async def send_prompt(self, prompt: str, **_kwargs: object) -> TurnResult:
+            return TurnResult(
+                stop_reason="end_turn",
+                summary=TurnSummary(
+                    prompt=prompt,
+                    response_text="Reviewed.\nVERDICT: PASS",
+                    thought_text="",
+                    stop_reason="end_turn",
+                    duration_seconds=0.01,
+                    tool_call_count=0,
+                ),
+            )
+
+    runs_dir = tmp_path / "external-runs"
+    outer = FactoryACPClient(
+        workspace=tmp_path,
+        agent_config=AgentConfig(name="opencode"),
+        resource_dirs=[],
+        discover_apm_resources=False,
+        silent=True,
+        runs_dir=runs_dir,
+    )
+    check = CheckConfig(
+        name="Guardrail Review", prompt="Check guardrails", model="review-model"
+    )
+
+    with patch("acp_factory.acp.client.FactoryACPClient", FakeReviewClient):
+        result = await run_single_check(check, tmp_path, acp_client=outer)
+
+    assert result.passed is True
+    kwargs = FakeReviewClient.captured[-1]
+    assert kwargs["runs_dir"] == runs_dir.resolve()
+    assert kwargs["deny_runs"] is True

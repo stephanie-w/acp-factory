@@ -577,6 +577,51 @@ def _is_spill_path(target_resolved: Path) -> bool:
     return bool(relative.parts) and relative.parts[0].startswith(_SPILL_DIR_PREFIX)
 
 
+_FACTORY_RUNS_DIR_CMD_RE = re.compile(r"\$\{?FACTORY_RUNS_DIR\}?", re.IGNORECASE)
+
+# Default external runs bucket segment: ``$XDG_DATA_HOME/acp-factory/runs/<slug>-<hash>``.
+_XDG_RUNS_BUCKET = "acp-factory/runs"
+
+
+def _resolve_runs_dir(runs_dir: str | Path | None) -> Path | None:
+    """Resolve a configured runs directory, treating blank values as unset."""
+    if runs_dir is None or not str(runs_dir).strip():
+        return None
+    try:
+        return Path(runs_dir).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _command_references_runs_dir(cmd_str: str, runs_dir_resolved: Path) -> bool:
+    """Return True if *cmd_str* names the resolved runs_dir or its default bucket."""
+    if _FACTORY_RUNS_DIR_CMD_RE.search(cmd_str):
+        return True
+    if _XDG_RUNS_BUCKET in cmd_str:
+        return True
+
+    candidates = [str(runs_dir_resolved)]
+    try:
+        home_resolved = Path.home().resolve()
+        if runs_dir_resolved.is_relative_to(home_resolved):
+            candidates.append(f"~/{runs_dir_resolved.relative_to(home_resolved)}")
+    except (OSError, RuntimeError):
+        pass
+
+    for candidate in candidates:
+        for match in re.finditer(re.escape(candidate), cmd_str):
+            preceding = cmd_str[match.start() - 1 : match.start()]
+            following = cmd_str[match.end() : match.end() + 1]
+            # A path-segment continuation means a sibling or parent directory
+            # (e.g. ``runs-other`` or ``/mnt/home/u/runs`` for ``/home/u/runs``).
+            if preceding and (preceding.isalnum() or preceding in "._-"):
+                continue
+            if following and (following.isalnum() or following in "._-"):
+                continue
+            return True
+    return False
+
+
 def _is_run_artifact_path(target_resolved: Path, ws_resolved: Path) -> bool:
     """Return True if target_resolved points inside .factory/runs or .factory/latest-* pointers."""
     factory_dir = ws_resolved / ".factory"
@@ -918,6 +963,8 @@ def is_path_contained(
     resources_dir: str | Path | None = None,
     resource_dirs: Sequence[str | Path] | None = None,
     deny_runs: bool = False,
+    allow_runs: bool = False,
+    runs_dir: str | Path | None = None,
 ) -> tuple[bool, str | None]:
     """Verify that a target file path is contained within the workspace or explicitly permitted paths."""
     if not target_path:
@@ -947,6 +994,22 @@ def is_path_contained(
     # can inspect omitted lines without exposing all of the system temp dir.
     if is_read and _is_spill_path(target_resolved):
         return True, None
+
+    # Run artifacts must be isolated before the workspace and allowlist checks so a
+    # runs_dir nested inside either boundary is still restricted.
+    runs_dir_resolved = _resolve_runs_dir(runs_dir)
+    if runs_dir_resolved is not None and (
+        target_resolved == runs_dir_resolved
+        or target_resolved.is_relative_to(runs_dir_resolved)
+    ):
+        if deny_runs:
+            return (
+                False,
+                f"Target path '{target_path}' references run artifacts directory "
+                f"'{runs_dir_resolved}', which is restricted for this stage",
+            )
+        if is_read and allow_runs:
+            return True, None
 
     # 1. Target is inside current workspace
     if target_resolved == ws_resolved or target_resolved.is_relative_to(ws_resolved):
@@ -1009,6 +1072,7 @@ def is_command_safe(
     custom_denied: list[str] | None = None,
     blocked_paths: list[str | Path] | None = None,
     deny_runs: bool = False,
+    runs_dir: str | Path | None = None,
     rg_available: bool | None = None,
     fd_available: bool | None = None,
     workspace: str | Path | None = None,
@@ -1022,6 +1086,17 @@ def is_command_safe(
         return (
             False,
             f"Command references '.factory/runs' or run artifacts, which are restricted for this stage: '{cmd_str}'",
+        )
+
+    runs_dir_resolved = _resolve_runs_dir(runs_dir)
+    if (
+        deny_runs
+        and runs_dir_resolved is not None
+        and _command_references_runs_dir(cmd_str, runs_dir_resolved)
+    ):
+        return (
+            False,
+            f"Command references run artifacts directory '{runs_dir_resolved}', which is restricted for this stage: '{cmd_str}'",
         )
 
     if _ENV_FILE_CMD_RE.search(cmd_str):
@@ -1115,6 +1190,17 @@ def main(argv: list[str] | None = None) -> None:
         default=False,
         help="Block access to .factory/runs and .factory/latest-* run artifacts",
     )
+    parser.add_argument(
+        "--runs-dir",
+        default=None,
+        help="Resolved runs directory for stage isolation or read-only retro access",
+    )
+    parser.add_argument(
+        "--allow-runs",
+        action="store_true",
+        default=False,
+        help="Allow read-only access to --runs-dir (used by retro stage)",
+    )
     args = parser.parse_args(argv)
 
     kind = os.environ.get("ACPTERM_PERMISSION_KIND", "").strip().lower()
@@ -1152,6 +1238,8 @@ def main(argv: list[str] | None = None) -> None:
             is_read=is_read,
             resource_dirs=res_dirs,
             deny_runs=args.deny_runs,
+            allow_runs=args.allow_runs,
+            runs_dir=args.runs_dir,
         )
         if not safe_path:
             print(f"[guardrails] DENIED: {path_reason}", file=sys.stderr)
@@ -1167,6 +1255,7 @@ def main(argv: list[str] | None = None) -> None:
             custom_denied=custom_denied,
             blocked_paths=blocked_paths,
             deny_runs=args.deny_runs,
+            runs_dir=args.runs_dir,
             workspace=cwd,
         )
         if not safe_cmd:

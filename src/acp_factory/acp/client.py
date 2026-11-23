@@ -95,6 +95,8 @@ class FactoryACPClient:
         keep_env: list[str] | set[str] | tuple[str, ...] | None = None,
         guardrails: GuardrailsConfig | None = None,
         deny_runs: bool = False,
+        runs_dir: Path | None = None,
+        allow_runs: bool = False,
         thought_max_chars: int | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
@@ -117,6 +119,8 @@ class FactoryACPClient:
         self.keep_env = keep_env
         self.guardrails = guardrails or GuardrailsConfig()
         self.deny_runs = deny_runs
+        self.runs_dir = runs_dir.resolve() if runs_dir is not None else None
+        self.allow_runs = allow_runs
         self.thought_max_chars = thought_max_chars
         self.applied_thought_level: str | None = None
 
@@ -175,6 +179,11 @@ class FactoryACPClient:
                 hook_cmd += f' --deny-cmd "{d}"'
             if self.deny_runs:
                 hook_cmd += " --deny-runs"
+                if self.runs_dir is not None:
+                    hook_cmd += f' --runs-dir "{self.runs_dir}"'
+            elif self.allow_runs and self.runs_dir is not None:
+                # Read-only run artifact access (retro); writes stay denied.
+                hook_cmd += f' --allow-runs --runs-dir "{self.runs_dir}"'
 
             hooks.append(
                 HookDefinition(
