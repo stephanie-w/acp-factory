@@ -1,7 +1,7 @@
 """Shared pytest fixtures.
 
 The autouse fixture below isolates run-artifact persistence for the whole suite so
-`run_factory`/`_persist_run_artifacts` never write into the developer's real
+`run_factory`/`RunArtifactStore.persist` never write into the developer's real
 `~/.local/share/acp-factory/runs/` when a test passes `tmp_path` as its workspace.
 """
 

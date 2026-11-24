@@ -1300,15 +1300,13 @@ def test_persist_run_artifacts_records_thought_level(tmp_path: Path) -> None:
     """AC-5: run.json records the resolved stage thought_level."""
     import json
 
-    from acp_factory.runner.loop import _persist_run_artifacts
+    from acp_factory.runner import RunArtifactStore
 
     (tmp_path / ".factory").mkdir()
     config = FactoryConfig(task="Test task", agent={"thought_level": "high"})
 
-    run_dir = _persist_run_artifacts(
-        tmp_path,
+    run_dir = RunArtifactStore(tmp_path, config).persist(
         "run-thought-level",
-        config,
         succeeded=True,
         attempts_used=1,
         total_duration=0.1,
