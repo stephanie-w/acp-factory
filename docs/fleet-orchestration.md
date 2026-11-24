@@ -125,7 +125,7 @@ Not all stages contend on `main`. `acp-factory next --fleet` applies a **stage-a
    - When `review` returns `STATUS: ACCEPTED`, the temporary findings section is **stripped** from `task.factory_block` so both the Issue Body specification and the Pull Request's `## Specification` remain clean, while the accepted review report is placed in the PR body.
    - `_merge_open_pr_feedback` also ingests the PR body's managed review section into `TaskContext.pr_review_body`, so the next `build` or `review` stage sees the latest findings under `## Latest PR Review Findings`.
 4. **Deterministic 3-Round Circuit Breaker**:
-   - If `review_round >= 3` (configurable via `max_review_rounds = 3`) and the verdict is still `REVISION_NEEDED`, [`parse_stage_verdict`](../src/acp_factory/task.py) deterministically transitions the issue to `factory:needs-human` (instead of `factory:build`) with an escalation banner explaining the remaining findings.
+   - If `review_round >= 3` (configurable via `max_review_rounds = 3`) and the verdict is still `REVISION_NEEDED`, [`parse_stage_verdict`](../src/acp_factory/verdict.py) deterministically transitions the issue to `factory:needs-human` (instead of `factory:build`) with an escalation banner explaining the remaining findings.
 
 ---
 

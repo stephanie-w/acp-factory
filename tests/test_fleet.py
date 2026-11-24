@@ -20,8 +20,8 @@ from acp_factory.task import (
     LABEL_REVIEW,
     LABEL_SPEC,
     TaskContext,
-    parse_stage_verdict,
 )
+from acp_factory.verdict import parse_stage_verdict
 
 
 def _task(number: int, *labels: str) -> TaskContext:

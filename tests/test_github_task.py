@@ -30,14 +30,11 @@ from acp_factory.task import (
     LABEL_SPEC,
     LABEL_SPEC_READY,
     IssueComment,
-    StageVerdict,
     TaskContext,
-    _clean_markdown_stage_body,
     clean_spec_block,
     extract_factory_findings,
     format_task_prompt_context,
     parse_factory_meta,
-    parse_stage_verdict,
     render_attribution_banner,
     render_issue_body,
     replace_factory_findings,
@@ -47,6 +44,11 @@ from acp_factory.task import (
     strip_attribution_banner,
     strip_factory_findings,
     strip_factory_meta,
+)
+from acp_factory.verdict import (
+    StageVerdict,
+    _clean_markdown_stage_body,
+    parse_stage_verdict,
 )
 
 
@@ -366,6 +368,16 @@ async def test_fetch_issue_pr_fallback_cases(
     assert task.pr_url == expected_pr_url
     assert [c.kind for c in task.comments] == ["issue_comment"]
     assert [c.body for c in task.comments] == ["Issue-side context."]
+
+
+def test_verdict_state_machine_lives_in_dedicated_module() -> None:
+    import acp_factory.task as task_module
+    import acp_factory.verdict as verdict_module
+
+    assert verdict_module.StageVerdict.__module__ == "acp_factory.verdict"
+    assert verdict_module.parse_stage_verdict.__module__ == "acp_factory.verdict"
+    assert not hasattr(task_module, "StageVerdict")
+    assert not hasattr(task_module, "parse_stage_verdict")
 
 
 def test_parse_stage_verdicts_across_pipeline() -> None:
@@ -1925,7 +1937,8 @@ def test_render_pr_body_with_review_edge_cases(
 
 def test_build_issue_pr_body_accepted_does_not_duplicate_review_report() -> None:
     from acp_factory.github import build_issue_pr_body
-    from acp_factory.task import extract_pr_review_section, parse_stage_verdict
+    from acp_factory.task import extract_pr_review_section
+    from acp_factory.verdict import parse_stage_verdict
 
     task = TaskContext(
         issue_number=42,

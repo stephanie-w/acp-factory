@@ -122,7 +122,8 @@ Before signaling completion, verify:
 - `runner/loop.py`: Core stage execution loop (`run_factory`, `run_issue_stage`, `run_fleet_next`, `run_branch_review`).
 - `runner/checks.py`: Sequential shell & agent review check runner (`$FACTORY_SKILLS_DIR`, `$FACTORY_RESPONSE_FILE`, read-only `gh` shim).
 - `runner/worktree.py`: Git worktree lifecycle (`.worktrees/issue-<id>`) and fleet checkout validation.
-- `task.py`: `TaskContext`, `<!-- factory:start/end -->` and `<!-- factory:meta -->` parsers, and `parse_stage_verdict`.
+- `task.py`: `TaskContext`, `<!-- factory:start/end -->` and `<!-- factory:meta -->` parsers, and markdown renderers.
+- `verdict.py`: `StageVerdict`, `parse_stage_verdict`, and the status/verdict state machine that maps stage responses to label transitions.
 - `github.py`: `gh` CLI wrappers, stage admission control, PR creation, and `--dry-run` plan builders.
 
 ### Runtime & Artifact Directories

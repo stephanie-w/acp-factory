@@ -14,7 +14,6 @@ from .config import resolve_runs_dir
 from .task import (
     ALL_FACTORY_STAGE_LABELS,
     LABEL_PR_READY,
-    StageVerdict,
     TaskContext,
     clean_spec_block,
     extract_pr_description_section,
@@ -25,6 +24,7 @@ from .task import (
     render_pr_description_section,
     strip_pr_review_section,
 )
+from .verdict import StageVerdict
 
 
 @dataclass
