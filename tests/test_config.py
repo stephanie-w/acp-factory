@@ -259,6 +259,66 @@ def test_builtin_skills_and_nested_apm_resolution(tmp_path: Path) -> None:
     assert custom_resolved == [agents_skill.resolve(), nested_apm_skill.resolve()]
 
 
+def test_scaffolded_stage_prose_comes_from_bundled_resources(
+    tmp_path: Path,
+) -> None:
+    """Scaffolded personas and prompts are the bundled catalog content, not inline copies."""
+    from typer.testing import CliRunner
+
+    from acp_factory import cli
+    from acp_factory.resources import load_bundled_text
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["init", "--multi-stage", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+
+    expected_files = {
+        ".factory/personas/triage.md": "agents/triage.agent.md",
+        ".factory/personas/architect.md": "agents/architect.agent.md",
+        ".factory/personas/implementer.md": "agents/implementer.agent.md",
+        ".factory/personas/reviewer.md": "agents/reviewer.agent.md",
+        ".factory/personas/security.md": "agents/security.agent.md",
+        ".factory/prompts/TRIAGE.md": "prompts/triage.md",
+        ".factory/prompts/SPEC.md": "prompts/spec.md",
+        ".factory/prompts/BUILD.md": "prompts/build.md",
+        ".factory/prompts/REVIEW.md": "prompts/review.md",
+        ".factory/prompts/SECURITY.md": "prompts/security.md",
+        ".factory/prompts/RETRO.md": "prompts/retro.md",
+    }
+    for scaffolded, bundled_source in expected_files.items():
+        content = (tmp_path / scaffolded).read_text(encoding="utf-8")
+        assert content == load_bundled_text(bundled_source)
+        assert content.endswith("\n")
+        assert not content.endswith("\n\n")
+
+    assert not hasattr(cli, "DEFAULT_PERSONAS")
+    assert not hasattr(cli, "DEFAULT_STAGE_PROMPTS")
+
+
+def test_scaffolded_init_writes_nothing_when_bundle_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing bundled resource aborts before any scaffolded file is written."""
+    from typer.testing import CliRunner
+
+    from acp_factory import cli
+
+    monkeypatch.setattr(
+        cli,
+        "_SCAFFOLD_PERSONAS",
+        {"triage.md": "agents/does-not-exist.agent.md"},
+    )
+
+    result = CliRunner().invoke(
+        cli.app, ["init", "--multi-stage", "--path", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "Failed to load bundled scaffold resources" in result.output
+    assert not (tmp_path / ".factory").exists()
+    assert not (tmp_path / "apm.yml").exists()
+
+
 def test_scaffolded_multi_stage_config_resolves_all_stages_and_skills(
     tmp_path: Path,
 ) -> None:

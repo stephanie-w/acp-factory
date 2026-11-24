@@ -1287,6 +1287,56 @@ async def test_branch_review_injects_only_matching_build_notes(
         assert "## Builder Implementation Notes" not in injected
 
 
+async def test_branch_review_fallback_uses_bundled_reviewer_resources(
+    tmp_path: Path,
+) -> None:
+    """Standalone review without a `review` stage loads its persona and prompt from the bundle."""
+    from acp_factory.resources import load_bundled_text
+
+    _runs_dir(tmp_path)
+    captured: list[FactoryConfig] = []
+
+    async def fake_run_factory(
+        config: FactoryConfig, workspace: Path, **kwargs: object
+    ) -> FactoryRunOutcome:
+        captured.append(config)
+        return FactoryRunOutcome(
+            succeeded=False,
+            exit_code=1,
+            attempts_used=1,
+            total_duration_seconds=0.0,
+        )
+
+    with (
+        patch(
+            "acp_factory.runner.loop.FactoryConfig.discover",
+            return_value=FactoryConfig(task="base"),
+        ),
+        patch("acp_factory.runner.loop.run_factory", new=fake_run_factory),
+        patch(
+            "acp_factory.runner.loop.get_head_sha",
+            new=AsyncMock(return_value="abc1234"),
+        ),
+        patch(
+            "acp_factory.runner.loop.is_worktree_clean",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "acp_factory.runner.worktree._run_git",
+            new=AsyncMock(return_value=(0, "subject", "")),
+        ),
+    ):
+        await run_branch_review(tmp_path, branch="feature", description="fix")
+
+    assert captured
+    cfg = captured[0]
+    reviewer_persona = load_bundled_text("agents/reviewer.agent.md").strip()
+    review_prompt = load_bundled_text("prompts/review.md").strip()
+    assert cfg.agent.persona == reviewer_persona
+    assert cfg.task.startswith(review_prompt)
+    assert "## Task Context" in cfg.task
+
+
 async def test_review_stage_skips_notes_owned_by_another_issue(
     tmp_path: Path,
 ) -> None:
