@@ -1006,7 +1006,8 @@ def test_build_workspace_env_injects_low_noise_and_ripgrep_defaults(
     assert env["UV_NO_PROGRESS"] == "1"
     assert env["PIP_PROGRESS_BAR"] == "off"
     assert env["npm_config_loglevel"] == "warn"
-    assert env["PYTEST_ADDOPTS"] == "-q --tb=short --no-header"
+    assert env["PYTEST_ADDOPTS"] == "--tb=short --no-header"
+    assert "-q" not in env["PYTEST_ADDOPTS"].split()
 
     rg_cfg_path = Path(env["RIPGREP_CONFIG_PATH"])
     assert rg_cfg_path.is_file()

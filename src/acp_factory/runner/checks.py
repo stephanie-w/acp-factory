@@ -150,7 +150,7 @@ DEFAULT_LOW_NOISE_ENV: dict[str, str] = {
     "npm_config_loglevel": "warn",
 }
 
-DEFAULT_PYTEST_ADDOPTS = "-q --tb=short --no-header"
+DEFAULT_PYTEST_ADDOPTS = "--tb=short --no-header"
 
 _RIPGREP_CONFIG_CONTENT = """\
 --max-columns=300
