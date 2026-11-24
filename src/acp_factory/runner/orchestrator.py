@@ -17,7 +17,7 @@ from ..config import FactoryConfig
 from ..github import DryRunPlan
 from ..ui.display import FactoryDisplay
 from ..verdict import StageVerdict
-from .artifacts import RunArtifactStore
+from .artifacts import RunArtifactStore, RunMetadata
 from .checks import CheckResult, run_checks_sequential, run_shell_command
 from .prompts import (
     EMPTY_OUTPUT_FAILURE_REASON,
@@ -163,13 +163,15 @@ async def run_factory(
                         check_history=[],
                         failure_reason=failure_reason,
                         usage=run_usage,
-                        issue_number=issue_number,
-                        issue_title=issue_title,
-                        repo_slug=repo_slug,
-                        branch=branch or wt_manager.branch_name,
-                        base_ref=base_ref,
-                        session_id=session_id,
-                        head_sha=head_sha,
+                        metadata=RunMetadata(
+                            issue_number=issue_number,
+                            issue_title=issue_title,
+                            repo_slug=repo_slug,
+                            branch=branch or wt_manager.branch_name,
+                            base_ref=base_ref,
+                            session_id=session_id,
+                            head_sha=head_sha,
+                        ),
                     )
                     ui.show_final_summary(
                         succeeded=False,
@@ -403,14 +405,16 @@ async def run_factory(
         turn_summaries=turn_summaries,
         turn_condensed=turn_condensed,
         last_response_text=last_response_text,
-        issue_number=issue_number,
-        issue_title=issue_title,
-        repo_slug=repo_slug,
-        branch=branch or wt_manager.branch_name,
-        base_ref=base_ref,
-        session_id=session_id,
-        session_title=session_title,
-        head_sha=head_sha,
+        metadata=RunMetadata(
+            issue_number=issue_number,
+            issue_title=issue_title,
+            repo_slug=repo_slug,
+            branch=branch or wt_manager.branch_name,
+            base_ref=base_ref,
+            session_id=session_id,
+            session_title=session_title,
+            head_sha=head_sha,
+        ),
     )
     report_path = (
         run_dir / "report.md"

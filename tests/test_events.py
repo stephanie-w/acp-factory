@@ -22,7 +22,7 @@ from acp_factory.acp.events import (
     _truncate_text,
 )
 from acp_factory.config import AgentConfig, FactoryConfig, resolve_runs_dir
-from acp_factory.runner import RunArtifactStore
+from acp_factory.runner import RunArtifactStore, RunMetadata
 from acp_factory.runner.loop import run_branch_review, run_issue_stage
 from acp_factory.runner.orchestrator import FactoryRunOutcome, run_factory
 from acp_factory.task import TaskContext
@@ -491,7 +491,7 @@ def test_persist_run_artifacts_json(tmp_path: Path) -> None:
         failure_reason=None,
         turn_summaries=[summary.to_dict()],
         turn_condensed=[summary.to_condensed_dict()],
-        head_sha="deadbeefcafe",
+        metadata=RunMetadata(head_sha="deadbeefcafe"),
     )
 
     assert run_dir is not None
@@ -1156,8 +1156,7 @@ def test_scoped_latest_artifact_pointers(tmp_path: Path) -> None:
         turn_transcripts=["# attempt"],
         check_history=[],
         failure_reason=None,
-        issue_number=12,
-        branch="factory/issue-12",
+        metadata=RunMetadata(issue_number=12, branch="factory/issue-12"),
         last_response_text=notes + "STATUS: DONE",
     )
     assert build_dir == runs_dir / "run-build"
@@ -1184,8 +1183,7 @@ def test_scoped_latest_artifact_pointers(tmp_path: Path) -> None:
         turn_transcripts=["# attempt"],
         check_history=[],
         failure_reason=None,
-        issue_number=12,
-        branch="factory/issue-12",
+        metadata=RunMetadata(issue_number=12, branch="factory/issue-12"),
         last_response_text="# Review Report\n\nVERDICT: ACCEPTED\n",
     )
     report_pointer = runs_dir / "latest-report-issue-12.md"

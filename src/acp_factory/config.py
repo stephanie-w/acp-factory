@@ -8,7 +8,7 @@ import re
 import shlex
 import tomllib
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, model_validator
@@ -280,6 +280,282 @@ class StageConfig(BaseModel):
         return data
 
 
+TransitionAction = Literal[
+    "none",
+    "update_issue_block",
+    "publish_pr",
+    "cleanup_worktree",
+]
+BlockMode = Literal[
+    "preserve",
+    "replace",
+    "append_section",
+    "findings",
+    "clear_findings",
+]
+
+
+class TransitionConfig(BaseModel):
+    """Declarative outcome rule mapping a stage status token to the next label and side-effect."""
+
+    label: str = Field(
+        description="Target GitHub label to apply when this transition fires."
+    )
+    action: TransitionAction = Field(
+        default="none",
+        description="Built-in orchestrator side-effect executed on transition.",
+    )
+    block_mode: BlockMode = Field(
+        default="preserve",
+        description="How to update the `<!-- factory:start/end -->` Issue Body block.",
+    )
+    section_title: str | None = Field(
+        default=None,
+        description=(
+            "Optional heading prefix used with `block_mode = 'append_section'` "
+            "(supports `{token}` formatting)."
+        ),
+    )
+    replace_existing: bool = Field(
+        default=False,
+        description=(
+            "When true with `block_mode = 'append_section'`, replace the block with "
+            "the headed section instead of appending after the existing block."
+        ),
+    )
+    max_rounds: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional round circuit-breaker cap (used with `block_mode = 'findings'`).",
+    )
+    on_max_rounds_label: str = Field(
+        default="factory:needs-human",
+        description="Fallback label when `max_rounds` is reached.",
+    )
+    summary: str = Field(
+        default="",
+        description="Optional human-readable transition summary template (supports `{token}`).",
+    )
+    status: str | None = Field(
+        default=None,
+        description="Optional normalized status name for StageVerdict.status (defaults to lowercased token).",
+    )
+    record_review_report: bool = Field(
+        default=False,
+        description="When true, populate StageVerdict.review_report with the cleaned stage output.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_labels(self) -> TransitionConfig:
+        if not self.label.strip():
+            raise ValueError("TransitionConfig.label must be a non-empty string.")
+        self.label = self.label.strip()
+        if not self.on_max_rounds_label.strip():
+            raise ValueError(
+                "TransitionConfig.on_max_rounds_label must be a non-empty string."
+            )
+        self.on_max_rounds_label = self.on_max_rounds_label.strip()
+        return self
+
+
+class FlowConfig(BaseModel):
+    """Declarative multi-stage workflow state machine over reusable stages."""
+
+    entry: str | None = Field(
+        default=None,
+        description=(
+            "Entry stage name for this flow. Required for custom flows; optional "
+            "when partially overriding a built-in preset (inherits preset entry)."
+        ),
+    )
+    transitions: dict[str, dict[str, TransitionConfig]] = Field(
+        default_factory=dict,
+        description="Per-stage mapping of uppercase status tokens (and optional 'DEFAULT') to transitions.",
+    )
+    open_questions_stages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Stages where an `## Open Questions` heading escalates to `NEEDS_HUMAN` "
+            "unless an explicit ready token (`SPEC_READY` or `READY`) is emitted."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_transition_tokens(
+        cls, data: dict[str, Any] | FlowConfig
+    ) -> dict[str, Any] | FlowConfig:
+        if not isinstance(data, dict):
+            return data
+        raw_transitions = data.get("transitions")
+        if isinstance(raw_transitions, dict):
+            normalized: dict[str, Any] = {}
+            for stage_name, token_map in raw_transitions.items():
+                if isinstance(token_map, dict):
+                    normalized[stage_name] = {
+                        str(tok).strip().upper(): cfg for tok, cfg in token_map.items()
+                    }
+                else:
+                    normalized[stage_name] = token_map
+            data = dict(data)
+            data["transitions"] = normalized
+        return data
+
+    @model_validator(mode="after")
+    def _validate_entry(self) -> FlowConfig:
+        if self.entry is not None:
+            if not self.entry.strip():
+                raise ValueError("FlowConfig.entry must be a non-empty stage name.")
+            self.entry = self.entry.strip()
+        return self
+
+
+def _merge_flow_override(base: FlowConfig, override: FlowConfig) -> FlowConfig:
+    """Deep-merge a partial `[flows.<builtin>]` override on top of a built-in preset."""
+    merged_transitions: dict[str, dict[str, TransitionConfig]] = {
+        stage: dict(tokens) for stage, tokens in base.transitions.items()
+    }
+    for stage, token_map in override.transitions.items():
+        if stage in merged_transitions:
+            merged_transitions[stage].update(token_map)
+        else:
+            merged_transitions[stage] = dict(token_map)
+    return FlowConfig(
+        entry=override.entry if override.entry is not None else base.entry,
+        transitions=merged_transitions,
+        open_questions_stages=(
+            list(override.open_questions_stages)
+            if "open_questions_stages" in override.model_fields_set
+            else list(base.open_questions_stages)
+        ),
+    )
+
+
+def _build_default_pr_flow() -> FlowConfig:
+    """Return the built-in 5-stage PR workflow matching the legacy hardcoded state machine 1:1."""
+    triage_escalate = TransitionConfig(
+        label="factory:needs-human",
+        action="update_issue_block",
+        block_mode="append_section",
+        section_title="## Triage Report (`{token}`)",
+        replace_existing=True,
+        summary="Triage requires human attention ({token})",
+    )
+    spec_escalate = TransitionConfig(
+        label="factory:needs-human",
+        action="update_issue_block",
+        block_mode="replace",
+        status="needs_human",
+        summary="Spec has open questions -> waiting for human answers in comments",
+    )
+    review_accept = TransitionConfig(
+        label="factory:pr-ready",
+        action="publish_pr",
+        block_mode="clear_findings",
+        status="accepted",
+        summary="Review accepted -> PR ready for Human Gate 2",
+        record_review_report=True,
+    )
+    review_escalate = TransitionConfig(
+        label="factory:needs-human",
+        action="update_issue_block",
+        block_mode="append_section",
+        section_title="## Review Escalation",
+        replace_existing=False,
+        status="needs_human",
+        summary="Review requires human decision",
+        record_review_report=True,
+    )
+    review_revise = TransitionConfig(
+        label="factory:build",
+        action="update_issue_block",
+        block_mode="findings",
+        max_rounds=3,
+        on_max_rounds_label="factory:needs-human",
+        status="revision_needed",
+        summary="Review requested revisions -> returning to factory:build",
+        record_review_report=True,
+    )
+    return FlowConfig(
+        entry="triage",
+        open_questions_stages=["spec"],
+        transitions={
+            "triage": {
+                "DUPLICATE": triage_escalate,
+                "TOO_BIG": triage_escalate,
+                "NEEDS_HUMAN": triage_escalate,
+                "NEEDS_INPUT": triage_escalate,
+                "STOP": triage_escalate,
+                "TRIVIAL": TransitionConfig(
+                    label="factory:spec-ready",
+                    action="update_issue_block",
+                    block_mode="append_section",
+                    section_title="## Triage Report (`TRIVIAL`)",
+                    replace_existing=True,
+                    status="trivial",
+                    summary=(
+                        "Triage fast-tracked (TRIVIAL) -> waiting for Human Gate 1 "
+                        "approval (factory:spec-ready)"
+                    ),
+                ),
+                "DEFAULT": TransitionConfig(
+                    label="factory:spec",
+                    action="update_issue_block",
+                    block_mode="append_section",
+                    section_title="## Triage Report (`OK`)",
+                    replace_existing=True,
+                    status="ok",
+                    summary="Triage passed -> ready for spec",
+                ),
+            },
+            "spec": {
+                "NEEDS_HUMAN": spec_escalate,
+                "NEEDS_INPUT": spec_escalate,
+                "OPEN_QUESTIONS": spec_escalate,
+                "DEFAULT": TransitionConfig(
+                    label="factory:spec-ready",
+                    action="update_issue_block",
+                    block_mode="replace",
+                    status="spec_ready",
+                    summary="Spec complete -> waiting for Human Gate 1 approval (factory:spec-ready)",
+                ),
+            },
+            "build": {
+                "DEFAULT": TransitionConfig(
+                    label="factory:review",
+                    action="none",
+                    block_mode="preserve",
+                    status="built",
+                    summary="",
+                ),
+            },
+            "review": {
+                "ACCEPTED": review_accept,
+                "PASS": review_accept,
+                "HUMAN_DECISION_NEEDED": review_escalate,
+                "NEEDS_HUMAN": review_escalate,
+                "STOP": review_escalate,
+                "DEFAULT": review_revise,
+            },
+            "done": {
+                "DEFAULT": TransitionConfig(
+                    label="factory:completed",
+                    action="cleanup_worktree",
+                    block_mode="preserve",
+                    status="completed",
+                    summary="",
+                ),
+            },
+        },
+    )
+
+
+DEFAULT_PR_FLOW: FlowConfig = _build_default_pr_flow()
+BUILTIN_FLOWS: dict[str, FlowConfig] = {
+    "pr": DEFAULT_PR_FLOW,
+}
+
+
 class BudgetConfig(BaseModel):
     """Execution budget guardrails to limit tokens, financial cost, and turns."""
 
@@ -503,6 +779,10 @@ class FactoryConfig(BaseModel):
     checks: list[CheckConfig] = Field(default_factory=list)
     named_checks: dict[str, CheckConfig] = Field(default_factory=dict)
     stages: dict[str, StageConfig] = Field(default_factory=dict)
+    flows: dict[str, FlowConfig] = Field(
+        default_factory=dict,
+        description="Optional [flows.<name>] declarative workflow definitions overriding or extending built-in flows.",
+    )
     active_stage: str | None = Field(default=None)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
@@ -581,6 +861,37 @@ class FactoryConfig(BaseModel):
         if self.fleet is not None and self.fleet.max_review_rounds is not None:
             return self.fleet.max_review_rounds
         return self.max_review_rounds
+
+    @model_validator(mode="after")
+    def _validate_custom_flow_entries(self) -> FactoryConfig:
+        """Require explicit `entry` on non-builtin custom flows."""
+        for flow_name, flow_cfg in self.flows.items():
+            if flow_name not in BUILTIN_FLOWS and flow_cfg.entry is None:
+                raise ValueError(
+                    f"Custom flow '{flow_name}' must specify a non-empty 'entry' stage."
+                )
+        return self
+
+    def effective_flows(self) -> dict[str, FlowConfig]:
+        """Return all available flows, merging built-in presets with partial or full overrides."""
+        merged = dict(BUILTIN_FLOWS)
+        for flow_name, flow_cfg in self.flows.items():
+            if flow_name in merged:
+                merged[flow_name] = _merge_flow_override(merged[flow_name], flow_cfg)
+            else:
+                merged[flow_name] = flow_cfg
+        return merged
+
+    def get_flow(self, flow_name: str = "pr") -> FlowConfig:
+        """Resolve a named flow from configured flows or built-in presets."""
+        key = flow_name.strip()
+        merged = self.effective_flows()
+        if key not in merged:
+            available = ", ".join(sorted(merged.keys()))
+            raise ValueError(
+                f"Unknown flow '{flow_name}'. Available flows: {available}"
+            )
+        return merged[key]
 
     def with_fleet_overlay(
         self, fleet_config_path: Path | None = None

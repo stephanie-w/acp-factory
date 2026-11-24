@@ -6,14 +6,9 @@ import re
 
 from pydantic import BaseModel
 
+from .config import DEFAULT_PR_FLOW, FlowConfig, TransitionAction
 from .task import (
-    LABEL_BUILD,
     LABEL_COMPLETED,
-    LABEL_NEEDS_HUMAN,
-    LABEL_PR_READY,
-    LABEL_REVIEW,
-    LABEL_SPEC,
-    LABEL_SPEC_READY,
     MAX_REVIEW_ROUNDS,
     _mask_code_blocks,
     parse_factory_meta,
@@ -32,6 +27,7 @@ class StageVerdict(BaseModel):
     target_label: str
     updated_factory_block: str
     summary: str = ""
+    action: TransitionAction = "none"
     publish_pr: bool = False
     review_report: str = ""
 
@@ -88,172 +84,207 @@ def _clean_markdown_stage_body(text: str) -> str:
     return trimmed.strip()
 
 
+def _stage_slug_from_label(label: str) -> str:
+    """Derive the metadata stage name from a `factory:<stage>` label."""
+    return label.removeprefix("factory:")
+
+
 def parse_stage_verdict(
     stage: str,
     response_text: str,
     current_factory_block: str = "",
     *,
     reviewed_sha: str | None = None,
-    max_review_rounds: int = MAX_REVIEW_ROUNDS,
+    max_review_rounds: int | None = None,
+    flow: FlowConfig | None = None,
 ) -> StageVerdict:
-    """Determine the next GitHub label and updated Issue Body factory block for a completed stage."""
+    """Determine the next GitHub label, action, and updated Issue Body block for a completed stage."""
     cleaned_body = _clean_markdown_stage_body(response_text)
     _, raw_token = _find_terminal_status_or_verdict(response_text)
 
-    if stage == "triage":
-        if raw_token in ("DUPLICATE", "TOO_BIG", "NEEDS_HUMAN", "NEEDS_INPUT", "STOP"):
-            return StageVerdict(
-                stage="triage",
-                status=raw_token.lower(),
-                target_label=LABEL_NEEDS_HUMAN,
-                updated_factory_block=f"## Triage Report (`{raw_token}`)\n\n{cleaned_body}",
-                summary=f"Triage requires human attention ({raw_token})",
-            )
-        if raw_token == "TRIVIAL":  # noqa: S105
-            return StageVerdict(
-                stage="triage",
-                status="trivial",
-                target_label=LABEL_SPEC_READY,
-                updated_factory_block=f"## Triage Report (`TRIVIAL`)\n\n{cleaned_body}",
-                summary=(
-                    "Triage fast-tracked (TRIVIAL) -> waiting for Human Gate 1 "
-                    "approval (factory:spec-ready)"
-                ),
-            )
+    active_flow = flow or DEFAULT_PR_FLOW
+    stage_transitions = active_flow.transitions.get(stage)
+    if not stage_transitions:
         return StageVerdict(
-            stage="triage",
-            status="ok",
-            target_label=LABEL_SPEC,
-            updated_factory_block=f"## Triage Report (`OK`)\n\n{cleaned_body}",
-            summary="Triage passed -> ready for spec",
+            stage=stage,
+            status="completed",
+            target_label=LABEL_COMPLETED,
+            updated_factory_block=current_factory_block,
+            summary=cleaned_body,
         )
 
-    if stage == "spec":
+    status_key = raw_token
+    if stage in active_flow.open_questions_stages:
         has_open_questions = bool(
             _OPEN_QUESTIONS_RE.search(_mask_code_blocks(cleaned_body))
         )
-        if raw_token in ("NEEDS_HUMAN", "NEEDS_INPUT", "OPEN_QUESTIONS") or (
-            has_open_questions and raw_token != "SPEC_READY"  # noqa: S105
+        if (
+            has_open_questions
+            and status_key not in ("SPEC_READY", "READY")
+            and "NEEDS_HUMAN" in stage_transitions
         ):
-            return StageVerdict(
-                stage="spec",
-                status="needs_human",
-                target_label=LABEL_NEEDS_HUMAN,
-                updated_factory_block=cleaned_body or current_factory_block,
-                summary="Spec has open questions -> waiting for human answers in comments",
+            status_key = "NEEDS_HUMAN"
+
+    transition = stage_transitions.get(status_key) or stage_transitions.get("DEFAULT")
+    if transition is None:
+        return StageVerdict(
+            stage=stage,
+            status=status_key.lower() if status_key else "completed",
+            target_label=LABEL_COMPLETED,
+            updated_factory_block=current_factory_block,
+            summary=cleaned_body,
+        )
+
+    display_token = status_key or "OK"
+    review_report = cleaned_body if transition.record_review_report else ""
+    summary = (
+        transition.summary.format(token=display_token)
+        if transition.summary
+        else (
+            cleaned_body
+            or (
+                "Build & verification checks passed -> ready for review"
+                if stage == "build"
+                else ""
             )
+        )
+    )
+    status = transition.status or (status_key.lower() if status_key else "completed")
+
+    if transition.block_mode == "preserve":
+        updated_block = (
+            current_factory_block.strip() if stage != "done" else current_factory_block
+        )
         return StageVerdict(
-            stage="spec",
-            status="spec_ready",
-            target_label=LABEL_SPEC_READY,
+            stage=stage,
+            status=status,
+            target_label=transition.label,
+            updated_factory_block=updated_block,
+            summary=summary,
+            action=transition.action,
+            publish_pr=transition.action == "publish_pr",
+            review_report=review_report,
+        )
+
+    if transition.block_mode == "replace":
+        return StageVerdict(
+            stage=stage,
+            status=status,
+            target_label=transition.label,
             updated_factory_block=cleaned_body or current_factory_block,
-            summary="Spec complete -> waiting for Human Gate 1 approval (factory:spec-ready)",
+            summary=summary,
+            action=transition.action,
+            publish_pr=transition.action == "publish_pr",
+            review_report=review_report,
         )
 
-    if stage == "build":
-        # Preserve the approved spec in the Issue Body and record build completion status
-        spec_base = current_factory_block.strip()
+    if transition.block_mode == "append_section":
+        heading = (
+            transition.section_title.format(token=display_token)
+            if transition.section_title
+            else f"## {stage.title()} Update"
+        )
+        if transition.replace_existing:
+            updated_block = f"{heading}\n\n{cleaned_body}"
+        else:
+            base = strip_factory_findings(current_factory_block)
+            updated_block = f"{base}\n\n{heading}\n{cleaned_body}".strip()
+            if transition.record_review_report:
+                meta = parse_factory_meta(current_factory_block)
+                review_round = parse_review_round(meta)
+                updated_block = set_factory_meta(
+                    updated_block,
+                    stage=_stage_slug_from_label(transition.label),
+                    review_round=str(review_round),
+                    last_reviewed_sha=reviewed_sha or meta.get("last_reviewed_sha", ""),
+                )
         return StageVerdict(
-            stage="build",
-            status="built",
-            target_label=LABEL_REVIEW,
-            updated_factory_block=spec_base,
-            summary=cleaned_body
-            or "Build & verification checks passed -> ready for review",
+            stage=stage,
+            status=status,
+            target_label=transition.label,
+            updated_factory_block=updated_block,
+            summary=summary,
+            action=transition.action,
+            publish_pr=transition.action == "publish_pr",
+            review_report=review_report,
         )
 
-    if stage == "review":
+    if transition.block_mode == "clear_findings":
         meta = parse_factory_meta(current_factory_block)
         review_round = parse_review_round(meta)
-
-        if raw_token in ("ACCEPTED", "PASS"):
-            clean_block = strip_factory_findings(current_factory_block)
-            if reviewed_sha:
-                clean_block = set_factory_meta(
-                    clean_block,
-                    stage="pr-ready",
-                    review_round=str(review_round),
-                    last_reviewed_sha=reviewed_sha,
-                )
-            return StageVerdict(
-                stage="review",
-                status="accepted",
-                target_label=LABEL_PR_READY,
-                updated_factory_block=clean_block,
-                summary="Review accepted -> PR ready for Human Gate 2",
-                publish_pr=True,
-                review_report=cleaned_body,
-            )
-
-        if raw_token in ("HUMAN_DECISION_NEEDED", "NEEDS_HUMAN", "STOP"):
-            merged_block = f"{strip_factory_findings(current_factory_block)}\n\n## Review Escalation\n{cleaned_body}".strip()
-            merged_block = set_factory_meta(
-                merged_block,
-                stage="needs-human",
+        clean_block = strip_factory_findings(current_factory_block)
+        if reviewed_sha:
+            clean_block = set_factory_meta(
+                clean_block,
+                stage=_stage_slug_from_label(transition.label),
                 review_round=str(review_round),
-                last_reviewed_sha=reviewed_sha or meta.get("last_reviewed_sha", ""),
+                last_reviewed_sha=reviewed_sha,
             )
-            return StageVerdict(
-                stage="review",
-                status="needs_human",
-                target_label=LABEL_NEEDS_HUMAN,
-                updated_factory_block=merged_block,
-                summary="Review requires human decision",
-                review_report=cleaned_body,
-            )
-
-        # Default for FAIL / REVISION_NEEDED: replace findings in-place, track round,
-        # and trip the circuit breaker once the round cap is reached.
-        new_round = review_round + 1
-        findings_block = replace_factory_findings(
-            current_factory_block,
-            cleaned_body,
-            round_num=new_round,
-            max_rounds=max_review_rounds,
+        return StageVerdict(
+            stage=stage,
+            status=status,
+            target_label=transition.label,
+            updated_factory_block=clean_block,
+            summary=summary,
+            action=transition.action,
+            publish_pr=transition.action == "publish_pr",
+            review_report=review_report,
         )
-        if new_round >= max_review_rounds:
-            escalation = (
-                "\n\n## Review Loop Escalation\n"
-                f"The {max_review_rounds}-round review limit was reached with unresolved findings. "
-                "A human must decide whether to accept, fix manually, or close."
-            )
-            block = set_factory_meta(
-                findings_block + escalation,
-                stage="needs-human",
-                review_round=str(new_round),
-                last_reviewed_sha=reviewed_sha or "",
-            )
-            return StageVerdict(
-                stage="review",
-                status="needs_human",
-                target_label=LABEL_NEEDS_HUMAN,
-                updated_factory_block=block,
-                summary=(
-                    f"Review loop hit the {max_review_rounds}-round circuit breaker -> "
-                    "waiting for human decision"
-                ),
-                review_report=cleaned_body,
-            )
 
+    # block_mode == "findings": replace findings in-place, increment round, and trip circuit breaker
+    meta = parse_factory_meta(current_factory_block)
+    review_round = parse_review_round(meta)
+    effective_cap = (
+        max_review_rounds
+        if max_review_rounds is not None
+        else (transition.max_rounds or MAX_REVIEW_ROUNDS)
+    )
+    new_round = review_round + 1
+    findings_block = replace_factory_findings(
+        current_factory_block,
+        cleaned_body,
+        round_num=new_round,
+        max_rounds=effective_cap,
+    )
+    if new_round >= effective_cap:
+        escalation = (
+            "\n\n## Review Loop Escalation\n"
+            f"The {effective_cap}-round review limit was reached with unresolved findings. "
+            "A human must decide whether to accept, fix manually, or close."
+        )
         block = set_factory_meta(
-            findings_block,
-            stage="build",
+            findings_block + escalation,
+            stage=_stage_slug_from_label(transition.on_max_rounds_label),
             review_round=str(new_round),
             last_reviewed_sha=reviewed_sha or "",
         )
         return StageVerdict(
-            stage="review",
-            status="revision_needed",
-            target_label=LABEL_BUILD,
+            stage=stage,
+            status="needs_human",
+            target_label=transition.on_max_rounds_label,
             updated_factory_block=block,
-            summary="Review requested revisions -> returning to factory:build",
-            review_report=cleaned_body,
+            summary=(
+                f"Review loop hit the {effective_cap}-round circuit breaker -> "
+                "waiting for human decision"
+            ),
+            action=transition.action,
+            publish_pr=False,
+            review_report=review_report,
         )
 
+    block = set_factory_meta(
+        findings_block,
+        stage=_stage_slug_from_label(transition.label),
+        review_round=str(new_round),
+        last_reviewed_sha=reviewed_sha or "",
+    )
     return StageVerdict(
         stage=stage,
-        status="completed",
-        target_label=LABEL_COMPLETED,
-        updated_factory_block=current_factory_block,
-        summary=cleaned_body,
+        status=status,
+        target_label=transition.label,
+        updated_factory_block=block,
+        summary=summary,
+        action=transition.action,
+        publish_pr=transition.action == "publish_pr",
+        review_report=review_report,
     )

@@ -188,7 +188,7 @@ Validate the refactoring prompts, skills, and review rubric *before* writing flo
 
 ## 5. Settled Design Decisions
 
-1. **Custom & preset flows:** Support arbitrary `[flows.<name>]` definitions in `.factory/config.toml` from day one, with `pr` and `refactor` shipped as built-in presets that repositories can inherit or override.
+1. **Custom & preset flows:** Support arbitrary `[flows.<name>]` definitions in `.factory/config.toml` from day one, with `pr` and `refactor` shipped as built-in presets that repositories can inherit or override. Overriding a built-in preset (e.g., `[flows.pr.transitions.spec]`) deep-merges per-stage transitions on top of the preset so single-transition tweaks do not require repeating the entire flow, while custom flows require an explicit `entry`.
 2. **Label namespace & stage mapping:** Use `flow:<name>` as the flow selector + 1:1 `factory:<stage_key>` labels (`factory:refactor-plan`, `factory:refactor-apply`, `factory:refactor-review`) alongside shared gate/terminal labels (`factory:pr-ready`, `factory:done`, `factory:needs-human`, `factory:completed`). Keeps `factory:<stage>` 1:1 with `[stages.<stage>]` and `--stage` CLI flags with minimal code impact.
 3. **Missing `flow:<name>` fallback:** When `flow:<name>` is absent, infer the flow if the stage label uniquely belongs to a single configured flow (e.g., `factory:refactor-plan` → `refactor`); otherwise default to `pr` and fail fast on mismatch.
 4. **Human Gate 1 (`refactor` preset):** Pause at `factory:plan-ready` by default after `refactor-plan`, while allowing humans to skip planning by labeling `factory:refactor-apply` directly when a Refactor Contract is already written.

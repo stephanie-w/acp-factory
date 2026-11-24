@@ -14,7 +14,7 @@ from rich.console import Console
 from acp_factory.cli import history_cmd
 from acp_factory.config import FactoryConfig, FleetConfig, resolve_runs_dir
 from acp_factory.history import list_fleet_run_history, list_run_history
-from acp_factory.runner import RunArtifactStore
+from acp_factory.runner import RunArtifactStore, RunMetadata
 
 
 def _write_run(runs_dir: Path, run_id: str, timestamp: str, **extra: object) -> None:
@@ -107,13 +107,15 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
         turn_transcripts=[],
         check_history=[],
         failure_reason=None,
-        issue_number=42,
-        issue_title="Fix the thing",
-        repo_slug="acme/core",
-        branch="factory/issue-42",
-        base_ref="origin/main",
-        session_id="ses_deadbeef",
-        session_title="ACP Session e61e0ea7",
+        metadata=RunMetadata(
+            issue_number=42,
+            issue_title="Fix the thing",
+            repo_slug="acme/core",
+            branch="factory/issue-42",
+            base_ref="origin/main",
+            session_id="ses_deadbeef",
+            session_title="ACP Session e61e0ea7",
+        ),
     )
 
     assert run_dir is not None
@@ -136,7 +138,7 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
         turn_transcripts=[],
         check_history=[],
         failure_reason=None,
-        session_id="ses_untitled",
+        metadata=RunMetadata(session_id="ses_untitled"),
     )
     no_title_data = json.loads((no_title_dir / "run.json").read_text(encoding="utf-8"))
     assert no_title_data["session_title"] is None
@@ -155,8 +157,10 @@ def test_history_json_surfaces_session_title(tmp_path: Path) -> None:
         turn_transcripts=[],
         check_history=[],
         failure_reason=None,
-        session_id="ses_deadbeef",
-        session_title="ACP Session e61e0ea7",
+        metadata=RunMetadata(
+            session_id="ses_deadbeef",
+            session_title="ACP Session e61e0ea7",
+        ),
     )
     _write_run(
         runs_dir,

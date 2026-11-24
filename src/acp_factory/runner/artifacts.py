@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,21 @@ from ..verdict import _clean_markdown_stage_body, _find_terminal_status_or_verdi
 from .checks import CheckResult
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RunMetadata:
+    """Identity, git/issue context, and optional flow metadata for a persisted run."""
+
+    flow: str | None = None
+    issue_number: int | None = None
+    issue_title: str | None = None
+    repo_slug: str | None = None
+    branch: str | None = None
+    base_ref: str | None = None
+    session_id: str | None = None
+    session_title: str | None = None
+    head_sha: str | None = None
 
 
 def _slugify(name: str) -> str:
@@ -200,19 +216,13 @@ class RunArtifactStore:
         turn_summaries: list[dict[str, Any]] | None = None,
         turn_condensed: list[dict[str, Any]] | None = None,
         last_response_text: str = "",
-        issue_number: int | None = None,
-        issue_title: str | None = None,
-        repo_slug: str | None = None,
-        branch: str | None = None,
-        base_ref: str | None = None,
-        session_id: str | None = None,
-        session_title: str | None = None,
-        head_sha: str | None = None,
+        metadata: RunMetadata | None = None,
     ) -> Path:
         """Write structured run logs into `<runs_dir>/<run-id>/` and return that dir."""
         runs_dir = self._runs_dir
         config = self._config
         usage = usage or UsageTotals()
+        meta = metadata or RunMetadata()
         run_dir = runs_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -250,7 +260,7 @@ class RunArtifactStore:
                 log_file = attempt_dir / f"check-{chk_idx}-{slug}.log"
                 log_file.write_text(chk_res.raw_output, encoding="utf-8")
 
-        run_meta = {
+        run_meta: dict[str, Any] = {
             "run_id": run_id,
             "timestamp": datetime.now(UTC).isoformat(),
             "stage": config.active_stage,
@@ -261,14 +271,14 @@ class RunArtifactStore:
             "read_only": config.agent.read_only,
             "persona": config.agent.persona,
             "skills": config.agent.skills,
-            "issue_number": issue_number,
-            "issue_title": issue_title,
-            "repo_slug": repo_slug,
-            "branch": branch,
-            "base_ref": base_ref,
-            "session_id": session_id,
-            "session_title": session_title,
-            "head_sha": head_sha,
+            "issue_number": meta.issue_number,
+            "issue_title": meta.issue_title,
+            "repo_slug": meta.repo_slug,
+            "branch": meta.branch,
+            "base_ref": meta.base_ref,
+            "session_id": meta.session_id,
+            "session_title": meta.session_title,
+            "head_sha": meta.head_sha,
             "succeeded": succeeded,
             "attempts_used": attempts_used,
             "max_attempts": config.retry.max_attempts,
@@ -286,6 +296,8 @@ class RunArtifactStore:
                 "telemetry_available": bool(usage.tokens > 0 or usage.cost_usd > 0),
             },
         }
+        if meta.flow is not None:
+            run_meta["flow"] = meta.flow
         (run_dir / "run.json").write_text(
             json.dumps(run_meta, indent=2), encoding="utf-8"
         )
@@ -299,7 +311,7 @@ class RunArtifactStore:
             if report_text:
                 (run_dir / "report.md").write_text(report_text, encoding="utf-8")
                 for filename in _artifact_pointer_filenames(
-                    "report", issue_number=issue_number, branch=branch
+                    "report", issue_number=meta.issue_number, branch=meta.branch
                 ):
                     _update_latest_artifact_pointer(
                         runs_dir,
@@ -316,7 +328,7 @@ class RunArtifactStore:
                     notes_text, encoding="utf-8"
                 )
                 for filename in _artifact_pointer_filenames(
-                    "build-notes", issue_number=issue_number, branch=branch
+                    "build-notes", issue_number=meta.issue_number, branch=meta.branch
                 ):
                     _update_latest_artifact_pointer(
                         runs_dir,
