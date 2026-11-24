@@ -295,6 +295,30 @@ def test_scaffolded_stage_prose_comes_from_bundled_resources(
     assert not hasattr(cli, "DEFAULT_STAGE_PROMPTS")
 
 
+def test_scaffolded_init_writes_nothing_when_bundle_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing bundled resource aborts before any scaffolded file is written."""
+    from typer.testing import CliRunner
+
+    from acp_factory import cli
+
+    monkeypatch.setattr(
+        cli,
+        "_SCAFFOLD_PERSONAS",
+        {"triage.md": "agents/does-not-exist.agent.md"},
+    )
+
+    result = CliRunner().invoke(
+        cli.app, ["init", "--multi-stage", "--path", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "Failed to load bundled scaffold resources" in result.output
+    assert not (tmp_path / ".factory").exists()
+    assert not (tmp_path / "apm.yml").exists()
+
+
 def test_scaffolded_multi_stage_config_resolves_all_stages_and_skills(
     tmp_path: Path,
 ) -> None:

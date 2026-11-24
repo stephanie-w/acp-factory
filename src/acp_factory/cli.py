@@ -1135,6 +1135,23 @@ def init_cmd(
             )
             raise typer.Exit(code=1)
 
+        # Load every bundled file up front so a broken package fails before any
+        # scaffolded file (or directory) is written.
+        try:
+            persona_contents = {
+                name: load_bundled_text(source)
+                for name, source in _SCAFFOLD_PERSONAS.items()
+            }
+            prompt_contents = {
+                name: load_bundled_text(source)
+                for name, source in _SCAFFOLD_STAGE_PROMPTS.items()
+            }
+        except (OSError, ValueError) as exc:
+            console.print(
+                f"[bold red]Failed to load bundled scaffold resources:[/bold red] {exc}"
+            )
+            raise typer.Exit(code=1) from exc
+
         (factory_dir / "personas").mkdir(parents=True, exist_ok=True)
         (factory_dir / "prompts").mkdir(parents=True, exist_ok=True)
         (factory_dir / "skills").mkdir(parents=True, exist_ok=True)
@@ -1142,17 +1159,15 @@ def init_cmd(
         config_toml.write_text(MULTI_STAGE_CONFIG_TOML, encoding="utf-8")
         console.print(f"[bold green]✓ Created[/bold green] {config_toml}")
 
-        for name, source in _SCAFFOLD_PERSONAS.items():
+        for name, content in persona_contents.items():
             p_file = factory_dir / "personas" / name
             if not p_file.exists() or force:
-                content = load_bundled_text(source)
                 p_file.write_text(content.rstrip("\n") + "\n", encoding="utf-8")
                 console.print(f"[bold green]✓ Created[/bold green] {p_file}")
 
-        for name, source in _SCAFFOLD_STAGE_PROMPTS.items():
+        for name, content in prompt_contents.items():
             pr_file = factory_dir / "prompts" / name
             if not pr_file.exists() or force:
-                content = load_bundled_text(source)
                 pr_file.write_text(content.rstrip("\n") + "\n", encoding="utf-8")
                 console.print(f"[bold green]✓ Created[/bold green] {pr_file}")
 
