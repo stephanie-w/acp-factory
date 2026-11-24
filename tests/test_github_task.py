@@ -14,12 +14,12 @@ import pytest
 from acp_factory.github import GitHubError, fetch_issue, run_gh
 from acp_factory.runner.checks import parse_review_verdict_status
 from acp_factory.runner.loop import (
-    FactoryRunOutcome,
     build_delta_review_brief,
     build_spec_revision_brief,
     has_existing_spec,
     run_issue_stage,
 )
+from acp_factory.runner.orchestrator import FactoryRunOutcome
 from acp_factory.task import (
     LABEL_BUILD,
     LABEL_COMPLETED,

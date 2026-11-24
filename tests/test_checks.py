@@ -21,7 +21,8 @@ from acp_factory.runner.checks import (
     run_shell_command,
     truncate_check_output,
 )
-from acp_factory.runner.loop import build_retry_prompt, run_factory
+from acp_factory.runner.loop import build_retry_prompt
+from acp_factory.runner.orchestrator import run_factory
 
 
 def test_truncate_check_output_preserves_head_and_tail() -> None:
@@ -281,7 +282,7 @@ async def test_feedback_loop_recovers_on_second_attempt(tmp_path: Path) -> None:
                 ),
             )
 
-    with patch("acp_factory.runner.loop.FactoryACPClient", FakeACPClient):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", FakeACPClient):
         outcome = await run_factory(cfg, tmp_path)
 
     assert outcome.succeeded is True
@@ -331,10 +332,10 @@ async def test_run_factory_empty_response_fails_fast(tmp_path: Path) -> None:
     for response_text in ("", "   \n\t "):
         with (
             patch(
-                "acp_factory.runner.loop.FactoryACPClient",
+                "acp_factory.runner.orchestrator.FactoryACPClient",
                 _fake_client_returning(response_text),
             ),
-            patch("acp_factory.runner.loop.logger") as mock_logger,
+            patch("acp_factory.runner.orchestrator.logger") as mock_logger,
         ):
             outcome = await run_factory(_no_check_config(), tmp_path)
 
@@ -346,7 +347,7 @@ async def test_run_factory_empty_response_fails_fast(tmp_path: Path) -> None:
 
 async def test_run_factory_no_checks_success(tmp_path: Path) -> None:
     with patch(
-        "acp_factory.runner.loop.FactoryACPClient",
+        "acp_factory.runner.orchestrator.FactoryACPClient",
         _fake_client_returning("Specification complete.\nSTATUS: SPEC_READY"),
     ):
         outcome = await run_factory(_no_check_config(), tmp_path)
@@ -520,7 +521,7 @@ async def test_spec_validation_check_self_heals_via_factory_response_file(
                 ),
             )
 
-    with patch("acp_factory.runner.loop.FactoryACPClient", FakeSpecACPClient):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", FakeSpecACPClient):
         outcome = await run_factory(cfg, tmp_path)
 
     assert outcome.succeeded is True
@@ -1116,7 +1117,7 @@ async def test_run_factory_threads_keep_env_to_setup_and_client(tmp_path: Path) 
             },
             clear=True,
         ),
-        patch("acp_factory.runner.loop.FactoryACPClient", FakeACPClient),
+        patch("acp_factory.runner.orchestrator.FactoryACPClient", FakeACPClient),
     ):
         outcome = await run_factory(cfg, tmp_path)
 

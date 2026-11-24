@@ -18,12 +18,11 @@ from acp_factory.config import (
     StageConfig,
 )
 from acp_factory.runner.loop import (
-    FactoryRunOutcome,
     check_turn_cap,
     check_usage_cap,
-    run_factory,
     run_issue_stage,
 )
+from acp_factory.runner.orchestrator import FactoryRunOutcome, run_factory
 from acp_factory.task import (
     LABEL_BUILD,
     LABEL_NEEDS_HUMAN,
@@ -235,7 +234,7 @@ async def test_budget_cap_halts_loop(
         retry=RetryConfig(max_attempts=max_attempts),
     )
     fake, prompts = _fake_client(usage_payload)
-    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", fake):
         outcome = await run_factory(cfg, tmp_path)
 
     assert outcome.succeeded is False
@@ -336,7 +335,7 @@ async def test_run_json_records_usage(tmp_path: Path) -> None:
     fake, _ = _fake_client(
         {"used": 1250, "size": 20000, "cost": {"amount": 0.012, "currency": "USD"}}
     )
-    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", fake):
         outcome = await run_factory(cfg, tmp_path)
 
     assert outcome.succeeded is True
@@ -389,7 +388,7 @@ async def test_run_json_per_run_isolation(
     (tmp_path / ".factory").mkdir()
     cfg = FactoryConfig(task="do work")
     fake, _ = _fake_client(usage_payload)
-    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", fake):
         outcome = await run_factory(cfg, tmp_path, initial_usage=initial_usage)
 
     assert outcome.succeeded is True
@@ -416,7 +415,7 @@ async def test_per_run_usage_cap_ignores_initial_usage(
     fake, prompts = _fake_client(
         {"total_tokens": 1_000, "used": 500, "cost": {"amount": 0.25}}
     )
-    with patch("acp_factory.runner.loop.FactoryACPClient", fake):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", fake):
         outcome = await run_factory(
             cfg,
             tmp_path,
@@ -543,7 +542,7 @@ async def test_stage_with_prior_turns_meta_respects_per_run_turn_cap(
     )
     with (
         patch("acp_factory.runner.loop.fetch_issue", new=AsyncMock(return_value=task)),
-        patch("acp_factory.runner.loop.FactoryACPClient", fake),
+        patch("acp_factory.runner.orchestrator.FactoryACPClient", fake),
         patch("acp_factory.runner.loop.update_issue_factory_block", new=AsyncMock()),
         patch("acp_factory.runner.loop.transition_issue_label", new=AsyncMock()),
     ):
