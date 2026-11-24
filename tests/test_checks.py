@@ -228,6 +228,12 @@ async def test_run_review_prompt_check(tmp_path: Path) -> None:
     assert len(results) == 1
     assert results[0].check_type == "prompt"
     assert results[0].passed is True
+    # Review checks must spawn a dedicated read-only session that cannot touch runs.
+    assert _FakeReviewClient.captured["read_only"] is True
+    assert _FakeReviewClient.captured["deny_runs"] is True
+    review_agent = _FakeReviewClient.captured["agent_config"]
+    assert isinstance(review_agent, AgentConfig)
+    assert review_agent.read_only is True
 
 
 async def test_feedback_loop_recovers_on_second_attempt(tmp_path: Path) -> None:
