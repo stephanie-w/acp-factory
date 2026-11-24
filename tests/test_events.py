@@ -23,12 +23,8 @@ from acp_factory.acp.events import (
 )
 from acp_factory.config import AgentConfig, FactoryConfig, resolve_runs_dir
 from acp_factory.runner import RunArtifactStore
-from acp_factory.runner.loop import (
-    FactoryRunOutcome,
-    run_branch_review,
-    run_factory,
-    run_issue_stage,
-)
+from acp_factory.runner.loop import run_branch_review, run_issue_stage
+from acp_factory.runner.orchestrator import FactoryRunOutcome, run_factory
 from acp_factory.task import TaskContext
 from acp_factory.ui.display import FactoryDisplay
 from acp_factory.verdict import StageVerdict
@@ -455,7 +451,7 @@ async def test_run_factory_persists_session_title(
                 },
             )()
 
-    with patch("acp_factory.runner.loop.FactoryACPClient", FakeClient):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", FakeClient):
         outcome = await run_factory(config, tmp_path)
 
     assert outcome.succeeded is True
@@ -834,7 +830,7 @@ async def test_factory_run_outcome_artifact_path(
                 },
             )()
 
-    with patch("acp_factory.runner.loop.FactoryACPClient", FakeClient):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", FakeClient):
         outcome = await run_factory(config, tmp_path)
 
     assert outcome.succeeded is True
@@ -887,9 +883,9 @@ async def test_run_factory_records_tracked_head_sha(tmp_path: Path) -> None:
             )()
 
     with (
-        patch("acp_factory.runner.loop.FactoryACPClient", FakeClient),
+        patch("acp_factory.runner.orchestrator.FactoryACPClient", FakeClient),
         patch(
-            "acp_factory.runner.loop.get_head_sha",
+            "acp_factory.runner.orchestrator.get_head_sha",
             new=AsyncMock(return_value="feedface1234"),
         ),
     ):
@@ -1500,7 +1496,7 @@ def test_cli_quiet_flag_passes_quiet_display(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 
     from acp_factory.cli import app
-    from acp_factory.runner.loop import FactoryRunOutcome
+    from acp_factory.runner.orchestrator import FactoryRunOutcome
 
     captured_kwargs: list[dict[str, object]] = []
 

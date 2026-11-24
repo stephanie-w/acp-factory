@@ -9,7 +9,7 @@ import pytest
 
 from acp_factory.config import FactoryConfig
 from acp_factory.github import build_repo_admission
-from acp_factory.runner.loop import FactoryRunOutcome
+from acp_factory.runner.orchestrator import FactoryRunOutcome
 from acp_factory.runner.worktree import (
     detect_default_branch,
     ensure_fleet_repo_checkout,
@@ -635,7 +635,8 @@ async def test_collect_fleet_status_does_not_clone(tmp_path: Path) -> None:
 
 async def test_run_fleet_next_isolates_repo_errors(tmp_path: Path) -> None:
     """A failing repo must never block the next repo from advancing (Finding 1)."""
-    from acp_factory.runner.loop import FactoryRunOutcome, run_fleet_next
+    from acp_factory.runner.loop import run_fleet_next
+    from acp_factory.runner.orchestrator import FactoryRunOutcome
     from acp_factory.runner.worktree import WorktreeError
 
     cfg = FactoryConfig.model_validate(
@@ -706,7 +707,8 @@ async def test_collect_fleet_status_missing_checkout_uses_valid_cwd(
 
 async def test_run_issue_stage_consumes_base_config_overlay(tmp_path: Path) -> None:
     """run_issue_stage resolves fleet base_config via resolve_repo_stage (Finding 1)."""
-    from acp_factory.runner.loop import FactoryRunOutcome, run_issue_stage
+    from acp_factory.runner.loop import run_issue_stage
+    from acp_factory.runner.orchestrator import FactoryRunOutcome
 
     repo = tmp_path / "core"
     (repo / ".factory").mkdir(parents=True)
@@ -822,7 +824,8 @@ def test_display_run_header_and_attempt_banner_context() -> None:
 
 async def test_run_fleet_next_respects_limit(tmp_path: Path) -> None:
     """run_fleet_next halts once `limit` total issues across repos are processed."""
-    from acp_factory.runner.loop import FactoryRunOutcome, run_fleet_next
+    from acp_factory.runner.loop import run_fleet_next
+    from acp_factory.runner.orchestrator import FactoryRunOutcome
 
     cfg = FactoryConfig.model_validate(
         {"fleet": {"repositories": {"acme/a": "~/DEV/a", "acme/b": "~/DEV/b"}}}

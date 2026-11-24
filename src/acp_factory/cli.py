@@ -27,7 +27,8 @@ from .inspect import (
     search_text_lines,
 )
 from .resources import load_bundled_text
-from .runner.loop import run_branch_review, run_factory, run_issue_stage
+from .runner import run_factory
+from .runner.loop import run_branch_review, run_issue_stage
 from .runner.worktree import (
     GitSyncError,
     WorktreeManager,

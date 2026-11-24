@@ -869,7 +869,7 @@ def test_cli_run_exposes_and_forwards_thought_level() -> None:
     from typer.testing import CliRunner
 
     from acp_factory.cli import app
-    from acp_factory.runner.loop import FactoryRunOutcome
+    from acp_factory.runner.orchestrator import FactoryRunOutcome
 
     help_res = CliRunner().invoke(app, ["run", "--help"])
     assert help_res.exit_code == 0

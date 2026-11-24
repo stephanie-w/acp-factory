@@ -1215,7 +1215,7 @@ async def test_run_factory_client_wires_runs_dir(
     tmp_path: Path, stage: str | None, expected_deny: bool, expected_allow: bool
 ) -> None:
     """AC-4: run_factory passes resolved runs_dir plus deny/allow flags."""
-    from acp_factory.runner.loop import run_factory
+    from acp_factory.runner.orchestrator import run_factory
 
     runs_dir = tmp_path / "external-runs"
     cfg = FactoryConfig(
@@ -1225,7 +1225,7 @@ async def test_run_factory_client_wires_runs_dir(
     )
     _RecordingClient.captured.clear()
 
-    with patch("acp_factory.runner.loop.FactoryACPClient", _RecordingClient):
+    with patch("acp_factory.runner.orchestrator.FactoryACPClient", _RecordingClient):
         await run_factory(cfg, tmp_path)
 
     kwargs = _RecordingClient.captured[0]

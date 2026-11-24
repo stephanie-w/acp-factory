@@ -2,7 +2,7 @@
 
 from .artifacts import RunArtifactStore
 from .checks import CheckResult, run_checks_sequential, truncate_check_output
-from .loop import FactoryRunOutcome, run_factory
+from .orchestrator import FactoryRunOutcome, run_factory
 from .worktree import WorktreeManager
 
 __all__ = [
