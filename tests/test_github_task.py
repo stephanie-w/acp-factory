@@ -2039,6 +2039,113 @@ def _add_issue_worktree(main_root: Path, issue_number: int) -> Path:
     return wt_path
 
 
+@pytest.fixture
+def factory_issue_payload() -> list[dict[str, Any]]:
+    """One `gh issue list` payload exercising every admission predicate."""
+
+    def issue(number: int, label: str | None, *, state: str = "OPEN") -> dict[str, Any]:
+        return {
+            "number": number,
+            "title": f"Issue {number}",
+            "state": state,
+            "body": "",
+            "labels": [{"name": label}] if label else [],
+            "comments": [],
+            "url": f"https://github.com/acme/api/issues/{number}",
+        }
+
+    return [
+        issue(3, LABEL_PR_READY),
+        issue(1, LABEL_BUILD),
+        issue(2, None),
+        issue(4, LABEL_NEEDS_HUMAN),
+    ]
+
+
+def _capture_gh_payload(
+    commands: list[list[str]], payload: list[dict[str, Any]]
+) -> Any:
+    """Return a `run_gh` stand-in that records commands and serves the shared payload."""
+
+    async def fake_gh(
+        cmd: list[str], *, cwd: Path, input_text: str | None = None
+    ) -> str:
+        commands.append(cmd)
+        if cmd[:2] == ["issue", "list"]:
+            return json.dumps(payload)
+        return "[]"
+
+    return fake_gh
+
+
+async def test_listers_share_one_gh_issue_list_contract(
+    tmp_path: Path, factory_issue_payload: list[dict[str, Any]]
+) -> None:
+    from acp_factory.github import list_actionable_issues, list_all_factory_issues
+
+    commands: list[list[str]] = []
+    with patch(
+        "acp_factory.github.run_gh",
+        new=AsyncMock(side_effect=_capture_gh_payload(commands, factory_issue_payload)),
+    ):
+        actionable = await list_actionable_issues(
+            tmp_path, repo_slug="acme/api", limit=7
+        )
+        all_issues = await list_all_factory_issues(
+            tmp_path, repo_slug="acme/api", limit=7
+        )
+
+    expected = [
+        "issue",
+        "list",
+        "--state",
+        "open",
+        "--limit",
+        "7",
+        "--json",
+        "number,title,state,body,labels,comments,url",
+        "--repo",
+        "acme/api",
+    ]
+    assert commands == [expected, expected]
+    # Actionable keeps stage labels only; all-factory additionally keeps factory:* non-stages.
+    assert [t.issue_number for t in actionable] == [1]
+    assert [t.issue_number for t in all_issues] == [1, 3, 4]
+
+
+async def test_list_actionable_issues_forwards_stage_label_and_skips_worktree_scan(
+    tmp_path: Path, factory_issue_payload: list[dict[str, Any]]
+) -> None:
+    from acp_factory.github import list_actionable_issues
+
+    commands: list[list[str]] = []
+    with patch(
+        "acp_factory.github.run_gh",
+        new=AsyncMock(side_effect=_capture_gh_payload(commands, factory_issue_payload)),
+    ):
+        tasks = await list_actionable_issues(
+            tmp_path, stage_label=LABEL_BUILD, repo_slug="acme/api"
+        )
+
+    assert commands == [
+        [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "50",
+            "--json",
+            "number,title,state,body,labels,comments,url",
+            "--repo",
+            "acme/api",
+            "--label",
+            LABEL_BUILD,
+        ]
+    ]
+    assert [t.issue_number for t in tasks] == [1, 2, 3, 4]
+
+
 def _closed_worktree_gh(*args: object, **_kwargs: object) -> str:
     cmd = args[0]
     assert isinstance(cmd, list)
@@ -2087,6 +2194,51 @@ async def test_worktree_scan_from_worktree(tmp_path: Path, scan_root: str) -> No
 
     assert [task.issue_number for task in actionable] == [5]
     assert [task.issue_number for task in all_issues] == [5]
+
+
+def _open_worktree_gh(*args: object, **_kwargs: object) -> str:
+    cmd = args[0]
+    assert isinstance(cmd, list)
+    if cmd[:2] == ["issue", "list"]:
+        return "[]"
+    if cmd[:2] == ["issue", "view"]:
+        number = int(cmd[2])
+        return json.dumps(
+            {
+                "number": number,
+                "title": f"Open issue {number}",
+                "state": "OPEN",
+                "body": "",
+                "labels": [{"name": LABEL_BUILD}],
+                "comments": [],
+                "url": f"https://github.com/acme/api/issues/{number}",
+            }
+        )
+    if cmd[:2] == ["pr", "list"]:
+        return "[]"
+    raise AssertionError(f"unexpected gh invocation: {cmd}")
+
+
+async def test_worktree_scan_admission_differs_by_lister(tmp_path: Path) -> None:
+    from acp_factory.github import list_actionable_issues, list_all_factory_issues
+
+    main_root = _init_worktree_repo(tmp_path / "main")
+    _add_issue_worktree(main_root, 5)
+
+    with patch(
+        "acp_factory.github.run_gh",
+        new=AsyncMock(side_effect=_open_worktree_gh),
+    ):
+        actionable = await list_actionable_issues(main_root, repo_slug="acme/api")
+        all_issues = await list_all_factory_issues(main_root, repo_slug="acme/api")
+        all_without_scan = await list_all_factory_issues(
+            main_root, repo_slug="acme/api", scan_worktrees=False
+        )
+
+    # Actionable's worktree scan admits only closed-to-"done" leftovers.
+    assert actionable == []
+    assert [task.issue_number for task in all_issues] == [5]
+    assert all_without_scan == []
 
 
 def test_build_dry_run_gh_plan_worktree_removal_anchoring(tmp_path: Path) -> None:

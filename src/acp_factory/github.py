@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -154,18 +155,21 @@ async def _merge_open_pr_feedback(
         task.pr_review_body = extract_pr_review_section(body)
 
 
-async def list_actionable_issues(
+async def _list_issues_with_worktrees(
     cwd: Path,
     *,
-    stage_label: str | None = None,
+    include: Callable[[TaskContext], bool],
+    label: str | None = None,
     limit: int = 50,
     repo_slug: str | None = None,
-    include_branch_contending: bool = False,
+    scan_worktrees: bool = True,
+    include_worktree: Callable[[TaskContext], bool] | None = None,
 ) -> list[TaskContext]:
-    """List GitHub Issues that have an actionable `factory:*` stage (including closed issues with leftover worktrees).
+    """Fetch open issues, admit them via `include`, then append unseen local worktree issues.
 
-    `include_branch_contending` (fleet admission) additionally retains `pr-ready` issues
-    whose `current_stage` is None but that still occupy a branch/PR slot.
+    `label` narrows the `gh` query; `scan_worktrees` gates the `.worktrees/issue-*`
+    fallback for closed issues, and `include_worktree` admits each fetched fallback
+    task (all when omitted).
     """
     cmd = [
         "issue",
@@ -179,8 +183,8 @@ async def list_actionable_issues(
     ]
     if repo_slug:
         cmd.extend(["--repo", repo_slug])
-    if stage_label:
-        cmd.extend(["--label", stage_label])
+    if label:
+        cmd.extend(["--label", label])
 
     out = await run_gh(cmd, cwd=cwd)
     items = json.loads(out) if out else []
@@ -188,74 +192,11 @@ async def list_actionable_issues(
     seen_numbers: set[int] = set()
     for item in items:
         task = TaskContext.from_gh_json(item)
-        if (
-            stage_label
-            or task.current_stage is not None
-            or (include_branch_contending and _is_branch_contending(task))
-        ):
+        if include(task):
             tasks.append(task)
             seen_numbers.add(task.issue_number)
 
     # Also check local .worktrees/issue-<id> directories in case their issue was closed by a PR merge
-    from .runner.worktree import resolve_main_repo_root
-
-    worktrees_root = resolve_main_repo_root(cwd) / ".worktrees"
-    if not stage_label and worktrees_root.is_dir():
-        for entry in sorted(worktrees_root.iterdir()):
-            if entry.is_dir() and entry.name.startswith("issue-"):
-                num_str = entry.name.removeprefix("issue-")
-                if num_str.isdigit():
-                    issue_num = int(num_str)
-                    if issue_num not in seen_numbers:
-                        try:
-                            wt_task = await fetch_issue(
-                                issue_num, cwd=cwd, repo_slug=repo_slug
-                            )
-                        except GitHubError:
-                            continue
-                        if wt_task.current_stage == "done":
-                            tasks.append(wt_task)
-                            seen_numbers.add(issue_num)
-
-    # Process oldest issue numbers first
-    tasks.sort(key=lambda t: t.issue_number)
-    return tasks
-
-
-async def list_all_factory_issues(
-    cwd: Path,
-    *,
-    limit: int = 50,
-    repo_slug: str | None = None,
-    scan_worktrees: bool = True,
-) -> list[TaskContext]:
-    """Return open GitHub Issues carrying any `factory:*` label plus any closed issues that still have a local worktree.
-
-    `scan_worktrees` is False when `cwd` is only a valid spawn directory (e.g. a missing
-    fleet checkout falls back to `Path.cwd()`), so unrelated `.worktrees/` dirs are ignored.
-    """
-    cmd = [
-        "issue",
-        "list",
-        "--state",
-        "open",
-        "--limit",
-        str(limit),
-        "--json",
-        "number,title,state,body,labels,comments,url",
-    ]
-    if repo_slug:
-        cmd.extend(["--repo", repo_slug])
-    out = await run_gh(cmd, cwd=cwd)
-    items = json.loads(out) if out else []
-    tasks: list[TaskContext] = []
-    seen_numbers: set[int] = set()
-    for item in items:
-        task = TaskContext.from_gh_json(item)
-        if any(lbl.startswith("factory:") for lbl in task.labels):
-            tasks.append(task)
-            seen_numbers.add(task.issue_number)
-
     from .runner.worktree import resolve_main_repo_root
 
     worktrees_root = resolve_main_repo_root(cwd) / ".worktrees"
@@ -272,11 +213,62 @@ async def list_all_factory_issues(
                             )
                         except GitHubError:
                             continue
-                        tasks.append(wt_task)
-                        seen_numbers.add(issue_num)
+                        if include_worktree is None or include_worktree(wt_task):
+                            tasks.append(wt_task)
+                            seen_numbers.add(issue_num)
 
+    # Process oldest issue numbers first
     tasks.sort(key=lambda t: t.issue_number)
     return tasks
+
+
+async def list_actionable_issues(
+    cwd: Path,
+    *,
+    stage_label: str | None = None,
+    limit: int = 50,
+    repo_slug: str | None = None,
+    include_branch_contending: bool = False,
+) -> list[TaskContext]:
+    """List GitHub Issues that have an actionable `factory:*` stage (including closed issues with leftover worktrees).
+
+    `include_branch_contending` (fleet admission) additionally retains `pr-ready` issues
+    whose `current_stage` is None but that still occupy a branch/PR slot.
+    """
+    return await _list_issues_with_worktrees(
+        cwd,
+        include=lambda task: (
+            bool(stage_label)
+            or task.current_stage is not None
+            or (include_branch_contending and _is_branch_contending(task))
+        ),
+        label=stage_label,
+        limit=limit,
+        repo_slug=repo_slug,
+        scan_worktrees=not stage_label,
+        include_worktree=lambda task: task.current_stage == "done",
+    )
+
+
+async def list_all_factory_issues(
+    cwd: Path,
+    *,
+    limit: int = 50,
+    repo_slug: str | None = None,
+    scan_worktrees: bool = True,
+) -> list[TaskContext]:
+    """Return open GitHub Issues carrying any `factory:*` label plus any closed issues that still have a local worktree.
+
+    `scan_worktrees` is False when `cwd` is only a valid spawn directory (e.g. a missing
+    fleet checkout falls back to `Path.cwd()`), so unrelated `.worktrees/` dirs are ignored.
+    """
+    return await _list_issues_with_worktrees(
+        cwd,
+        include=lambda task: any(lbl.startswith("factory:") for lbl in task.labels),
+        limit=limit,
+        repo_slug=repo_slug,
+        scan_worktrees=scan_worktrees,
+    )
 
 
 @dataclass
