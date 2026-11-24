@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -266,6 +267,30 @@ class StageConfig(BaseModel):
             "0 omits thoughts; unset preserves full markdown/history and the default summary preview."
         ),
     )
+    worktree: bool | None = Field(
+        default=None,
+        description="Run this stage inside the persistent `.worktrees/issue-<id>` worktree.",
+    )
+    require_clean_worktree: bool | None = Field(
+        default=None,
+        description="Abort and bounce back when the issue worktree has uncommitted changes.",
+    )
+    delta_review: bool | None = Field(
+        default=None,
+        description="Snapshot HEAD before review and inject Round 2+ delta review briefs.",
+    )
+    inject_prior_notes_from: str | None = Field(
+        default=None,
+        description="Attach latest implementation/refactor notes produced by the named prior stage.",
+    )
+    revision_brief: bool | None = Field(
+        default=None,
+        description="Inject an incremental revision brief when updating an existing factory block.",
+    )
+    orchestrator_only: bool | None = Field(
+        default=None,
+        description="Execute the stage's transition action directly without spawning an ACP agent.",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -278,6 +303,31 @@ class StageConfig(BaseModel):
                 data = dict(data)
                 data["command"] = shlex.split(cmd)
         return data
+
+
+@dataclass(frozen=True, slots=True)
+class StageCapabilities:
+    """Resolved execution capabilities for a workflow stage."""
+
+    worktree: bool = False
+    require_clean_worktree: bool = False
+    delta_review: bool = False
+    inject_prior_notes_from: str | None = None
+    revision_brief: bool = False
+    orchestrator_only: bool = False
+
+
+_LEGACY_STAGE_CAPABILITIES: dict[str, StageCapabilities] = {
+    "spec": StageCapabilities(revision_brief=True),
+    "build": StageCapabilities(worktree=True),
+    "review": StageCapabilities(
+        worktree=True,
+        require_clean_worktree=True,
+        delta_review=True,
+        inject_prior_notes_from="build",
+    ),
+    "done": StageCapabilities(orchestrator_only=True),
+}
 
 
 TransitionAction = Literal[
@@ -892,6 +942,119 @@ class FactoryConfig(BaseModel):
                 f"Unknown flow '{flow_name}'. Available flows: {available}"
             )
         return merged[key]
+
+    def stage_capabilities(self, stage_name: str | None) -> StageCapabilities:
+        """Return effective capabilities for `stage_name`, combining StageConfig and legacy defaults."""
+        if not stage_name:
+            return StageCapabilities()
+        defaults = _LEGACY_STAGE_CAPABILITIES.get(stage_name, StageCapabilities())
+        stage_cfg = self.stages.get(stage_name)
+        if stage_cfg is None:
+            return defaults
+        return StageCapabilities(
+            worktree=(
+                stage_cfg.worktree
+                if stage_cfg.worktree is not None
+                else defaults.worktree
+            ),
+            require_clean_worktree=(
+                stage_cfg.require_clean_worktree
+                if stage_cfg.require_clean_worktree is not None
+                else defaults.require_clean_worktree
+            ),
+            delta_review=(
+                stage_cfg.delta_review
+                if stage_cfg.delta_review is not None
+                else defaults.delta_review
+            ),
+            inject_prior_notes_from=(
+                stage_cfg.inject_prior_notes_from
+                if stage_cfg.inject_prior_notes_from is not None
+                else defaults.inject_prior_notes_from
+            ),
+            revision_brief=(
+                stage_cfg.revision_brief
+                if stage_cfg.revision_brief is not None
+                else defaults.revision_brief
+            ),
+            orchestrator_only=(
+                stage_cfg.orchestrator_only
+                if stage_cfg.orchestrator_only is not None
+                else defaults.orchestrator_only
+            ),
+        )
+
+    def is_branch_contending_stage(self, stage_name: str | None) -> bool:
+        """Return True when `stage_name` runs in a branch worktree and contends for a branch slot."""
+        return self.stage_capabilities(stage_name).worktree
+
+    def publish_pr_labels(self) -> set[str]:
+        """Return all gate labels produced by `publish_pr` transitions across configured flows."""
+        labels = {"factory:pr-ready"}
+        for flow_cfg in self.effective_flows().values():
+            for token_map in flow_cfg.transitions.values():
+                for transition in token_map.values():
+                    if transition.action == "publish_pr":
+                        labels.add(transition.label)
+        return labels
+
+    def actionable_stage_labels(self) -> dict[str, str]:
+        """Return `{label: stage}` for every actionable stage across all effective flows."""
+        mapping: dict[str, str] = {}
+        for flow_cfg in self.effective_flows().values():
+            if flow_cfg.entry:
+                mapping[f"factory:{flow_cfg.entry}"] = flow_cfg.entry
+            for stage_name in flow_cfg.transitions:
+                mapping[f"factory:{stage_name}"] = stage_name
+        mapping["factory:done"] = "done"
+        return mapping
+
+    def resolve_issue_flow(
+        self, labels: list[str], *, stage: str | None = None
+    ) -> tuple[str, FlowConfig]:
+        """Resolve `(flow_name, FlowConfig)` from `flow:<name>` labels or unique stage ownership.
+
+        Rules:
+        1. If an explicit `flow:<name>` label is present, use it (failing fast if unknown).
+        2. Otherwise, if `stage` uniquely belongs to a single configured flow, infer that flow.
+        3. Otherwise default to `pr`.
+        4. If `stage` is provided and does not belong to the resolved flow (other than `done`),
+           raise `ValueError`.
+        """
+        explicit_flow: str | None = None
+        for lbl in labels:
+            if lbl.startswith("flow:") and lbl.removeprefix("flow:").strip():
+                explicit_flow = lbl.removeprefix("flow:").strip()
+                break
+
+        merged = self.effective_flows()
+        if explicit_flow is not None:
+            flow_name = explicit_flow
+            flow_cfg = self.get_flow(flow_name)
+        else:
+            flow_name = "pr"
+            if stage and stage != "done":
+                owners = [
+                    name
+                    for name, cfg in merged.items()
+                    if stage in cfg.transitions or cfg.entry == stage
+                ]
+                if len(owners) == 1:
+                    flow_name = owners[0]
+            flow_cfg = merged[flow_name]
+
+        if (
+            stage
+            and stage != "done"
+            and stage not in flow_cfg.transitions
+            and stage != flow_cfg.entry
+        ):
+            valid_stages = ", ".join(sorted(flow_cfg.transitions.keys())) or "none"
+            raise ValueError(
+                f"Stage '{stage}' does not belong to flow '{flow_name}' "
+                f"(valid stages: {valid_stages}). Add a matching 'flow:<name>' label or update config."
+            )
+        return flow_name, flow_cfg
 
     def with_fleet_overlay(
         self, fleet_config_path: Path | None = None

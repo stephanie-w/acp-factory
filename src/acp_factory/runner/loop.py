@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..config import FactoryConfig
+from ..config import FactoryConfig, FlowConfig
 from ..github import (
     build_dry_run_gh_plan,
     build_dry_run_standalone_pr_plan,
@@ -25,7 +25,6 @@ from ..github import (
 )
 from ..task import (
     LABEL_BUILD,
-    LABEL_COMPLETED,
     LABEL_NEEDS_HUMAN,
     TaskContext,
     budget_usage_from_meta,
@@ -72,6 +71,19 @@ from .worktree import (
 logger = logging.getLogger(__name__)
 
 
+def _dirty_worktree_bounce_label(flow: FlowConfig, stage: str) -> str:
+    """Return the revision target label for a review stage when the worktree is dirty."""
+    stage_transitions = flow.transitions.get(stage, {})
+    for token in ("REVISION_NEEDED", "DEFAULT"):
+        transition = stage_transitions.get(token)
+        if transition is not None and transition.block_mode == "findings":
+            return transition.label
+    for transition in stage_transitions.values():
+        if transition.block_mode == "findings":
+            return transition.label
+    return LABEL_BUILD
+
+
 async def run_issue_stage(
     workspace: Path,
     issue_number: int,
@@ -112,28 +124,37 @@ async def run_issue_stage(
     if not effective_repo_slug:
         effective_repo_slug = resolved_workspace.name
 
-    stage = stage_override or task.current_stage
+    stage = stage_override or task.stage_for_config(base_cfg)
     if not stage:
+        expected = ", ".join(sorted(base_cfg.actionable_stage_labels().keys()))
         raise ValueError(
             f"Issue #{issue_number} does not have an actionable factory stage label "
-            f"(current labels: {task.labels}). Expected one of: "
-            "factory:triage, factory:spec, factory:build, factory:review, factory:done."
+            f"(current labels: {task.labels}). Expected one of: {expected}."
         )
 
-    # Stage 5: `done` is an orchestrator cleanup stage (no automatic PR merge)
-    if stage == "done":
+    flow_name, active_flow = base_cfg.resolve_issue_flow(task.labels, stage=stage)
+    caps = base_cfg.stage_capabilities(stage)
+
+    # Orchestrator-only stages (e.g. `done`) execute their transition action directly
+    # without spawning an ACP agent.
+    if caps.orchestrator_only:
         start_time = time.monotonic()
         ui.show_phase_banner(
-            f"[{effective_repo_slug}] Issue #{issue_number}: {task.title} (Stage: done)",
+            f"[{effective_repo_slug}] Issue #{issue_number}: {task.title} (Stage: {stage})",
             style="green",
         )
-        verdict = StageVerdict(
-            stage="done",
-            status="completed",
-            target_label=LABEL_COMPLETED,
-            updated_factory_block=task.factory_block,
-            summary=f"Cleaned up worktree for Issue #{issue_number} and set {LABEL_COMPLETED}.",
+        verdict = parse_stage_verdict(
+            stage,
+            "",
+            current_factory_block=task.factory_block,
+            flow=active_flow,
         )
+        if not verdict.summary:
+            verdict.summary = (
+                f"Cleaned up worktree for Issue #{issue_number} and set {verdict.target_label}."
+                if verdict.action == "cleanup_worktree"
+                else f"Completed orchestrator stage '{stage}' -> {verdict.target_label}."
+            )
         if effective_dry_run:
             plan = build_dry_run_gh_plan(
                 task,
@@ -152,9 +173,12 @@ async def run_issue_stage(
                 dry_run_plan=plan,
             )
 
-        await WorktreeManager.remove_issue_worktree(resolved_workspace, issue_number)
+        if verdict.action == "cleanup_worktree":
+            await WorktreeManager.remove_issue_worktree(
+                resolved_workspace, issue_number
+            )
         await transition_issue_label(
-            task, LABEL_COMPLETED, cwd=resolved_workspace, repo_slug=repo_slug
+            task, verdict.target_label, cwd=resolved_workspace, repo_slug=repo_slug
         )
         duration = max(0.0, time.monotonic() - start_time)
         ui.show_final_summary(
@@ -173,14 +197,14 @@ async def run_issue_stage(
 
     task_context_md = format_task_prompt_context(task)
 
-    # Spec revision prep: inject incremental revision brief when revising an existing spec
-    if stage == "spec" and has_existing_spec(task):
+    # Incremental revision prep (e.g. `spec` revising an existing block)
+    if caps.revision_brief and has_existing_spec(task):
         task_context_md = f"{task_context_md}\n\n{build_spec_revision_brief(task)}"
 
-    # Review integrity prep: snapshot HEAD + clean tree, inject Round 2+ delta brief
+    # Review integrity prep: snapshot HEAD + clean tree, delta review brief, prior notes
     pre_review_sha: str | None = None
     review_wt_path: Path | None = None
-    if stage == "review":
+    if caps.require_clean_worktree:
         review_wt_path = WorktreeManager.issue_worktree_path(
             resolved_workspace, issue_number
         )
@@ -199,8 +223,9 @@ async def run_issue_stage(
                         total_duration_seconds=0.0,
                         failure_reason=failure_reason,
                     )
+                bounce_label = _dirty_worktree_bounce_label(active_flow, stage)
                 await transition_issue_label(
-                    task, LABEL_BUILD, cwd=resolved_workspace, repo_slug=repo_slug
+                    task, bounce_label, cwd=resolved_workspace, repo_slug=repo_slug
                 )
                 return FactoryRunOutcome(
                     succeeded=False,
@@ -210,6 +235,7 @@ async def run_issue_stage(
                     failure_reason=failure_reason,
                 )
 
+    if caps.delta_review:
         meta = parse_factory_meta(task.factory_block)
         review_round = parse_review_round(meta)
         last_reviewed_sha = meta.get("last_reviewed_sha", "")
@@ -225,6 +251,7 @@ async def run_issue_stage(
                 }"
             )
 
+    if caps.inject_prior_notes_from:
         prior_build_notes = RunArtifactStore(
             resolved_workspace, base_cfg
         ).prior_build_notes(
@@ -233,6 +260,7 @@ async def run_issue_stage(
             # Issue review is scoped by `issue_number`, so HEAD is informational
             # here and only consulted when `require_match` is requested.
             head_sha=pre_review_sha,
+            expected_stage=caps.inject_prior_notes_from,
         )
         if prior_build_notes:
             task_context_md = (
@@ -243,8 +271,7 @@ async def run_issue_stage(
                 f"{prior_build_notes}"
             )
 
-    # Use persistent issue worktree for `build` and `review` stages
-    use_issue_worktree = stage in ("build", "review")
+    use_issue_worktree = caps.worktree
     if base_config is not None:
         # Fleet mode: resolve the stage from the central governance config, overlaying
         # the target repository's own `pre`/`[checks.*]` via `resolve_repo_stage`.
@@ -289,7 +316,7 @@ async def run_issue_stage(
     initial_usage = budget_usage_from_meta(task.factory_block)
 
     effective_base_ref = base_ref
-    if stage == "build" and effective_base_ref is None:
+    if caps.worktree and not caps.require_clean_worktree and effective_base_ref is None:
         with contextlib.suppress(Exception):
             default_branch = await detect_default_branch(resolved_workspace)
             effective_base_ref = f"origin/{default_branch}"
@@ -297,6 +324,7 @@ async def run_issue_stage(
     outcome = await run_factory(
         cfg,
         resolved_workspace,
+        flow=flow_name if flow_name != "pr" else None,
         issue_number=issue_number,
         issue_title=task.title,
         repo_slug=effective_repo_slug,
@@ -383,12 +411,20 @@ async def run_issue_stage(
         outcome.last_response_text,
         current_factory_block=task.factory_block,
         reviewed_sha=pre_review_sha,
-        max_review_rounds=base_cfg.effective_max_review_rounds,
+        max_review_rounds=(
+            base_cfg.effective_max_review_rounds if flow_name == "pr" else None
+        ),
+        flow=active_flow,
     )
     outcome.stage_verdict = verdict
 
     # Pre-publish integrity guard: HEAD must be unchanged and the tree clean since review start
-    if stage == "review" and verdict.publish_pr and pre_review_sha and review_wt_path:
+    if (
+        caps.require_clean_worktree
+        and verdict.publish_pr
+        and pre_review_sha
+        and review_wt_path
+    ):
         post_review_sha = await get_head_sha(review_wt_path)
         post_clean = await is_worktree_clean(review_wt_path)
         if post_review_sha != pre_review_sha or not post_clean:
@@ -402,7 +438,7 @@ async def run_issue_stage(
                 last_reviewed_sha=post_review_sha,
             )
             verdict = StageVerdict(
-                stage="review",
+                stage=stage,
                 status="needs_human",
                 target_label=LABEL_NEEDS_HUMAN,
                 updated_factory_block=esc_block,
@@ -410,13 +446,18 @@ async def run_issue_stage(
             )
             outcome.stage_verdict = verdict
 
-    # Persist cumulative budget usage into the factory meta so totals accumulate
-    # across stage transitions regardless of the stage's own verdict handling.
+    # Persist cumulative budget usage (and non-default flow name) into factory meta so
+    # totals and flow provenance survive across stage transitions.
+    meta_updates: dict[str, str] = {
+        "tokens": str(outcome.usage.tokens),
+        "cost": format_cost_usd(outcome.usage.cost_usd),
+        "turns": str(outcome.usage.turns),
+    }
+    if flow_name != "pr":
+        meta_updates["flow"] = flow_name
     verdict.updated_factory_block = set_factory_meta(
         verdict.updated_factory_block or task.factory_block,
-        tokens=str(outcome.usage.tokens),
-        cost=format_cost_usd(outcome.usage.cost_usd),
-        turns=str(outcome.usage.turns),
+        **meta_updates,
     )
     verdict.updated_factory_block = set_attribution_banner(
         verdict.updated_factory_block,
@@ -425,7 +466,7 @@ async def run_issue_stage(
     )
     # Review findings live on the PR so the Issue stays focused on the spec + meta.
     # Stripping also removes stale fallback findings written before a PR existed.
-    if stage == "review" and task.pr_url and verdict.review_report.strip():
+    if task.pr_url and verdict.review_report.strip():
         verdict.updated_factory_block = strip_factory_findings(
             verdict.updated_factory_block
         )
@@ -454,7 +495,7 @@ async def run_issue_stage(
             repo_slug=repo_slug,
         )
 
-    if verdict.publish_pr:
+    if verdict.action == "publish_pr" or verdict.publish_pr:
         wt_cwd = outcome.preserved_worktree or WorktreeManager.issue_worktree_path(
             resolved_workspace, issue_number
         )
@@ -463,7 +504,7 @@ async def run_issue_stage(
         await push_and_create_or_update_pr(
             task, pr_body=pr_body, cwd=pr_cwd, repo_slug=repo_slug
         )
-    elif stage == "review" and task.pr_url and verdict.review_report.strip():
+    elif task.pr_url and verdict.review_report.strip():
         # No push needed this round: splice the fresh report into the existing PR body.
         await update_pr_review_section(
             task,
@@ -471,6 +512,9 @@ async def run_issue_stage(
             cwd=resolved_workspace,
             repo_slug=repo_slug,
         )
+
+    if verdict.action == "cleanup_worktree":
+        await WorktreeManager.remove_issue_worktree(resolved_workspace, issue_number)
 
     await transition_issue_label(
         task, verdict.target_label, cwd=resolved_workspace, repo_slug=repo_slug
@@ -711,19 +755,23 @@ async def _advance_fleet_repo(
         )
         result.checkout = checkout
 
-        # `done` cleanup first (unblocks the branch slot immediately).
+        # Orchestrator-only stages (`done`) run first (unblocks the branch slot immediately).
         done_tasks = [
             t
             for t in await list_actionable_issues(
-                checkout, repo_slug=repo_slug, include_branch_contending=True
+                checkout,
+                repo_slug=repo_slug,
+                include_branch_contending=True,
+                config=config,
             )
-            if t.current_stage == "done"
+            if config.stage_capabilities(t.stage_for_config(config)).orchestrator_only
         ]
         for task in done_tasks:
             if limit is not None and result.issues_processed >= limit:
                 return result
+            done_stage = task.stage_for_config(config) or "done"
             display.show_phase_banner(
-                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: done)",
+                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: {done_stage})",
                 style="green",
             )
             outcome = await run_issue_stage(
@@ -741,23 +789,34 @@ async def _advance_fleet_repo(
 
         # Re-fetch actionable state after cleanup.
         tasks = await list_actionable_issues(
-            checkout, repo_slug=repo_slug, include_branch_contending=True
+            checkout,
+            repo_slug=repo_slug,
+            include_branch_contending=True,
+            config=config,
         )
         admission = build_repo_admission(
-            repo_slug, tasks, max_active_branches_per_repo=max_branches
+            repo_slug,
+            tasks,
+            max_active_branches_per_repo=max_branches,
+            config=config,
         )
 
-        # Read-only stages (triage/spec) can always advance up to Gate 1.
+        # Non-branch-contending stages (e.g. triage, spec, refactor-plan, read-only audits)
+        # can always advance up to their human gate without consuming a branch slot.
         prep = [
             t
             for t in admission.actionable_issues
-            if t.current_stage in ("triage", "spec")
+            if not config.is_branch_contending_stage(t.stage_for_config(config))
+            and not config.stage_capabilities(
+                t.stage_for_config(config)
+            ).orchestrator_only
         ]
         for task in prep:
             if limit is not None and result.issues_processed >= limit:
                 return result
+            prep_stage = task.stage_for_config(config)
             display.show_phase_banner(
-                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: {task.current_stage})",
+                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: {prep_stage})",
                 style="cyan",
             )
             outcome = await run_issue_stage(
@@ -776,24 +835,22 @@ async def _advance_fleet_repo(
         if limit is not None and result.issues_processed >= limit:
             return result
 
-        # Branch-contending stages: any `pr-ready` issue blocks a new build/review
-        # (Human Gate 2 awaiting merge), regardless of issue-number order. Otherwise
-        # advance the oldest admitted build/review task.
-        # `max_active_branches_per_repo` is reserved for future concurrency; the runner
-        # intentionally advances exactly one branch here to preserve the
-        # at-most-one-in-flight-branch invariant.
+        # Branch-contending stages: any `publish_pr` gate issue (e.g. `pr-ready`) blocks
+        # a new branch-contending stage regardless of issue-number order. Otherwise advance
+        # the oldest admitted branch-contending task.
         runnable_tasks = [] if admission.has_pr_ready else admission.build_review_issues
         if runnable_tasks:
             task = runnable_tasks[0]
+            active_stage = task.stage_for_config(config)
             display.show_phase_banner(
-                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: {task.current_stage})",
+                f"[{repo_slug}] Issue #{task.issue_number}: {task.title} (Stage: {active_stage})",
                 style="cyan",
             )
-            # Branch new build worktrees from a fresh `origin/<default>` baseline only
-            # when actually creating a worktree. Review reuses the existing worktree
-            # (base_ref ignored), so skip detection there to avoid a wasted/aborting call.
+            # Branch new worktrees from a fresh `origin/<default>` baseline only for
+            # write worktree stages (skip for clean-worktree review stages).
             base_ref = None
-            if task.current_stage == "build":
+            stage_caps = config.stage_capabilities(active_stage)
+            if stage_caps.worktree and not stage_caps.require_clean_worktree:
                 base_ref = f"origin/{await detect_default_branch(checkout)}"
             outcome = await run_issue_stage(
                 checkout,

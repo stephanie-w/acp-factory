@@ -66,6 +66,7 @@ async def run_factory(
     config: FactoryConfig,
     workspace: Path,
     *,
+    flow: str | None = None,
     issue_number: int | None = None,
     issue_title: str | None = None,
     repo_slug: str | None = None,
@@ -164,6 +165,7 @@ async def run_factory(
                         failure_reason=failure_reason,
                         usage=run_usage,
                         metadata=RunMetadata(
+                            flow=flow,
                             issue_number=issue_number,
                             issue_title=issue_title,
                             repo_slug=repo_slug,
@@ -406,6 +408,7 @@ async def run_factory(
         turn_condensed=turn_condensed,
         last_response_text=last_response_text,
         metadata=RunMetadata(
+            flow=flow,
             issue_number=issue_number,
             issue_title=issue_title,
             repo_slug=repo_slug,
