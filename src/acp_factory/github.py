@@ -416,6 +416,11 @@ LABEL_COLOR_MAP: dict[str, str] = {
     "factory:done": "BFDADC",
     "factory:completed": "0E8A16",
     "factory:needs-human": "D93F0B",
+    "flow:refactor": "006B75",
+    "factory:refactor-plan": "C2E0C6",
+    "factory:plan-ready": "FEF2C0",
+    "factory:refactor-apply": "1D76DB",
+    "factory:refactor-review": "5319E7",
 }
 
 

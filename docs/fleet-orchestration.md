@@ -84,12 +84,12 @@ max_active_branches_per_repo = 1
 #### Subtlety: Separating Read-Only Preparation from Branch Contention
 Not all stages contend on `main`. `acp-factory next --fleet` applies a **stage-aware per-repository admission policy**:
 
-1. **Always Run `done` First (Unblock Phase)**:
-   - Any closed/merged issue that still has a local `.worktrees/issue-<id>` (or carries `factory:done`) is cleaned up **first**. Cleaning up merged PRs immediately frees the repository's branch slot.
-2. **Read-Only Stages (`triage`, `spec`) Never Conflict**:
-   - Because `triage` and `spec` run in `read_only = true` (`mode = "plan"`) and create no branches or PRs, they can safely advance queued tickets up to **Human Gate 1 (`factory:spec-ready`)** so humans can batch-review specifications.
-3. **At Most One In-Flight Code Branch/PR per Repository (`build`, `review`, `pr-ready`)**:
-   - The runner advances exactly one in-flight code branch/PR per repository. If a repository already has an issue in `factory:build`, `factory:review`, or `factory:pr-ready` (awaiting Human Gate 2 merge), `acp-factory` continues advancing *that* active issue (e.g., `build -> review -> pr-ready`) or skips starting a *second* `factory:build` branch in that repository until the open PR merges.
+1. **Always Run Orchestrator-Only Cleanup (`done`) First (Unblock Phase)**:
+   - Any closed/merged issue that still has a local `.worktrees/issue-<id>` (or carries a stage with `orchestrator_only = true`, such as `factory:done`) is cleaned up **first**. Cleaning up merged PRs immediately frees the repository's branch slot.
+2. **Non-Worktree Stages (`worktree = false`) Never Conflict**:
+   - Because read-only/prep stages (`triage`, `spec`, `refactor-plan`, or custom audit/RCA flows) have `worktree = false` and create no branches or PRs, they can safely advance queued tickets up to their human gate (e.g. `factory:spec-ready`, `factory:plan-ready`) without consuming a branch slot.
+3. **At Most One In-Flight Code Branch/PR per Repository (`worktree = true` & `publish_pr` gates)**:
+   - Branch contention is derived automatically from stage capabilities (`worktree = true`, such as `build`, `review`, `refactor-apply`, `refactor-review`) and `publish_pr` gate labels (`factory:pr-ready`). If a repository already has an issue holding a branch slot, `acp-factory` continues advancing *that* active issue or skips starting a *second* branch-contending issue in that repository until the open PR merges.
    - `max_active_branches_per_repo` is **reserved for future concurrency**; setting it above `1` currently has no effect (the runner still advances one branch per pass).
    - As a result, every new `build` branches off a freshly fast-forwarded `origin/main` that already includes the prior ticket's merged changes—eliminating merge-conflict cascades by construction.
 4. **Per-Repo Error Isolation**:

@@ -1,6 +1,6 @@
 # Evolution Plan: Configurable Flows & Refactoring Flow
 
-> **Status:** Design Locked (Ready for Phase 1)  
+> **Status:** Implemented (Phases 0–4 Complete)  
 > **Scope:** Evolving `acp-factory` from a single hardcoded PR workflow (`triage → spec → build → review → done`) into a declarative, multi-flow orchestrator—starting with a dedicated **Refactoring Flow** as the second concrete flow.
 
 ---

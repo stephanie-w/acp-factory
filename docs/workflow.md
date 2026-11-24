@@ -175,6 +175,39 @@ Each `[stages.<name>]` section accepts the following stage-specific overrides:
 | `strip_env` | list | inherited | Additional environment variable names to strip. |
 | `keep_env` | list | inherited | Environment variable names to preserve even if they match sensitive credential patterns; `strip_env` wins on conflict. |
 | `thought_max_chars` | int or null | `null` | Agent thought visibility/length in transcripts. `0` omits thoughts from `transcript.md` and `transcript.summary.json`; `N > 0` truncates to `N` characters; unset keeps full thoughts in `transcript.md`/`transcript.json` and the default 500-character `thought_preview`. Full reasoning is always preserved in `transcript.json` for `retro`. |
+| `worktree` | bool or null | built-in default | Run this stage inside the persistent `.worktrees/issue-<id>` worktree and mark it as branch-contending for fleet admission (`true` by default for `build`, `review`, `refactor-apply`, `refactor-review`). |
+| `require_clean_worktree` | bool or null | built-in default | Snapshot `HEAD` before starting and abort (bouncing back to the flow's revision label) if the worktree has uncommitted changes; also verifies `HEAD` is unchanged and clean before `publish_pr`. |
+| `delta_review` | bool or null | built-in default | Inject Round 2+ delta review briefs using `last_reviewed_sha` and persist `report.md` / `latest-report-*.md` artifacts. |
+| `inject_prior_notes_from` | string or null | built-in default | Attach the latest scoped `implementation-notes.md` produced by the named prior stage (e.g. `"build"` or `"refactor-apply"`). |
+| `revision_brief` | bool or null | built-in default | Inject an incremental revision brief when updating an existing factory block with new human comments. |
+| `orchestrator_only` | bool or null | built-in default | Execute the stage's transition action directly without spawning an ACP agent (e.g. `done` → `cleanup_worktree`). |
+
+### C. Configurable Flows & Built-in Refactoring Flow (`flow:refactor`)
+
+`acp-factory` models each workflow as a declarative state machine (`[flows.<name>]`) over reusable `[stages.<name>]` definitions. Two presets are bundled out of the box:
+
+- **`pr` (default):** `triage → spec → (Gate 1: factory:spec-ready) → build → review → (Gate 2: factory:pr-ready) → done`
+- **`refactor` (`flow:refactor`):** Behavior-preserving structural refactoring flow:
+  1. **`refactor-plan` (`factory:refactor-plan`, read-only):** Produces a Refactor Contract (`## Invariant`, `## Target Seam & Dependency Direction`, `## Compatibility & Re-export Policy`, `## Files to Touch`, `## Baseline & Seam Tests`) sized by seam cohesion and blast radius rather than the 400-line PR cap. Pauses at **Human Gate 1 (`factory:plan-ready`)** on `STATUS: READY`, or escalates on `SPLIT_NEEDED` / `NEEDS_HUMAN`. *(Fast-path: label `flow:refactor` + `factory:refactor-apply` directly if a contract is already written.)*
+  2. **`refactor-apply` (`factory:refactor-apply`, worktree):** Verifies green baseline first, performs the behavior-preserving move, syncs doc pointers (`AGENTS.md`), runs checks, and commits locally → `factory:refactor-review`.
+  3. **`refactor-review` (`factory:refactor-review`, read-only worktree):** Audits behavior preservation, seam depth, acyclic dependency direction, test integrity, and doc sync. Transitions to `factory:pr-ready` (pushing/opening PR) on `ACCEPTED`, or bounces to `factory:refactor-apply` (max 3 rounds) on `REVISION_NEEDED`.
+  4. **`done` (`factory:done` / Issue `CLOSED`):** Orchestrator-only cleanup of `.worktrees/issue-<id>` → `factory:completed`.
+
+#### Label Selection & CLI Overrides
+- Add `flow:<name>` (e.g. `flow:refactor`) alongside the 1:1 stage label (`factory:<stage_key>`).
+- When `flow:<name>` is omitted, `acp-factory` automatically infers the flow if the stage label uniquely belongs to a single configured flow (e.g. `factory:refactor-plan` → `refactor`); otherwise it defaults to `pr` and fails fast on mismatch.
+- Override explicitly per command with `acp-factory issue <n> --flow <name>`, and inspect active flows in `acp-factory status` and `acp-factory history`.
+
+#### Custom Flows & Partial Overrides of Built-in Presets
+You can define arbitrary custom flows (`[flows.<custom>]`, requiring `entry = "<stage>"`) or partially override a single transition of a built-in preset (`[flows.pr]` / `[flows.refactor]`):
+
+```toml
+# Partial override: skip Human Gate 1 in the default `pr` flow while inheriting all other transitions
+[flows.pr.transitions.spec]
+DEFAULT = { label = "factory:build", action = "update_issue_block", block_mode = "replace", status = "spec_ready" }
+```
+
+Each transition supports `label`, `action` (`none`, `update_issue_block`, `publish_pr`, `cleanup_worktree`), `block_mode` (`preserve`, `replace`, `append_section`, `findings`, `clear_findings`), `max_rounds`, and `on_max_rounds_label` (default `factory:needs-human`).
 
 A top-level `thought_max_chars` acts as the global default and is overridden by any stage-level value:
 
