@@ -21,7 +21,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-acpterm = { git = "https://github.com/stephanie-w/acpterm.git", rev = "99aa571111ce39ebb9082e002da742c2c339f6ff" }
+acpterm = { git = "https://github.com/stephanie-w/acpterm.git", rev = "b5c98e6e8e1e805d1e64455eeca0aece7e4c032d" }
 
 [build-system]
 requires = ["uv_build>=0.9.0,<0.12"]
