@@ -1,6 +1,6 @@
 # Evolution Plan: Configurable Flows & Refactoring Flow
 
-> **Status:** Draft Roadmap  
+> **Status:** Design Locked (Ready for Phase 1)  
 > **Scope:** Evolving `acp-factory` from a single hardcoded PR workflow (`triage → spec → build → review → done`) into a declarative, multi-flow orchestrator—starting with a dedicated **Refactoring Flow** as the second concrete flow.
 
 ---
@@ -88,29 +88,38 @@ entry = "triage"
 entry = "refactor-plan"
 
 [flows.refactor.transitions.refactor-plan]
-READY = { label = "factory:plan-ready", action = "update_issue_block" }
-NEEDS_HUMAN = { label = "factory:needs-human", action = "update_issue_block" }
+READY = { label = "factory:plan-ready", action = "update_issue_block", block_mode = "replace" }
+SPLIT_NEEDED = { label = "factory:needs-human", action = "update_issue_block", block_mode = "replace" }
+NEEDS_HUMAN = { label = "factory:needs-human", action = "update_issue_block", block_mode = "replace" }
 
 [flows.refactor.transitions.refactor-apply]
-PASS = { label = "factory:refactor-review" }
-FAIL = { label = "factory:needs-human" }
+PASS = { label = "factory:refactor-review", block_mode = "preserve" }
+FAIL = { label = "factory:needs-human", block_mode = "preserve" }
 
 [flows.refactor.transitions.refactor-review]
-ACCEPTED = { label = "factory:pr-ready", action = "publish_pr" }
-REVISION_NEEDED = { label = "factory:refactor-apply", max_rounds = 3 }
+ACCEPTED = { label = "factory:pr-ready", action = "publish_pr", block_mode = "clear_findings" }
+REVISION_NEEDED = { label = "factory:refactor-apply", block_mode = "findings", max_rounds = 3, on_max_rounds_label = "factory:needs-human" }
+NEEDS_HUMAN = { label = "factory:needs-human", block_mode = "append_section" }
 
 [flows.refactor.transitions.done]
 COMPLETED = { label = "factory:completed", action = "cleanup_worktree" }
 ```
 
-### B. Fixed Set of Orchestrator Side-Effect Actions
+### B. Fixed Set of Orchestrator Side-Effect Actions & Block Modes
 
 Keep side-effects constrained to a small, auditable set of built-in primitives that any transition can reference:
 
-- `update_issue_block` — write cleaned stage output into `<!-- factory:start/end -->`
-- `publish_pr` — push branch, open/update PR, refresh managed PR description & review sections
-- `cleanup_worktree` — remove `.worktrees/issue-<id>` and local branch
-- `none` — local/artifact-only transition (no GitHub mutation)
+- **Actions (`action`):**
+  - `update_issue_block` — write updated stage output into `<!-- factory:start/end -->`
+  - `publish_pr` — push branch, open/update PR, refresh managed PR description & review sections
+  - `cleanup_worktree` — remove `.worktrees/issue-<id>` and local branch
+  - `none` — local/artifact-only transition (no GitHub mutation)
+- **Block update modes (`block_mode`, driving `verdict.py`):**
+  - `preserve` — keep the existing `<!-- factory:start/end -->` block untouched (e.g., `build`, `refactor-apply`)
+  - `replace` — replace the block with cleaned stage output (e.g., `spec`, `refactor-plan`)
+  - `append_section` — wrap/append a headed report or escalation section (e.g., `triage`, review escalation)
+  - `findings` — replace `<!-- factory:findings -->` in-place, increment `review_round`, and trip the `max_rounds` circuit breaker to `on_max_rounds_label` (default `factory:needs-human`)
+  - `clear_findings` — strip `<!-- factory:findings -->` and record `last_reviewed_sha` on acceptance
 
 ### C. Opt-In Stage Capabilities (Replacing `if stage == ...`)
 
@@ -127,8 +136,8 @@ Replace hardcoded stage-name hooks in `run_issue_stage()` with declarative flags
 
 ### D. Flow Selection & Backward Compatibility
 
-- **GitHub Issues:** Select via a `flow:<name>` label (e.g., `flow:refactor`). When absent, default to `pr`. Persist `flow=<name>` in `<!-- factory:meta -->` for observability and `history`/`stats`.
-- **Local / CLI runs:** Support `--flow <name>` on `acp-factory issue` and `acp-factory run` (e.g., for branch-only refactors without a GitHub Issue).
+- **GitHub Issues (1:1 stage labels + `flow:<name>` selector):** Select a flow via `flow:<name>` (e.g., `flow:refactor`) paired with 1:1 `factory:<stage_key>` labels (`factory:refactor-plan`, `factory:refactor-apply`, `factory:refactor-review`) and shared gate/terminal labels (`factory:pr-ready`, `factory:done`, `factory:needs-human`, `factory:completed`). When `flow:<name>` is absent, infer the flow if the stage label uniquely belongs to a single configured flow; otherwise default to `pr` and fail fast on mismatch. Persist `flow=<name>` in `<!-- factory:meta -->` for observability and `history`/`stats`.
+- **Local / CLI runs:** Multi-stage flow orchestration stays GitHub-Issue-driven first; local branch-only refactors use the existing standalone `acp-factory run --stage <stage>` and `acp-factory review --stage <stage>` commands.
 - **Zero breaking changes:** Repositories with no `[flows.*]` section and issues with no `flow:*` label continue running the built-in `pr` flow identically to today.
 
 ---
@@ -152,7 +161,7 @@ Before introducing `FlowConfig`, finish isolating the modules that multi-flow or
 
 Validate the refactoring prompts, skills, and review rubric *before* writing flow-engine code:
 
-1. Author bundled (or `.factory/`) `refactor-plan`, `refactor-apply`, and `refactor-review` prompts/skills.
+1. Author `refactor-plan`, `refactor-apply`, and `refactor-review` prompts, skills, and validators directly in `src/acp_factory/resources/` (keeping external generic skills such as `coding-ai-resources/skills/improve-codebase-architecture` strictly factory-agnostic).
 2. Run them on real refactoring branches via `acp-factory run --stage refactor-apply` and `acp-factory review --stage refactor-review --create-pr`.
 3. Capture lessons via `acp-factory run --stage retro` and refine the behavior-preservation rubric and validators.
 
@@ -177,9 +186,13 @@ Validate the refactoring prompts, skills, and review rubric *before* writing flo
 
 ---
 
-## 5. Open Design Decisions (To Confirm Before Phase 2)
+## 5. Settled Design Decisions
 
-1. **Delivery modes for `refactor`:** Should the refactoring flow support *both* GitHub Issue → PR and local branch-only execution (no Issue), or start Issue-driven first?
-2. **Label namespace:** Prefer a separate flow-selector label (`flow:refactor` + `factory:<stage>`) or namespaced stage labels (`factory:refactor:plan`)? *(Recommendation: separate `flow:<name>` label so shared stages like `done`, `pr-ready`, `needs-human`, and `completed` stay uniform across flows.)*
-3. **Custom vs. preset flows:** Should repositories be able to define arbitrary `[flows.<custom>]` in `.factory/config.toml` from day one, or start with bundled presets (`pr`, `refactor`) whose stages can be overridden?
-4. **Fleet admission for non-PR flows:** Does `max_active_branches_per_repo` apply only to flows with `worktree = true` stages, letting read-only flows (e.g. audits/RCA) run concurrently?
+1. **Custom & preset flows:** Support arbitrary `[flows.<name>]` definitions in `.factory/config.toml` from day one, with `pr` and `refactor` shipped as built-in presets that repositories can inherit or override.
+2. **Label namespace & stage mapping:** Use `flow:<name>` as the flow selector + 1:1 `factory:<stage_key>` labels (`factory:refactor-plan`, `factory:refactor-apply`, `factory:refactor-review`) alongside shared gate/terminal labels (`factory:pr-ready`, `factory:done`, `factory:needs-human`, `factory:completed`). Keeps `factory:<stage>` 1:1 with `[stages.<stage>]` and `--stage` CLI flags with minimal code impact.
+3. **Missing `flow:<name>` fallback:** When `flow:<name>` is absent, infer the flow if the stage label uniquely belongs to a single configured flow (e.g., `factory:refactor-plan` → `refactor`); otherwise default to `pr` and fail fast on mismatch.
+4. **Human Gate 1 (`refactor` preset):** Pause at `factory:plan-ready` by default after `refactor-plan`, while allowing humans to skip planning by labeling `factory:refactor-apply` directly when a Refactor Contract is already written.
+5. **Delivery modes:** Keep multi-stage flow orchestration GitHub-Issue-driven first; rely on existing standalone `acp-factory run --stage` and `acp-factory review --stage` for local branch-only refactors.
+6. **Fleet admission & branch contention:** Derive `_is_branch_contending` from stage capabilities (`worktree = true`) and `publish_pr` gate labels (`factory:pr-ready`), so read-only stages and flows (e.g., `refactor-plan`, audits, RCA) never consume a branch slot.
+7. **Verdict & issue-block updates:** Use a declarative `block_mode` enum on `TransitionConfig` (`preserve`, `replace`, `append_section`, `findings`, `clear_findings`) plus `max_rounds` and `on_max_rounds_label` (default `factory:needs-human`) so `verdict.py` stays 100% data-driven.
+8. **Phase 1 prototyping location:** Author `refactor-plan`, `refactor-apply`, and `refactor-review` prompts, skills, and validators directly in `src/acp_factory/resources/` in Phase 1 (keeping `improve-codebase-architecture` strictly generic and factory-agnostic).
