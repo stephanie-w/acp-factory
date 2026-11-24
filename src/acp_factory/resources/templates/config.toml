@@ -58,11 +58,47 @@ skills = ["retro"]
 prompt = "prompts/RETRO.md"
 checks = []
 
+# Built-in Refactoring Flow (`flow:refactor`) stages
+[stages.refactor-plan]
+agent = "opencode"
+mode = "plan"
+read_only = true
+revision_brief = true
+persona = "agents/architect.agent.md"
+skills = ["refactor-planner"]
+prompt = "prompts/refactor-plan.md"
+checks = ["validate-refactor-plan"]
+
+[stages.refactor-apply]
+agent = "opencode"
+read_only = false
+worktree = true
+pre = ["uv sync --frozen"]
+persona = "agents/implementer.agent.md"
+skills = ["refactor-builder"]
+prompt = "prompts/refactor-apply.md"
+checks = ["lint", "test"]
+
+[stages.refactor-review]
+agent = "opencode"
+read_only = true
+worktree = true
+require_clean_worktree = true
+delta_review = true
+inject_prior_notes_from = "refactor-apply"
+persona = "agents/reviewer.agent.md"
+skills = ["refactor-reviewer"]
+prompt = "prompts/refactor-review.md"
+checks = ["validate-review"]
+
 [checks.validate-triage]
 command = "uv run \"$FACTORY_SKILLS_DIR/issue-triage/scripts/validate_triage.py\" \"$FACTORY_RESPONSE_FILE\""
 
 [checks.validate-spec]
 command = "uv run \"$FACTORY_SKILLS_DIR/spec-writer/scripts/validate_spec.py\" \"$FACTORY_RESPONSE_FILE\""
+
+[checks.validate-refactor-plan]
+command = "uv run \"$FACTORY_SKILLS_DIR/refactor-planner/scripts/validate_refactor_plan.py\" \"$FACTORY_RESPONSE_FILE\""
 
 [checks.validate-review]
 command = "uv run \"$FACTORY_SKILLS_DIR/code-reviewer/scripts/validate_review.py\" \"$FACTORY_RESPONSE_FILE\""

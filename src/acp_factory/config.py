@@ -317,7 +317,7 @@ class StageCapabilities:
     orchestrator_only: bool = False
 
 
-_LEGACY_STAGE_CAPABILITIES: dict[str, StageCapabilities] = {
+_BUILTIN_STAGE_CAPABILITIES: dict[str, StageCapabilities] = {
     "spec": StageCapabilities(revision_brief=True),
     "build": StageCapabilities(worktree=True),
     "review": StageCapabilities(
@@ -327,6 +327,14 @@ _LEGACY_STAGE_CAPABILITIES: dict[str, StageCapabilities] = {
         inject_prior_notes_from="build",
     ),
     "done": StageCapabilities(orchestrator_only=True),
+    "refactor-plan": StageCapabilities(revision_brief=True),
+    "refactor-apply": StageCapabilities(worktree=True),
+    "refactor-review": StageCapabilities(
+        worktree=True,
+        require_clean_worktree=True,
+        delta_review=True,
+        inject_prior_notes_from="refactor-apply",
+    ),
 }
 
 
@@ -600,9 +608,103 @@ def _build_default_pr_flow() -> FlowConfig:
     )
 
 
+def _build_default_refactor_flow() -> FlowConfig:
+    """Return the built-in 4-stage refactoring workflow (`flow:refactor`)."""
+    plan_ready = TransitionConfig(
+        label="factory:plan-ready",
+        action="update_issue_block",
+        block_mode="replace",
+        status="plan_ready",
+        summary="Refactor Contract complete -> waiting for Human Gate 1 approval (factory:plan-ready)",
+    )
+    plan_escalate = TransitionConfig(
+        label="factory:needs-human",
+        action="update_issue_block",
+        block_mode="replace",
+        status="needs_human",
+        summary="Refactor plan requires human attention ({token})",
+    )
+    review_accept = TransitionConfig(
+        label="factory:pr-ready",
+        action="publish_pr",
+        block_mode="clear_findings",
+        status="accepted",
+        summary="Refactor review accepted -> PR ready for Human Gate 2",
+        record_review_report=True,
+    )
+    review_escalate = TransitionConfig(
+        label="factory:needs-human",
+        action="update_issue_block",
+        block_mode="append_section",
+        section_title="## Review Escalation",
+        replace_existing=False,
+        status="needs_human",
+        summary="Refactor review requires human decision",
+        record_review_report=True,
+    )
+    review_revise = TransitionConfig(
+        label="factory:refactor-apply",
+        action="update_issue_block",
+        block_mode="findings",
+        max_rounds=3,
+        on_max_rounds_label="factory:needs-human",
+        status="revision_needed",
+        summary="Refactor review requested revisions -> returning to factory:refactor-apply",
+        record_review_report=True,
+    )
+    return FlowConfig(
+        entry="refactor-plan",
+        open_questions_stages=["refactor-plan"],
+        transitions={
+            "refactor-plan": {
+                "READY": plan_ready,
+                "SPLIT_NEEDED": plan_escalate,
+                "NEEDS_HUMAN": plan_escalate,
+                "NEEDS_INPUT": plan_escalate,
+                "DEFAULT": plan_ready,
+            },
+            "refactor-apply": {
+                "FAIL": TransitionConfig(
+                    label="factory:needs-human",
+                    action="none",
+                    block_mode="preserve",
+                    status="failed",
+                    summary="Refactor apply failed -> waiting for human intervention",
+                ),
+                "DEFAULT": TransitionConfig(
+                    label="factory:refactor-review",
+                    action="none",
+                    block_mode="preserve",
+                    status="applied",
+                    summary="",
+                ),
+            },
+            "refactor-review": {
+                "ACCEPTED": review_accept,
+                "PASS": review_accept,
+                "HUMAN_DECISION_NEEDED": review_escalate,
+                "NEEDS_HUMAN": review_escalate,
+                "STOP": review_escalate,
+                "DEFAULT": review_revise,
+            },
+            "done": {
+                "DEFAULT": TransitionConfig(
+                    label="factory:completed",
+                    action="cleanup_worktree",
+                    block_mode="preserve",
+                    status="completed",
+                    summary="",
+                ),
+            },
+        },
+    )
+
+
 DEFAULT_PR_FLOW: FlowConfig = _build_default_pr_flow()
+DEFAULT_REFACTOR_FLOW: FlowConfig = _build_default_refactor_flow()
 BUILTIN_FLOWS: dict[str, FlowConfig] = {
     "pr": DEFAULT_PR_FLOW,
+    "refactor": DEFAULT_REFACTOR_FLOW,
 }
 
 
@@ -947,7 +1049,7 @@ class FactoryConfig(BaseModel):
         """Return effective capabilities for `stage_name`, combining StageConfig and legacy defaults."""
         if not stage_name:
             return StageCapabilities()
-        defaults = _LEGACY_STAGE_CAPABILITIES.get(stage_name, StageCapabilities())
+        defaults = _BUILTIN_STAGE_CAPABILITIES.get(stage_name, StageCapabilities())
         stage_cfg = self.stages.get(stage_name)
         if stage_cfg is None:
             return defaults

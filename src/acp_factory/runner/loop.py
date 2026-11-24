@@ -89,6 +89,7 @@ async def run_issue_stage(
     issue_number: int,
     *,
     stage_override: str | None = None,
+    flow_override: str | None = None,
     config_file: Path | None = None,
     dry_run: bool | None = None,
     display: FactoryDisplay | None = None,
@@ -132,7 +133,21 @@ async def run_issue_stage(
             f"(current labels: {task.labels}). Expected one of: {expected}."
         )
 
-    flow_name, active_flow = base_cfg.resolve_issue_flow(task.labels, stage=stage)
+    if flow_override is not None:
+        flow_name = flow_override.strip()
+        active_flow = base_cfg.get_flow(flow_name)
+        if (
+            stage != "done"
+            and stage not in active_flow.transitions
+            and stage != active_flow.entry
+        ):
+            valid_stages = ", ".join(sorted(active_flow.transitions.keys())) or "none"
+            raise ValueError(
+                f"Stage '{stage}' does not belong to flow '{flow_name}' "
+                f"(valid stages: {valid_stages})."
+            )
+    else:
+        flow_name, active_flow = base_cfg.resolve_issue_flow(task.labels, stage=stage)
     caps = base_cfg.stage_capabilities(stage)
 
     # Orchestrator-only stages (e.g. `done`) execute their transition action directly

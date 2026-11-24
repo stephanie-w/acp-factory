@@ -321,12 +321,12 @@ def test_scaffolded_config_files_come_from_bundled_templates(tmp_path: Path) -> 
         "templates/apm.yml"
     )
 
-    # Pin the exact bytes emitted before the #85 refactor. The equality checks
-    # above compare against the same bundled file, so only a golden hash catches
+    # Pin the exact bytes emitted by `init`. The equality checks above compare
+    # against the same bundled file, so only a golden hash catches unintentional
     # template content drift that would silently change `init` output.
     expected_sha256 = {
         "factory.yaml": "e8aac907dbc7b310bb9bad1562021e439bda21712c5b266686328a07da576c3f",
-        ".factory/config.toml": "892b8771e7319ffe655faf3a1fa6798aa9603a9e0ff3fd7b0396701e258de119",
+        ".factory/config.toml": "9c2fe87cdbac994d5523c9c6b84a4f8f954210408a7c086361c8cc9761bc539e",
         "apm.yml": "95140312db2d7109299f321c36662e74b322085d784d549b60d251b673b6f1ce",
     }
     for relative_path, expected_digest in expected_sha256.items():

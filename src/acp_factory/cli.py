@@ -439,6 +439,14 @@ def issue_cmd(
             help="Explicit stage override (defaults to the issue's current `factory:*` label).",
         ),
     ] = None,
+    flow: Annotated[
+        str | None,
+        typer.Option(
+            "--flow",
+            "-f",
+            help="Explicit flow override (e.g. 'pr', 'refactor'; defaults to `flow:<name>` label or unique stage inference).",
+        ),
+    ] = None,
     workspace: Annotated[
         Path,
         typer.Option("--workspace", "-w", help="Target workspace directory."),
@@ -503,6 +511,7 @@ def issue_cmd(
                 workspace.resolve(),
                 issue_number,
                 stage_override=stage,
+                flow_override=flow,
                 config_file=config_file,
                 dry_run=dry_run,
                 display=_quiet_display(ctx),
@@ -838,13 +847,16 @@ def next_cmd(
     raise typer.Exit(code=rc)
 
 
-def _state_description(t: TaskContext) -> str:
+def _state_description(t: TaskContext, *, config: FactoryConfig | None = None) -> str:
     """Render a human-gate/stage description for a task's `factory:*` labels."""
     fac_labels = [lbl for lbl in t.labels if lbl.startswith("factory:")]
-    if t.current_stage:
-        return f"[green]Actionable ({t.current_stage})[/green]"
+    active_stage = t.stage_for_config(config)
+    if active_stage:
+        return f"[green]Actionable ({active_stage})[/green]"
     if "factory:spec-ready" in fac_labels:
         return "[bold magenta]🛑 Human Gate 1 (Spec Approval)[/bold magenta]"
+    if "factory:plan-ready" in fac_labels:
+        return "[bold magenta]🛑 Human Gate 1 (Plan Approval)[/bold magenta]"
     if "factory:pr-ready" in fac_labels:
         return "[bold magenta]🛑 Human Gate 2 (PR Review & Merge)[/bold magenta]"
     if "factory:needs-human" in fac_labels:
@@ -852,6 +864,18 @@ def _state_description(t: TaskContext) -> str:
     if "factory:completed" in fac_labels:
         return "[dim]Completed[/dim]"
     return "[dim]Idle[/dim]"
+
+
+def _task_flow_label(t: TaskContext, *, config: FactoryConfig) -> str:
+    """Return the display flow name for an issue in `status` tables."""
+    if t.flow_label:
+        return t.flow_label
+    stage = t.stage_for_config(config)
+    try:
+        flow_name, _ = config.resolve_issue_flow(t.labels, stage=stage)
+        return flow_name
+    except ValueError:
+        return "pr"
 
 
 @app.command("status")
@@ -902,6 +926,7 @@ def status_cmd(
             table = Table(title="acp-factory Fleet Status")
             table.add_column("Repository", style="bold cyan")
             table.add_column("Issue", justify="right", style="cyan")
+            table.add_column("Flow", style="magenta", no_wrap=True)
             table.add_column("Title")
             table.add_column("Factory Label(s)", style="yellow")
             table.add_column("State / Gate")
@@ -911,20 +936,26 @@ def status_cmd(
             for repo_slug, tasks, error in repo_cols:
                 if error:
                     table.add_row(
-                        repo_slug, "-", "-", "-", f"[bold red]Error: {error}[/bold red]"
+                        repo_slug,
+                        "-",
+                        "-",
+                        "-",
+                        "-",
+                        f"[bold red]Error: {error}[/bold red]",
                     )
                     any_rows = True
                     continue
                 if not tasks:
-                    table.add_row(repo_slug, "-", "-", "-", "[dim]Idle[/dim]")
+                    table.add_row(repo_slug, "-", "-", "-", "-", "[dim]Idle[/dim]")
                     any_rows = True
                     continue
                 for t in tasks:
                     fac_labels = [lbl for lbl in t.labels if lbl.startswith("factory:")]
-                    state_desc = _state_description(t)
+                    state_desc = _state_description(t, config=base_cfg)
                     table.add_row(
                         repo_slug,
                         f"#{t.issue_number}",
+                        _task_flow_label(t, config=base_cfg),
                         t.title,
                         ", ".join(fac_labels),
                         state_desc,
@@ -937,6 +968,7 @@ def status_cmd(
         main_root = resolve_main_repo_root(resolved_workspace)
         table = Table(title="acp-factory GitHub Issues & Worktrees")
         table.add_column("Issue", style="bold cyan", justify="right")
+        table.add_column("Flow", style="magenta", no_wrap=True)
         table.add_column("Title")
         table.add_column("Factory Label(s)", style="yellow")
         table.add_column("State / Gate")
@@ -944,12 +976,13 @@ def status_cmd(
 
         for t in tasks:
             fac_labels = [lbl for lbl in t.labels if lbl.startswith("factory:")]
-            state_desc = _state_description(t)
+            state_desc = _state_description(t, config=base_cfg)
 
             wt_path = WorktreeManager.issue_worktree_path(main_root, t.issue_number)
             wt_status = str(wt_path.relative_to(main_root)) if wt_path.exists() else "-"
             table.add_row(
                 f"#{t.issue_number}",
+                _task_flow_label(t, config=base_cfg),
                 t.title,
                 ", ".join(fac_labels),
                 state_desc,
@@ -1146,6 +1179,7 @@ def history_cmd(
 
     table = Table(title="acp-factory Run History")
     table.add_column("Run ID", style="dim")
+    table.add_column("Flow", style="magenta", no_wrap=True)
     table.add_column("Stage", style="cyan", no_wrap=True)
     table.add_column("Model")
     table.add_column("Issue", justify="right", style="bold cyan", no_wrap=True)
@@ -1199,6 +1233,7 @@ def history_cmd(
             attempts_cell = "-"
         table.add_row(
             str(rec.get("run_id") or "-"),
+            str(rec.get("flow") or "-"),
             str(rec.get("stage") or "-"),
             model_cell,
             f"#{issue}" if issue is not None else "-",
