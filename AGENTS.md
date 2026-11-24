@@ -118,8 +118,12 @@ Before signaling completion, verify:
 - `cli.py`: Typer CLI entrypoints (`run`, `issue`, `next`, `review`, `status`, `init`).
 - `config.py`: `FactoryConfig`, `StageConfig`, `CheckConfig`, `FleetConfig`, and `resolve_resources_dir`.
 - `acp/client.py`: `FactoryACPClient` wrapping `acpterm.acp_agent.ACPAgent`, `resolve_persona_text`, and `resolve_skill_paths`.
+- `acp/spawn.py`: Process-spawn adapter sealing `acpterm` command resolution, workspace env, and stdio transport spawn.
 - `acp/events.py`: `TurnEventTracker` and Markdown transcript recorder.
-- `runner/loop.py`: Core stage execution loop (`run_factory`, `run_issue_stage`, `run_fleet_next`, `run_branch_review`).
+- `runner/orchestrator.py`: Top-level `run_factory` execution loop and `FactoryRunOutcome`.
+- `runner/loop.py`: Issue, branch, and fleet stage dispatchers (`run_issue_stage`, `run_fleet_next`, `run_branch_review`).
+- `runner/artifacts.py`: `RunArtifactStore` for persisting `run.json`, transcripts, reports, build notes, and `latest*` pointers.
+- `runner/prompts.py`: Initial/retry/revision/delta-review prompt builders and budget-cap checks.
 - `runner/checks.py`: Sequential shell & agent review check runner (`$FACTORY_SKILLS_DIR`, `$FACTORY_RESPONSE_FILE`, read-only `gh` shim).
 - `runner/worktree.py`: Git worktree lifecycle (`.worktrees/issue-<id>`) and fleet checkout validation.
 - `task.py`: `TaskContext`, `<!-- factory:start/end -->` and `<!-- factory:meta -->` parsers, and markdown renderers.
