@@ -49,6 +49,37 @@ def get_bundled_resources_dir() -> Path:
     return materialized
 
 
+def load_bundled_text(relative_path: str | Path) -> str:
+    """Read a UTF-8 text resource from the package-bundled catalog.
+
+    Args:
+        relative_path: Bundle-relative path such as ``agents/reviewer.agent.md``.
+
+    Returns:
+        The file contents.
+
+    Raises:
+        ValueError: If the path is empty, absolute, or escapes the bundle.
+        FileNotFoundError: If no regular file exists at the resolved path.
+    """
+    raw = str(relative_path).strip()
+    if not raw:
+        raise ValueError("Bundled resource path must not be empty")
+
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        raise ValueError(f"Bundled resource path must be relative: {candidate}")
+
+    bundled_dir = get_bundled_resources_dir().resolve()
+    resolved = (bundled_dir / candidate).resolve()
+    if not resolved.is_relative_to(bundled_dir):
+        raise ValueError(f"Bundled resource path escapes the bundle: {candidate}")
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Bundled resource not found: {candidate}")
+
+    return resolved.read_text(encoding="utf-8")
+
+
 def _parse_env_resource_dirs() -> list[str]:
     """Parse FACTORY_RESOURCES_DIRS (JSON list or os.pathsep) and FACTORY_RESOURCES_DIR."""
     dirs: list[str] = []

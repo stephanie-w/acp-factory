@@ -1554,7 +1554,7 @@ async def run_branch_review(
     offline: bool = False,
 ) -> FactoryRunOutcome:
     """Review a local working branch against a base branch and optionally open a standalone PR."""
-    from ..cli import DEFAULT_PERSONAS, DEFAULT_STAGE_PROMPTS
+    from ..resources import load_bundled_text
     from .worktree import _run_git
 
     ui = display or FactoryDisplay()
@@ -1646,14 +1646,14 @@ async def run_branch_review(
             cfg.agent.skills = ["code-reviewer", "security-auditor"]
     else:
         prompt_text = (
-            f"{DEFAULT_STAGE_PROMPTS['REVIEW.md'].strip()}\n\n"
+            f"{load_bundled_text('prompts/review.md').strip()}\n\n"
             f"## Task Context\n{review_context_md}"
         )
         cfg = base_cfg.with_overrides(
             workspace=resolved_workspace,
             task=prompt_text,
             read_only=True,
-            persona=DEFAULT_PERSONAS["reviewer.md"],
+            persona=load_bundled_text("agents/reviewer.agent.md").strip(),
             skills=["code-reviewer", "security-auditor"],
             dry_run=effective_dry_run,
         )

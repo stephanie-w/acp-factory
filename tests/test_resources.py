@@ -17,6 +17,7 @@ from acp_factory.acp.spawn import SpawnHandshake, SpawnSpec
 from acp_factory.config import AgentConfig, CheckConfig, FactoryConfig
 from acp_factory.resources import (
     get_bundled_resources_dir,
+    load_bundled_text,
     parse_frontmatter_summary,
     resolve_resource_dirs,
     resolve_resources,
@@ -101,6 +102,43 @@ def test_bundled_orchestration_resources_exist_and_resolve(
     assert resolved.persona_text is not None
     assert len(resolved.skills) == len(core_skills)
     assert all(sp.is_relative_to(bundled) for sp in resolved.skills)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "agents/triage.agent.md",
+        "agents/reviewer.agent.md",
+        "prompts/triage.md",
+        "prompts/review.md",
+    ],
+)
+def test_load_bundled_text_matches_bundled_file(relative_path: str) -> None:
+    """Bundled text loading returns the exact bytes of the packaged resource."""
+    bundled = get_bundled_resources_dir()
+    assert load_bundled_text(relative_path) == (bundled / relative_path).read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    ("bad_path", "expected_error"),
+    [
+        ("", ValueError),
+        ("   ", ValueError),
+        ("../pyproject.toml", ValueError),
+        ("../../pyproject.toml", ValueError),
+        ("/etc/passwd", ValueError),
+        ("agents/does-not-exist.md", FileNotFoundError),
+        ("agents", FileNotFoundError),
+    ],
+)
+def test_load_bundled_text_rejects_bad_paths(
+    bad_path: str, expected_error: type[Exception]
+) -> None:
+    """Empty, absolute, escaping, and missing paths are rejected explicitly."""
+    with pytest.raises(expected_error):
+        load_bundled_text(bad_path)
 
 
 def test_layered_resource_dirs_precedence(tmp_path: Path) -> None:

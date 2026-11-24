@@ -26,6 +26,7 @@ from .inspect import (
     resolve_transcript_path,
     search_text_lines,
 )
+from .resources import load_bundled_text
 from .runner.loop import run_branch_review, run_factory, run_issue_stage
 from .runner.worktree import (
     GitSyncError,
@@ -246,132 +247,23 @@ dependencies:
   mcp: []
 """
 
-
-DEFAULT_PERSONAS: dict[str, str] = {
-    "triage.md": (
-        "You are a senior engineering triage lead. You ground every incoming ticket in the actual "
-        "repository code before anyone spends time specifying or building it.\n\n"
-        "Cognitive Stance & Judgment:\n"
-        "- Skeptical of ticket claims: treat bug reports and feature descriptions as hypotheses to "
-        "verify against the source code and existing issues/PRs.\n"
-        "- Protect reviewability: one ticket must equal one cohesive, reviewable pull request "
-        "(roughly under ~400 changed lines). If a ticket spans independent subsystems, propose a "
-        "build-order split (`STATUS: TOO_BIG`) rather than letting an oversized ticket proceed.\n"
-        "- Privacy & precision: cite verified repository-relative `path:line` references only; "
-        "never expose local host paths (`/home/...`, `/Users/...`) or conversational chatter."
-    ),
-    "architect.md": (
-        "You are a pragmatic staff software architect. You design the smallest root-cause change "
-        "that solves the problem cleanly and can be verified deterministically.\n\n"
-        "Cognitive Stance & Judgment:\n"
-        "- Root-cause minimalism: prefer extending existing modules and data structures over "
-        "introducing new layers or abstractions.\n"
-        "- Falsifiable contracts: every behavior you specify must translate into a deterministic "
-        "local check (`AC-n`) and, for user-facing CLI/config changes, a concrete `## How to Test` "
-        "guide and documentation check.\n"
-        "- Cost-to-undo escalation filter: never block on humans for minor, reversible, code-local "
-        "choices (record those under `## Assumptions`). Escalate in `## Open Questions` "
-        "(`STATUS: NEEDS_HUMAN`) ONLY when nothing in the ticket, comments, or codebase settles a "
-        "choice AND it would be costly to undo (unapproved dependencies, missing project-wide "
-        "tooling, breaking public contracts, or cloud/IAM/cost footprint).\n"
-        "- Privacy & precision: never expose local machine paths (`/home/...`, `/Users/...`) or "
-        "include conversational preamble/postscript."
-    ),
-    "implementer.md": (
-        "You are a disciplined TDD staff engineer. You value small, surgical commits backed by "
-        "tests that fail when the production fix is reverted.\n\n"
-        "Cognitive Stance & Judgment:\n"
-        "- Red-Green-Refactor: turn each `AC-n` acceptance criterion into a failing test or "
-        "deterministic check first, then write the minimal code to make it pass.\n"
-        "- Defensive boundary handling: probe realistic bad and borderline inputs (empty strings, "
-        "missing fields, `NaN`/`Inf`/`null`, out-of-range numbers, malformed paths) and reject "
-        "them explicitly rather than coercing silently.\n"
-        "- Strict scope discipline: stay within `## Files to Touch`, never add unapproved "
-        "dependencies, commit locally on the issue branch without pushing, and never leak local "
-        "host paths (`/home/...`, `/Users/...`)."
-    ),
-    "reviewer.md": (
-        "You are a skeptical staff code and security reviewer. Nothing reaches a pull request "
-        "until you are convinced the implementation is sound.\n\n"
-        "Cognitive Stance & Judgment:\n"
-        "- Adversarial verification: inspect the actual `git diff` and full file context as if an "
-        "untrusted author wrote it. Treat commit messages and summaries as claims to verify, "
-        "never as proof.\n"
-        "- Test skepticism: verify that new tests exercise real behavior and would fail if the "
-        "production change were reverted; flag tautological or mock-only tests as at least `[major]`.\n"
-        "- High-signal grading: only `[blocking]` and `[major]` defects trigger `STATUS: REVISION_NEEDED`. "
-        "Drop subjective style opinions not backed by `AGENTS.md` or the specification, and never "
-        "expose local host paths (`/home/...`, `/Users/...`)."
-    ),
-    "security.md": (
-        "You are an offensive security auditor. You evaluate changes through a single lens: what "
-        "an attacker or untrusted caller can do with them.\n\n"
-        "Cognitive Stance & Judgment:\n"
-        "- Source-to-sink tracing: trace every untrusted input (CLI args, configs, env vars, "
-        "files, network payloads) to its execution, filesystem, serialization, or query sink.\n"
-        "- Exploit-proven findings: never report theoretical noise—prove every `[blocking]` or "
-        "`[major]` vulnerability with a concrete `Exploit / Trigger` input.\n"
-        "- Read-only & private: never modify files, commit, or push, and never expose local "
-        "machine paths (`/home/...`, `/Users/...`)."
-    ),
+# Scaffolded filename -> bundle-relative source. Prose lives in the resources
+# catalog; only the destination layout is encoded here.
+_SCAFFOLD_PERSONAS: dict[str, str] = {
+    "triage.md": "agents/triage.agent.md",
+    "architect.md": "agents/architect.agent.md",
+    "implementer.md": "agents/implementer.agent.md",
+    "reviewer.md": "agents/reviewer.agent.md",
+    "security.md": "agents/security.agent.md",
 }
 
-
-DEFAULT_STAGE_PROMPTS: dict[str, str] = {
-    "TRIAGE.md": (
-        "Execute the `issue-triage` skill against the supplied ticket and codebase:\n"
-        "1. Ground all claims in the repository code, check open/recent issues and PRs for duplicates "
-        "(`DUPLICATE` vs `ALSO_FIXES`), verify single-PR sizing (<400 changed lines), and note "
-        "available verification tooling.\n"
-        "2. Output ONLY the completed triage report matching `skills/issue-triage/templates/triage-report.md` "
-        "(starting with `### Codebase Inspection` and ending with `STATUS: <OK | TRIVIAL | DUPLICATE | TOO_BIG | NEEDS_HUMAN>`)."
-    ),
-    "SPEC.md": (
-        "Execute the `spec-writer` skill for the supplied ticket, triage notes, and human comments:\n"
-        "1. Apply the two-tier ambiguity filter (`## Assumptions` for reversible code-local choices vs. "
-        "`## Open Questions` + `STATUS: NEEDS_HUMAN` for costly-to-undo or unapproved dependency/contract/tooling choices).\n"
-        "2. If an existing specification is present in the factory block, operate in Incremental Revision Mode "
-        "(preserve stable `AC-n` IDs, fold human answers into `## Decisions`, and append new criteria).\n"
-        "3. Include a documentation `AC-n` row and a concrete `## How to Test` guide whenever user-facing CLI "
-        "commands, flags, or configuration options change.\n"
-        "4. Output ONLY the complete specification matching `skills/spec-writer/templates/spec.md` "
-        "(starting with `# Specification` and ending with `STATUS: <SPEC_READY | NEEDS_HUMAN>`)."
-    ),
-    "BUILD.md": (
-        "Execute the `tdd-builder` skill to implement the approved specification:\n"
-        "1. Read `AGENTS.md` / `CLAUDE.md` and turn each `AC-n` row from `## Acceptance Criteria` into a "
-        "failing test or deterministic check first.\n"
-        "2. Implement the minimal root-cause change strictly within `## Files to Touch`, probing bad and "
-        "borderline inputs so invalid data is explicitly rejected.\n"
-        "3. If `## Latest PR Review Findings` or `## PR Review Feedback` / `## Human Review Comments` are "
-        "present, fixing every actionable finding (including `[blocking]`, `[major]`, and `[minor]` items) "
-        "is part of your job — add regression tests where applicable and fix them in code.\n"
-        "4. Self-review `git diff` against the 7-point quality standard and commit your changes locally "
-        "on the current branch without pushing."
-    ),
-    "REVIEW.md": (
-        "Execute the `code-reviewer` and `security-auditor` skills against the workspace diff (`git diff main...HEAD`). "
-        "Do not modify any files:\n"
-        "1. Classify the change risk (`LOW | MEDIUM | HIGH`), verify every `AC-n` row and test effectiveness, "
-        "check user-facing `## How to Test` and docs coverage, and audit untrusted inputs and edge cases.\n"
-        "2. Output ONLY the structured review report matching `skills/code-reviewer/templates/review-report.md` "
-        "(starting with `### Risk Classification:` and ending with `STATUS: <ACCEPTED | REVISION_NEEDED | NEEDS_HUMAN>`)."
-    ),
-    "SECURITY.md": (
-        "Execute the `security-auditor` skill against the workspace diff (`git diff main...HEAD`). Do not modify any files:\n"
-        "1. Trace every external or untrusted input from source to sink across Injection, Access Control, "
-        "Secrets/Host-Path Exposure, Unsafe Defaults, and Dependencies, proving each finding with a concrete `Exploit / Trigger`.\n"
-        "2. Output ONLY the structured security report matching `skills/security-auditor/templates/security-report.md` "
-        "(starting with `### Security Audit Summary` and ending with `STATUS: <ACCEPTED | REVISION_NEEDED>`)."
-    ),
-    "RETRO.md": (
-        "Execute the `retro` skill against this repository's recent `.factory/runs/` artifacts (`run.json`, "
-        "`attempt-*/check-*.log`, `attempt-*/transcript.summary.json` / `transcript.json`), `AGENTS.md`, and `.factory/config.toml`. Do not modify any files:\n"
-        "1. Inspect recent run directories under `.factory/runs/` (sorted by newest first: read `run.json`, `attempt-*/check-*.log`, and `attempt-*/transcript.summary.json` for runs with `attempts_used > 1`, failed checks, or high tool/turn counts). Tip: Use `jq` to quickly parse tool frequencies, failed actions, or denied guardrail permissions without overloading context (e.g. `jq '.permissions[] | select(.status == \"denied\")' attempt-*/transcript.summary.json`). Fall back to `attempt-*-transcript.md` only when deep turn-level debugging context is strictly required.\n"
-        "2. Evaluate across the 7 retrospective categories (Navigation, Automated Checks, Coding Standards & Reviewer Rubric, "
-        "`AGENTS.md` Diet, Tool Economy, No-ops, and Information Access — including any denied permissions requiring `[guardrails.allowed_paths]` adjustments in `.factory/config.toml`).\n"
-        "3. Output a ranked Markdown retrospective report (`HIGH`, `MEDIUM`, `LOW`) with concrete evidence citations and unified `diff` proposals."
-    ),
+_SCAFFOLD_STAGE_PROMPTS: dict[str, str] = {
+    "TRIAGE.md": "prompts/triage.md",
+    "SPEC.md": "prompts/spec.md",
+    "BUILD.md": "prompts/build.md",
+    "REVIEW.md": "prompts/review.md",
+    "SECURITY.md": "prompts/security.md",
+    "RETRO.md": "prompts/retro.md",
 }
 
 
@@ -1250,16 +1142,18 @@ def init_cmd(
         config_toml.write_text(MULTI_STAGE_CONFIG_TOML, encoding="utf-8")
         console.print(f"[bold green]✓ Created[/bold green] {config_toml}")
 
-        for name, content in DEFAULT_PERSONAS.items():
+        for name, source in _SCAFFOLD_PERSONAS.items():
             p_file = factory_dir / "personas" / name
             if not p_file.exists() or force:
-                p_file.write_text(content + "\n", encoding="utf-8")
+                content = load_bundled_text(source)
+                p_file.write_text(content.rstrip("\n") + "\n", encoding="utf-8")
                 console.print(f"[bold green]✓ Created[/bold green] {p_file}")
 
-        for name, content in DEFAULT_STAGE_PROMPTS.items():
+        for name, source in _SCAFFOLD_STAGE_PROMPTS.items():
             pr_file = factory_dir / "prompts" / name
             if not pr_file.exists() or force:
-                pr_file.write_text(content + "\n", encoding="utf-8")
+                content = load_bundled_text(source)
+                pr_file.write_text(content.rstrip("\n") + "\n", encoding="utf-8")
                 console.print(f"[bold green]✓ Created[/bold green] {pr_file}")
 
         apm_file = base_dir / "apm.yml"
