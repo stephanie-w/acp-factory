@@ -7,18 +7,14 @@ import contextlib
 import difflib
 import inspect
 import logging
-import shutil
 import sys
 import uuid
 from collections.abc import Mapping
-from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-from unittest.mock import patch
 
-import acpterm.acp_agent as acpterm_agent_mod
 from acpterm import agent_cache as acpterm_agent_cache
 from acpterm.acp_agent import ACPAgent
 from acpterm.config import Config as AcptermConfig
@@ -38,6 +34,7 @@ from ..resources import (
     resolve_skill_paths as resolve_skill_paths,
 )
 from .events import TurnEventTracker, TurnSummary
+from .spawn import AcptermProcessSpawner, ProcessSpawner, SpawnSpec
 
 logger = logging.getLogger(__name__)
 console = Console(highlight=False)
@@ -52,21 +49,6 @@ class TurnResult:
 
     stop_reason: str
     summary: TurnSummary
-
-
-def resolve_factory_agent_command(agent_cfg: AgentConfig) -> list[str]:
-    """Resolve the command list for an agent using either explicit config or acpterm's config."""
-    acpterm_cfg = AcptermConfig.load()
-
-    if agent_cfg.command:
-        if len(agent_cfg.command) == 1 and agent_cfg.command[0] in acpterm_cfg.agents:
-            return acpterm_cfg.get_agent_command(agent_cfg.command[0])
-        binary = agent_cfg.command[0]
-        if not shutil.which(binary) and binary in acpterm_cfg.agents:
-            return acpterm_cfg.get_agent_command(binary)
-        return list(agent_cfg.command)
-
-    return acpterm_cfg.get_agent_command(agent_cfg.name)
 
 
 class FactoryACPClient:
@@ -98,6 +80,7 @@ class FactoryACPClient:
         runs_dir: Path | None = None,
         allow_runs: bool = False,
         thought_max_chars: int | None = None,
+        spawner: ProcessSpawner | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.config_dir = config_dir.resolve() if config_dir else self.workspace
@@ -122,6 +105,7 @@ class FactoryACPClient:
         self.runs_dir = runs_dir.resolve() if runs_dir is not None else None
         self.allow_runs = allow_runs
         self.thought_max_chars = thought_max_chars
+        self.spawner = spawner or AcptermProcessSpawner()
         self.applied_thought_level: str | None = None
 
         effective_discover = (
@@ -197,7 +181,6 @@ class FactoryACPClient:
 
     async def start(self, *, load_existing: bool = False) -> None:
         """Spawn the ACP agent process in the target workspace and initialize a session."""
-        cmd = resolve_factory_agent_command(self.agent_config)
         acpterm_cfg = AcptermConfig.load()
 
         hooks: list[Any] = []
@@ -230,8 +213,8 @@ class FactoryACPClient:
             )
         hooks.extend(acpterm_cfg.hooks)
 
-        self._agent = ACPAgent(
-            project_root=self.workspace,
+        self._agent = self.spawner.create_agent(
+            workspace=self.workspace,
             agent_binary=self.agent_config.name,
             session_name=self.session_name,
             auto_approve=True,
@@ -242,88 +225,26 @@ class FactoryACPClient:
             permission_hooks=hooks,
         )
 
-        orig_spawn = acpterm_agent_mod.spawn_stdio_transport
-        orig_cache_store = acpterm_agent_cache.store
-        handshake: dict[str, Any] = {"observed": False, "config_options": None}
-
-        def _capture_cache_store(
-            agent_name: str,
-            config_options: Any = None,
-            modes: Any = None,
-            commands: Any = None,
-        ) -> None:
-            """Record the live handshake's config options before acpterm strips them."""
-            handshake["observed"] = True
-            handshake["config_options"] = config_options
-            orig_cache_store(
-                agent_name,
-                config_options=config_options,
-                modes=modes,
-                commands=commands,
-            )
-
-        def _spawn_in_workspace(
-            command: str,
-            *args: str,
-            env: Mapping[str, str] | None = None,
-            cwd: str | Path | None = None,
-            stderr: int | None = -1,
-            limit: int | None = None,
-            shutdown_timeout: float = 2.0,
-        ) -> AbstractAsyncContextManager[
-            tuple[
-                asyncio.StreamReader, asyncio.StreamWriter, asyncio.subprocess.Process
-            ]
-        ]:
-            from ..runner.checks import build_workspace_env
-
-            _ = env
-            return orig_spawn(
-                command,
-                *args,
-                env=build_workspace_env(
-                    self.workspace,
-                    restrict_gh_writes=True,
-                    resources_dir=self.resources_dir,
-                    extra_env=self.extra_env,
-                    strip_env=self.strip_env,
-                    keep_env=self.keep_env,
-                ),
-                cwd=str(self.workspace),
-                stderr=stderr,
-                limit=limit,
-                shutdown_timeout=shutdown_timeout,
-            )
+        spec = SpawnSpec(
+            command=self.spawner.resolve_command(self.agent_config),
+            workspace=self.workspace,
+            resources_dir=self.resources_dir,
+            extra_env=self.extra_env,
+            strip_env=self.strip_env,
+            keep_env=self.keep_env,
+            load_existing=load_existing,
+            model_override=self.agent_config.model,
+            mode_override=self.agent_config.mode,
+            timeout=self.agent_config.timeout,
+        )
 
         try:
-            with (
-                patch.object(
-                    acpterm_agent_mod, "resolve_agent_command", return_value=cmd
-                ),
-                patch.object(
-                    acpterm_agent_mod,
-                    "spawn_stdio_transport",
-                    side_effect=_spawn_in_workspace,
-                ),
-                patch.object(
-                    acpterm_agent_cache,
-                    "store",
-                    side_effect=_capture_cache_store,
-                ),
-            ):
-                await asyncio.wait_for(
-                    self._agent.start(
-                        load_existing=load_existing,
-                        model_override=self.agent_config.model,
-                        mode_override=self.agent_config.mode,
-                    ),
-                    timeout=self.agent_config.timeout,
-                )
+            handshake = await self.spawner.start(self._agent, spec)
             if self.agent_config.thought_level is not None:
                 await self._apply_thought_level(
                     self.agent_config.thought_level,
-                    observed=bool(handshake["observed"]),
-                    config_options=handshake["config_options"],
+                    observed=handshake.observed,
+                    config_options=handshake.config_options,
                 )
         except BaseException:
             await self.stop()
@@ -616,12 +537,6 @@ class FactoryACPClient:
         )
         summary = self.tracker.end_turn(stop_reason or "end_turn")
         return TurnResult(stop_reason=stop_reason or "end_turn", summary=summary)
-
-    async def set_read_only(self, read_only: bool) -> None:
-        """Update read-only flag for review turns."""
-        self.read_only = read_only
-        if self._agent is not None:
-            self._agent._read_only = read_only
 
     async def stop(self) -> None:
         """Cleanly close the ACP session and terminate the agent subprocess."""

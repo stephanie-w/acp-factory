@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from acp_factory.acp.client import FactoryACPClient
+from acp_factory.acp.spawn import SpawnHandshake, SpawnSpec
 from acp_factory.config import AgentConfig, CheckConfig, FactoryConfig
 from acp_factory.resources import (
     get_bundled_resources_dir,
@@ -22,6 +23,35 @@ from acp_factory.resources import (
 )
 from acp_factory.runner.checks import build_workspace_env, run_single_check
 from acp_factory.runner.guardrails import is_path_contained
+
+
+class _FakeSpawner:
+    """Local process-spawn adapter fake: no acpterm globals are patched."""
+
+    def __init__(self, agent: Any, handshake: SpawnHandshake | None = None) -> None:
+        self._agent = agent
+        self.handshake = handshake or SpawnHandshake()
+        self.specs: list[SpawnSpec] = []
+
+    def resolve_command(self, agent_cfg: AgentConfig) -> list[str]:
+        _ = agent_cfg
+        return ["python3", "-c", "pass"]
+
+    def create_agent(self, **_kwargs: Any) -> Any:
+        return self._agent
+
+    def build_env(self, spec: SpawnSpec) -> dict[str, str]:
+        _ = spec
+        return {}
+
+    async def start(self, agent: Any, spec: SpawnSpec) -> SpawnHandshake:
+        self.specs.append(spec)
+        await agent.start(
+            load_existing=spec.load_existing,
+            model_override=spec.model_override,
+            mode_override=spec.mode_override,
+        )
+        return self.handshake
 
 
 def test_bundled_orchestration_resources_exist_and_resolve(
@@ -231,19 +261,6 @@ async def test_send_prompt_turn_resources_omits_discovered_skills_and_templates(
     caller_resource = ws / "notes.md"
     caller_resource.write_text("# Caller notes", encoding="utf-8")
 
-    client = FactoryACPClient(
-        workspace=ws,
-        agent_config=AgentConfig(skills=["tdd-builder"]),
-        resource_dirs=[],
-        discover_apm_resources=True,
-    )
-    explicit_skill = client.explicit_skill_paths[0]
-    explicit_template = next(
-        (explicit_skill.parent / "templates").glob("*.md")
-    ).resolve()
-    explicit_script = next((explicit_skill.parent / "scripts").glob("*.py")).resolve()
-    assert discovered_skill in client.discovered_skill_paths
-
     calls: list[tuple[str, list[Path]]] = []
 
     async def _fake_send(prompt: str, **kwargs: object) -> str:
@@ -257,16 +274,23 @@ async def test_send_prompt_turn_resources_omits_discovered_skills_and_templates(
     mock_agent.stop = AsyncMock()
     mock_agent.send_prompt = AsyncMock(side_effect=_fake_send)
 
-    with (
-        patch("acp_factory.acp.client.ACPAgent", return_value=mock_agent),
-        patch(
-            "acp_factory.acp.client.resolve_factory_agent_command",
-            return_value=["python3", "-c", "pass"],
-        ),
-    ):
-        await client.start()
-        await client.send_prompt("first turn", resources=[caller_resource])
-        await client.send_prompt("second turn")
+    client = FactoryACPClient(
+        workspace=ws,
+        agent_config=AgentConfig(skills=["tdd-builder"]),
+        resource_dirs=[],
+        discover_apm_resources=True,
+        spawner=_FakeSpawner(mock_agent),
+    )
+    explicit_skill = client.explicit_skill_paths[0]
+    explicit_template = next(
+        (explicit_skill.parent / "templates").glob("*.md")
+    ).resolve()
+    explicit_script = next((explicit_skill.parent / "scripts").glob("*.py")).resolve()
+    assert discovered_skill in client.discovered_skill_paths
+
+    await client.start()
+    await client.send_prompt("first turn", resources=[caller_resource])
+    await client.send_prompt("second turn")
 
     first_prompt, first_resources = calls[0]
     _, second_resources = calls[1]
@@ -328,12 +352,12 @@ async def test_prompt_check_policy_auditor_receives_apm_domain_resources(
 
     mock_agent.send_prompt.side_effect = _fake_send
 
+    class FakeSpawnerClient(FactoryACPClient):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs, spawner=_FakeSpawner(mock_agent))
+
     with (
-        patch("acp_factory.acp.client.ACPAgent", return_value=mock_agent),
-        patch(
-            "acp_factory.acp.client.resolve_factory_agent_command",
-            return_value=["python3", "-c", "pass"],
-        ),
+        patch("acp_factory.acp.client.FactoryACPClient", FakeSpawnerClient),
         patch(
             "acp_factory.acp.client.TurnEventTracker.end_turn",
             return_value=MagicMock(response_text="All good.\nVERDICT: PASS"),
@@ -538,9 +562,16 @@ async def _start_client_with_handshake(
     agent_setter: object | None = None,
     console_buf: StringIO | None = None,
     observe_handshake: bool = True,
-) -> tuple[FactoryACPClient, MagicMock, SimpleNamespace, MagicMock, MagicMock]:
-    """Start a client whose mocked agent reports ``options`` in its session handshake."""
-    from acpterm import agent_cache as acpterm_agent_cache
+) -> tuple[FactoryACPClient, MagicMock, SimpleNamespace, MagicMock]:
+    """Start a client whose fake spawner reports ``options`` in its handshake."""
+    fake_conn = conn or SimpleNamespace(set_config_option=AsyncMock())
+    agent = MagicMock()
+    agent.session_id = "sess-1"
+    agent._conn = fake_conn
+    agent.stop = AsyncMock()
+    agent.start = AsyncMock()
+    if agent_setter is not None:
+        agent.set_config_option = agent_setter
 
     client = FactoryACPClient(
         workspace=tmp_path,
@@ -548,31 +579,17 @@ async def _start_client_with_handshake(
         resource_dirs=[],
         discover_apm_resources=False,
         silent=console_buf is None,
+        spawner=_FakeSpawner(
+            agent,
+            SpawnHandshake(
+                observed=observe_handshake,
+                config_options=options if observe_handshake else None,
+            ),
+        ),
     )
-    fake_conn = conn or SimpleNamespace(set_config_option=AsyncMock())
-    agent = MagicMock()
-    agent.session_id = "sess-1"
-    agent._conn = fake_conn
-    agent.stop = AsyncMock()
-    if agent_setter is not None:
-        agent.set_config_option = agent_setter
-
-    async def _fake_start(**_kwargs: object) -> None:
-        # Mirror acpterm's post-handshake cache write so the client can capture it.
-        if observe_handshake:
-            acpterm_agent_cache.store("opencode", config_options=options)
-
-    agent.start = AsyncMock(side_effect=_fake_start)
 
     cached_mock = MagicMock(return_value=cached_options)
-    store_mock = MagicMock()
     patches = [
-        patch("acp_factory.acp.client.ACPAgent", return_value=agent),
-        patch(
-            "acp_factory.acp.client.resolve_factory_agent_command",
-            return_value=["python3", "-c", "pass"],
-        ),
-        patch("acpterm.agent_cache.store", new=store_mock),
         patch(
             "acp_factory.acp.client.acpterm_agent_cache.get_config_options",
             cached_mock,
@@ -592,7 +609,7 @@ async def _start_client_with_handshake(
             stack.enter_context(p)
         await client.start()
 
-    return client, agent, fake_conn, cached_mock, store_mock
+    return client, agent, fake_conn, cached_mock
 
 
 def _console_text(buf: StringIO) -> str:
@@ -606,7 +623,7 @@ async def test_thought_level_applied_from_live_handshake(tmp_path: Path) -> None
     category_option = _thought_level_option(option_id="reasoning")
     id_only_option = _thought_level_option(option_id="thought_level", category=None)
 
-    client, _, conn, _, _ = await _start_client_with_handshake(
+    client, _, conn, _ = await _start_client_with_handshake(
         tmp_path, "high", options=[category_option, id_only_option], console_buf=buf
     )
 
@@ -630,7 +647,7 @@ async def test_thought_level_matches_option_id_and_grouped_values(
         grouped=grouped,
     )
 
-    client, _, conn, _, _ = await _start_client_with_handshake(
+    client, _, conn, _ = await _start_client_with_handshake(
         tmp_path, "medium", options=[option]
     )
 
@@ -646,7 +663,7 @@ async def test_thought_level_boolean_option_coercion(tmp_path: Path) -> None:
         id="thinking", name="Thinking", type="boolean", category="thought_level"
     )
 
-    client, _, conn, _, _ = await _start_client_with_handshake(
+    client, _, conn, _ = await _start_client_with_handshake(
         tmp_path, "ON", options=[option]
     )
 
@@ -672,7 +689,7 @@ async def test_thought_level_unset_is_a_noop(tmp_path: Path) -> None:
     """AC-3: no thought_level means no cache lookups and no RPC calls."""
     option = _thought_level_option()
 
-    client, _, conn, cached_mock, _ = await _start_client_with_handshake(
+    client, _, conn, cached_mock = await _start_client_with_handshake(
         tmp_path, None, options=[option], cached_options=[option]
     )
 
@@ -690,7 +707,7 @@ async def test_thought_level_unsupported_agent_warns_and_continues(
         id="model", name="Model", type="select", category="model", options=[]
     )
 
-    client, _, conn, _, _ = await _start_client_with_handshake(
+    client, _, conn, _ = await _start_client_with_handshake(
         tmp_path, "high", options=[model_option], console_buf=buf
     )
 
@@ -706,7 +723,7 @@ async def test_thought_level_ignores_stale_cache_when_live_options_empty(
     buf = StringIO()
     cached_option = _thought_level_option()
 
-    client, _, conn, cached_mock, _ = await _start_client_with_handshake(
+    client, _, conn, cached_mock = await _start_client_with_handshake(
         tmp_path,
         "high",
         options=None,
@@ -734,7 +751,7 @@ async def test_thought_level_invalid_value_warns_without_rpc(
     buf = StringIO()
     option = _thought_level_option(values=("low", "high"))
 
-    client, _, conn, _, _ = await _start_client_with_handshake(
+    client, _, conn, _ = await _start_client_with_handshake(
         tmp_path, level, options=[option], console_buf=buf
     )
 
@@ -767,7 +784,7 @@ async def test_thought_level_rpc_errors_are_non_fatal(
     conn = SimpleNamespace(set_config_option=AsyncMock(side_effect=error))
     option = _thought_level_option()
 
-    client, _, _, _, _ = await _start_client_with_handshake(
+    client, _, _, _ = await _start_client_with_handshake(
         tmp_path, "high", options=[option], conn=conn, console_buf=buf
     )
 
@@ -796,7 +813,7 @@ async def test_thought_level_falls_back_to_cached_options(tmp_path: Path) -> Non
     """AC-3: without a live observation, acpterm's cached options are used."""
     option = _thought_level_option(values=("low", "high"))
 
-    client, _, conn, cached_mock, _ = await _start_client_with_handshake(
+    client, _, conn, cached_mock = await _start_client_with_handshake(
         tmp_path,
         "low",
         options=None,

@@ -208,27 +208,32 @@ async def test_sequential_checks_response_file_isolation(tmp_path: Path) -> None
 
 
 async def test_run_review_prompt_check(tmp_path: Path) -> None:
-    mock_client = AsyncMock()
-    mock_client.send_prompt.return_value = TurnResult(
-        stop_reason="end_turn",
-        summary=TurnSummary(
-            prompt="review",
-            response_text="Checked implementation thoroughly.\nVERDICT: PASS",
-            thought_text="",
-            stop_reason="end_turn",
-            duration_seconds=0.1,
-            tool_call_count=0,
-        ),
-    )
+    from acp_factory.acp.client import FactoryACPClient
+    from acp_factory.config import AgentConfig
 
-    checks = [CheckConfig(name="Architecture Review", prompt="Check module structure")]
-    all_passed, results = await run_checks_sequential(
-        checks, tmp_path, acp_client=mock_client
+    outer = FactoryACPClient(
+        workspace=tmp_path,
+        agent_config=AgentConfig(name="opencode"),
+        resource_dirs=[],
+        discover_apm_resources=False,
+        silent=True,
     )
+    checks = [CheckConfig(name="Architecture Review", prompt="Check module structure")]
+
+    with patch("acp_factory.acp.client.FactoryACPClient", _FakeReviewClient):
+        all_passed, results = await run_checks_sequential(
+            checks, tmp_path, acp_client=outer
+        )
     assert all_passed is True
     assert len(results) == 1
     assert results[0].check_type == "prompt"
     assert results[0].passed is True
+    # Review checks must spawn a dedicated read-only session that cannot touch runs.
+    assert _FakeReviewClient.captured["read_only"] is True
+    assert _FakeReviewClient.captured["deny_runs"] is True
+    review_agent = _FakeReviewClient.captured["agent_config"]
+    assert isinstance(review_agent, AgentConfig)
+    assert review_agent.read_only is True
 
 
 async def test_feedback_loop_recovers_on_second_attempt(tmp_path: Path) -> None:
@@ -1120,47 +1125,48 @@ async def test_run_factory_threads_keep_env_to_setup_and_client(tmp_path: Path) 
     assert captured_kwargs["keep_env"] == ["CUSTOM_TOKEN"]
 
 
-async def test_factory_acp_client_forwards_keep_env_to_workspace_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_factory_acp_client_forwards_keep_env_to_spawn_spec(
+    tmp_path: Path,
 ) -> None:
-    import acpterm.acp_agent as acpterm_agent_mod
-
-    from acp_factory.acp import client as client_mod
+    from acp_factory.acp.client import FactoryACPClient
+    from acp_factory.acp.spawn import SpawnHandshake, SpawnSpec
     from acp_factory.config import AgentConfig
 
-    captured_kwargs: dict[str, object] = {}
-    sentinel = object()
-
-    def fake_build_workspace_env(workspace: Path, **kwargs: object) -> dict[str, str]:
-        _ = workspace
-        captured_kwargs.update(kwargs)
-        return {"PATH": "/usr/bin"}
+    captured: list[SpawnSpec] = []
 
     class FakeAgent:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            _ = args, kwargs
-            self.session_id = None
+        session_id = None
 
-        async def start(self, **kwargs: object) -> None:
-            _ = kwargs
-            acpterm_agent_mod.spawn_stdio_transport("fake-agent")
+        async def start(self, **_kwargs: object) -> None:
+            pass
 
-    monkeypatch.setattr(
-        acpterm_agent_mod, "spawn_stdio_transport", lambda *a, **k: sentinel
-    )
-    monkeypatch.setattr(
-        "acp_factory.runner.checks.build_workspace_env", fake_build_workspace_env
-    )
-    monkeypatch.setattr(client_mod, "ACPAgent", FakeAgent)
+    class FakeSpawner:
+        def resolve_command(self, agent_cfg: AgentConfig) -> list[str]:
+            _ = agent_cfg
+            return ["fake-agent-binary"]
 
-    client = client_mod.FactoryACPClient(
+        def create_agent(self, **_kwargs: object) -> Any:
+            return FakeAgent()
+
+        def build_env(self, spec: SpawnSpec) -> dict[str, str]:
+            _ = spec
+            return {}
+
+        async def start(self, agent: object, spec: SpawnSpec) -> SpawnHandshake:
+            _ = agent
+            captured.append(spec)
+            return SpawnHandshake()
+
+    client = FactoryACPClient(
         workspace=tmp_path,
-        agent_config=AgentConfig(name="opencode", command=["fake-agent-binary"]),
+        agent_config=AgentConfig(name="opencode"),
         keep_env=["CUSTOM_TOKEN"],
+        spawner=FakeSpawner(),
     )
     await client.start()
 
-    assert captured_kwargs["keep_env"] == ["CUSTOM_TOKEN"]
+    assert captured[0].keep_env == ["CUSTOM_TOKEN"]
+    assert captured[0].workspace == tmp_path.resolve()
 
 
 async def test_readonly_gh_shim_passes_factory_token(tmp_path: Path) -> None:
