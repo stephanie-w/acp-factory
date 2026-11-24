@@ -36,23 +36,25 @@ from ..task import (
     LABEL_BUILD,
     LABEL_COMPLETED,
     LABEL_NEEDS_HUMAN,
-    StageVerdict,
     TaskContext,
-    _clean_markdown_stage_body,
-    _find_terminal_status_or_verdict,
     budget_usage_from_meta,
     extract_factory_findings,
     format_cost_usd,
     format_task_prompt_context,
     parse_factory_meta,
     parse_review_round,
-    parse_stage_verdict,
     render_budget_escalation,
     set_attribution_banner,
     set_factory_meta,
     strip_factory_findings,
 )
 from ..ui.display import FactoryDisplay
+from ..verdict import (
+    StageVerdict,
+    _clean_markdown_stage_body,
+    _find_terminal_status_or_verdict,
+    parse_stage_verdict,
+)
 from .checks import CheckResult, run_checks_sequential, run_shell_command
 from .worktree import (
     WorktreeError,

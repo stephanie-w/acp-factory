@@ -29,8 +29,9 @@ from acp_factory.runner.loop import (
     run_factory,
     run_issue_stage,
 )
-from acp_factory.task import StageVerdict, TaskContext
+from acp_factory.task import TaskContext
 from acp_factory.ui.display import FactoryDisplay
+from acp_factory.verdict import StageVerdict
 
 
 def _runs_dir(workspace: Path) -> Path:
