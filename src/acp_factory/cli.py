@@ -116,137 +116,12 @@ def _resolve_use_fleet(
     return base_cfg.fleet is not None
 
 
-STARTER_CONFIG_YAML = """\
-# factory.yaml — acp-factory configuration
-version: "1"
-
-agent:
-  # Any agent alias configured in ~/.acpterm/config.json (e.g. "opencode", "kiro", "agy")
-  # or an explicit command list: command: ["kiro-cli", "acp"]
-  name: "opencode"
-  timeout: 600
-
-setup:
-  - "uv sync"
-
-task: "Describe the feature or bugfix to implement here"
-
-checks:
-  - name: "Lint & Format"
-    cmd: "uv run ruff check ."
-  - name: "Unit Tests"
-    cmd: "uv run pytest"
-
-retry:
-  max_attempts: 3
-  keep_worktree_on_failure: true
-
-budget:
-  max_tokens_per_run: 100000
-  max_cost_usd: 2.00
-  # max_turns: 10  # Optional per-run turn limit (omitted by default)
-"""
-
-
-MULTI_STAGE_CONFIG_TOML = """\
-# .factory/config.toml — Multi-stage acp-factory configuration
-version = "1"
-
-[agent]
-name = "opencode"
-timeout = 600
-
-[retry]
-max_attempts = 3
-keep_worktree_on_failure = true
-
-[budget]
-max_tokens_per_run = 100000
-max_cost_usd = 2.00
-# max_turns = 10  # Optional per-run turn limit (omitted by default)
-
-[stages.triage]
-agent = "opencode"
-mode = "plan"
-read_only = true
-persona = "personas/triage.md"
-skills = ["issue-triage"]
-prompt = "prompts/TRIAGE.md"
-checks = ["validate-triage"]
-
-[stages.spec]
-agent = "opencode"
-mode = "plan"
-read_only = true
-persona = "personas/architect.md"
-skills = ["spec-writer"]
-prompt = "prompts/SPEC.md"
-checks = ["validate-spec"]
-
-[stages.build]
-agent = "opencode"
-read_only = false
-pre = ["uv sync --frozen"]
-persona = "personas/implementer.md"
-skills = ["tdd-builder"]
-prompt = "prompts/BUILD.md"
-checks = ["lint", "test"]
-
-[stages.review]
-agent = "opencode"
-read_only = true
-persona = "personas/reviewer.md"
-skills = ["code-reviewer", "security-auditor"]
-prompt = "prompts/REVIEW.md"
-checks = ["validate-review"]
-
-[stages.retro]
-agent = "opencode"
-mode = "plan"
-read_only = true
-persona = "personas/architect.md"
-skills = ["retro"]
-prompt = "prompts/RETRO.md"
-checks = []
-
-[checks.validate-triage]
-command = "uv run \\"$FACTORY_SKILLS_DIR/issue-triage/scripts/validate_triage.py\\" \\"$FACTORY_RESPONSE_FILE\\""
-
-[checks.validate-spec]
-command = "uv run \\"$FACTORY_SKILLS_DIR/spec-writer/scripts/validate_spec.py\\" \\"$FACTORY_RESPONSE_FILE\\""
-
-[checks.validate-review]
-command = "uv run \\"$FACTORY_SKILLS_DIR/code-reviewer/scripts/validate_review.py\\" \\"$FACTORY_RESPONSE_FILE\\""
-
-[checks.validate-security]
-command = "uv run \\"$FACTORY_SKILLS_DIR/security-auditor/scripts/validate_security.py\\" \\"$FACTORY_RESPONSE_FILE\\""
-
-[checks.lint]
-command = "git diff --name-only --diff-filter=ACMR main -- '*.py' | xargs -r uv run --frozen ruff check"
-
-[checks.test]
-command = "uv run --frozen pytest"
-
-[checks.review]
-persona = "personas/reviewer.md"
-skills = ["code-reviewer"]
-prompt = "prompts/REVIEW.md"
-
-[checks.security]
-persona = "personas/security.md"
-skills = ["security-auditor"]
-prompt = "prompts/SECURITY.md"
-"""
-
-
-STARTER_APM_YML = """\
-name: factory-workspace
-version: 0.1.0
-description: APM configuration for acp-factory skills and MCP dependencies
-dependencies:
-  apm: []
-  mcp: []
-"""
+# Starter config templates are bundled with the package and written verbatim.
+_SCAFFOLD_TEMPLATE_FILES: dict[str, str] = {
+    "factory.yaml": "templates/factory.yaml",
+    "config.toml": "templates/config.toml",
+    "apm.yml": "templates/apm.yml",
+}
 
 # Scaffolded filename -> bundle-relative source. Prose lives in the resources
 # catalog; only the destination layout is encoded here.
@@ -1139,6 +1014,10 @@ def init_cmd(
         # Load every bundled file up front so a broken package fails before any
         # scaffolded file (or directory) is written.
         try:
+            template_contents = {
+                name: load_bundled_text(source)
+                for name, source in _SCAFFOLD_TEMPLATE_FILES.items()
+            }
             persona_contents = {
                 name: load_bundled_text(source)
                 for name, source in _SCAFFOLD_PERSONAS.items()
@@ -1157,7 +1036,7 @@ def init_cmd(
         (factory_dir / "prompts").mkdir(parents=True, exist_ok=True)
         (factory_dir / "skills").mkdir(parents=True, exist_ok=True)
 
-        config_toml.write_text(MULTI_STAGE_CONFIG_TOML, encoding="utf-8")
+        config_toml.write_text(template_contents["config.toml"], encoding="utf-8")
         console.print(f"[bold green]✓ Created[/bold green] {config_toml}")
 
         for name, content in persona_contents.items():
@@ -1174,7 +1053,7 @@ def init_cmd(
 
         apm_file = base_dir / "apm.yml"
         if not apm_file.exists() or force:
-            apm_file.write_text(STARTER_APM_YML, encoding="utf-8")
+            apm_file.write_text(template_contents["apm.yml"], encoding="utf-8")
             console.print(f"[bold green]✓ Created[/bold green] {apm_file}")
         return
 
@@ -1185,7 +1064,15 @@ def init_cmd(
         )
         raise typer.Exit(code=1)
 
-    target.write_text(STARTER_CONFIG_YAML, encoding="utf-8")
+    try:
+        starter_config = load_bundled_text(_SCAFFOLD_TEMPLATE_FILES["factory.yaml"])
+    except (OSError, ValueError) as exc:
+        console.print(
+            f"[bold red]Failed to load bundled scaffold resources:[/bold red] {exc}"
+        )
+        raise typer.Exit(code=1) from exc
+
+    target.write_text(starter_config, encoding="utf-8")
     console.print(f"[bold green]✓ Created[/bold green] {target}")
 
 

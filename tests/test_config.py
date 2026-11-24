@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import sys
@@ -293,6 +294,80 @@ def test_scaffolded_stage_prose_comes_from_bundled_resources(
 
     assert not hasattr(cli, "DEFAULT_PERSONAS")
     assert not hasattr(cli, "DEFAULT_STAGE_PROMPTS")
+
+
+def test_scaffolded_config_files_come_from_bundled_templates(tmp_path: Path) -> None:
+    """Starter configs are bundled template files, not copies embedded in cli.py."""
+    from typer.testing import CliRunner
+
+    from acp_factory import cli
+    from acp_factory.resources import load_bundled_text
+
+    runner = CliRunner()
+
+    single_file = tmp_path / "factory.yaml"
+    result = runner.invoke(cli.app, ["init", "--path", str(single_file)])
+    assert result.exit_code == 0
+    assert single_file.read_text(encoding="utf-8") == load_bundled_text(
+        "templates/factory.yaml"
+    )
+
+    result = runner.invoke(cli.app, ["init", "--multi-stage", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert (tmp_path / ".factory" / "config.toml").read_text(
+        encoding="utf-8"
+    ) == load_bundled_text("templates/config.toml")
+    assert (tmp_path / "apm.yml").read_text(encoding="utf-8") == load_bundled_text(
+        "templates/apm.yml"
+    )
+
+    # Pin the exact bytes emitted before the #85 refactor. The equality checks
+    # above compare against the same bundled file, so only a golden hash catches
+    # template content drift that would silently change `init` output.
+    expected_sha256 = {
+        "factory.yaml": "e8aac907dbc7b310bb9bad1562021e439bda21712c5b266686328a07da576c3f",
+        ".factory/config.toml": "892b8771e7319ffe655faf3a1fa6798aa9603a9e0ff3fd7b0396701e258de119",
+        "apm.yml": "95140312db2d7109299f321c36662e74b322085d784d549b60d251b673b6f1ce",
+    }
+    for relative_path, expected_digest in expected_sha256.items():
+        scaffolded = (tmp_path / relative_path).read_bytes()
+        assert hashlib.sha256(scaffolded).hexdigest() == expected_digest
+
+    assert not hasattr(cli, "STARTER_CONFIG_YAML")
+    assert not hasattr(cli, "MULTI_STAGE_CONFIG_TOML")
+    assert not hasattr(cli, "STARTER_APM_YML")
+
+
+@pytest.mark.parametrize(
+    ("template_name", "extra_args", "scaffolded_file"),
+    [
+        ("config.toml", ["--multi-stage"], ".factory/config.toml"),
+        ("apm.yml", ["--multi-stage"], "apm.yml"),
+        ("factory.yaml", [], "factory.yaml"),
+    ],
+)
+def test_scaffolded_init_writes_nothing_when_template_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    template_name: str,
+    extra_args: list[str],
+    scaffolded_file: str,
+) -> None:
+    """A missing bundled template aborts before any scaffolded file is written."""
+    from typer.testing import CliRunner
+
+    from acp_factory import cli
+
+    templates = dict(cli._SCAFFOLD_TEMPLATE_FILES)
+    templates[template_name] = "templates/does-not-exist"
+    monkeypatch.setattr(cli, "_SCAFFOLD_TEMPLATE_FILES", templates)
+
+    result = CliRunner().invoke(cli.app, ["init", *extra_args, "--path", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "Failed to load bundled scaffold resources" in result.output
+    assert not (tmp_path / scaffolded_file).exists()
+    assert not (tmp_path / "apm.yml").exists()
 
 
 def test_scaffolded_init_writes_nothing_when_bundle_is_incomplete(
