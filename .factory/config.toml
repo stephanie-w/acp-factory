@@ -23,7 +23,8 @@ thought_max_chars = 100
 [stages.spec]
 agent = "agy"
 mode = "plan"
-model = "gemini-3.8-flash-medium"
+model = "gemini-4-neon"
+thought_level = "medium"
 read_only = true
 pre = ["apm install --frozen", "apm audit --ci"]
 persona = "agents/architect.agent.md"
@@ -66,7 +67,8 @@ checks = []
 [stages.refactor-plan]
 agent = "agy"
 mode = "plan"
-model = "gemini-3.8-flash-medium"
+model = "gemini-4-neon"
+thought_level = "medium"
 read_only = true
 revision_brief = true
 pre = ["apm install --frozen", "apm audit --ci"]
@@ -133,6 +135,6 @@ skills = ["security-auditor"]
 prompt = "prompts/security.md"
 
 [budget]
-max_tokens_per_run = 100000
+max_tokens_per_run = 200000
 max_cost_usd = 2.00
 max_turns = 3
