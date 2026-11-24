@@ -22,9 +22,9 @@ from acp_factory.acp.events import (
     _truncate_text,
 )
 from acp_factory.config import AgentConfig, FactoryConfig, resolve_runs_dir
+from acp_factory.runner import RunArtifactStore
 from acp_factory.runner.loop import (
     FactoryRunOutcome,
-    _persist_run_artifacts,
     run_branch_review,
     run_factory,
     run_issue_stage,
@@ -484,10 +484,8 @@ def test_persist_run_artifacts_json(tmp_path: Path) -> None:
         ],
     )
 
-    run_dir = _persist_run_artifacts(
-        tmp_path,
+    run_dir = RunArtifactStore(tmp_path, config).persist(
         "run-123",
-        config,
         succeeded=True,
         attempts_used=1,
         total_duration=2.5,
@@ -558,10 +556,8 @@ def _persist(
 ) -> Path | None:
     if turn_transcripts is None:
         turn_transcripts = ["# Attempt 1 Markdown"] if attempts_used > 0 else []
-    return _persist_run_artifacts(
-        workspace,
+    return RunArtifactStore(workspace, config).persist(
         run_id,
-        config,
         succeeded=succeeded,
         attempts_used=attempts_used,
         total_duration=0.5,
@@ -1112,6 +1108,40 @@ def _seed_build_run(
     return run_dir
 
 
+def test_run_artifact_store_prior_build_notes_scoping(tmp_path: Path) -> None:
+    """The store returns notes only for a build run matching the requested branch/HEAD."""
+    store = RunArtifactStore(tmp_path, FactoryConfig(task="Review"))
+    assert store.prior_build_notes() is None
+
+    runs_dir = _runs_dir(tmp_path)
+    notes = "### Implementation Summary\n- **Files Modified**: `src/app.py`\n"
+    _seed_build_run(
+        runs_dir, "run-build", notes=notes, branch="feature", head_sha="abc1234"
+    )
+    (runs_dir / "latest-build-notes-branch-feature.md").symlink_to(
+        Path("run-build") / "implementation-notes.md"
+    )
+
+    assert (
+        store.prior_build_notes(
+            branch="feature", head_sha="abc1234", require_match=True
+        )
+        == notes.strip()
+    )
+    assert (
+        store.prior_build_notes(
+            branch="feature", head_sha="old9999", require_match=True
+        )
+        is None
+    )
+    assert (
+        store.prior_build_notes(branch="other", head_sha="abc1234", require_match=True)
+        is None
+    )
+    # Whitespace-only branch scope never falls back to an unscoped pointer.
+    assert store.prior_build_notes(branch="   ", require_match=True) is None
+
+
 def test_scoped_latest_artifact_pointers(tmp_path: Path) -> None:
     """AC-2: pointers are issue/branch scoped inside runs_dir, never under `.factory/`."""
     workspace = tmp_path / "repo"
@@ -1119,10 +1149,10 @@ def test_scoped_latest_artifact_pointers(tmp_path: Path) -> None:
     runs_dir = _runs_dir(workspace)
     notes = "### Implementation Summary\n- **Files Modified**: `src/app.py`\n"
 
-    build_dir = _persist_run_artifacts(
-        workspace,
+    build_dir = RunArtifactStore(
+        workspace, FactoryConfig(task="Build it", active_stage="build")
+    ).persist(
         "run-build",
-        FactoryConfig(task="Build it", active_stage="build"),
         succeeded=True,
         attempts_used=1,
         total_duration=0.1,
@@ -1147,10 +1177,10 @@ def test_scoped_latest_artifact_pointers(tmp_path: Path) -> None:
         )
         assert "Implementation Summary" in pointer.read_text(encoding="utf-8")
 
-    _persist_run_artifacts(
-        workspace,
+    RunArtifactStore(
+        workspace, FactoryConfig(task="Review it", active_stage="review")
+    ).persist(
         "run-review",
-        FactoryConfig(task="Review it", active_stage="review"),
         succeeded=True,
         attempts_used=1,
         total_duration=0.1,

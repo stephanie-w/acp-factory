@@ -14,7 +14,7 @@ from rich.console import Console
 from acp_factory.cli import history_cmd
 from acp_factory.config import FactoryConfig, FleetConfig, resolve_runs_dir
 from acp_factory.history import list_fleet_run_history, list_run_history
-from acp_factory.runner.loop import _persist_run_artifacts
+from acp_factory.runner import RunArtifactStore
 
 
 def _write_run(runs_dir: Path, run_id: str, timestamp: str, **extra: object) -> None:
@@ -98,10 +98,8 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
     (tmp_path / ".factory").mkdir()
     config = FactoryConfig(task="Test task")
 
-    run_dir = _persist_run_artifacts(
-        tmp_path,
+    run_dir = RunArtifactStore(tmp_path, config).persist(
         "run-1",
-        config,
         succeeded=True,
         attempts_used=1,
         total_duration=1.5,
@@ -129,10 +127,8 @@ def test_persist_run_artifacts_records_issue_and_session(tmp_path: Path) -> None
     assert data["session_title"] == "ACP Session e61e0ea7"
 
     # Runs that never resolved a title persist null, never an empty string.
-    no_title_dir = _persist_run_artifacts(
-        tmp_path,
+    no_title_dir = RunArtifactStore(tmp_path, config).persist(
         "run-2",
-        config,
         succeeded=True,
         attempts_used=1,
         total_duration=0.5,
@@ -150,10 +146,8 @@ def test_history_json_surfaces_session_title(tmp_path: Path) -> None:
     runs_dir = tmp_path / ".factory" / "runs"
     # Derive the titled record through the persistence path so this test also
     # fails if `run_factory` ever stops writing `session_title`.
-    _persist_run_artifacts(
-        tmp_path,
+    RunArtifactStore(tmp_path, FactoryConfig(task="Persist session title")).persist(
         "run-titled",
-        FactoryConfig(task="Persist session title"),
         succeeded=True,
         attempts_used=1,
         total_duration=0.5,

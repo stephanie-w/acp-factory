@@ -1,5 +1,6 @@
 """Runner package for acp-factory orchestration."""
 
+from .artifacts import RunArtifactStore
 from .checks import CheckResult, run_checks_sequential, truncate_check_output
 from .loop import FactoryRunOutcome, run_factory
 from .worktree import WorktreeManager
@@ -7,6 +8,7 @@ from .worktree import WorktreeManager
 __all__ = [
     "CheckResult",
     "FactoryRunOutcome",
+    "RunArtifactStore",
     "WorktreeManager",
     "run_checks_sequential",
     "run_factory",
