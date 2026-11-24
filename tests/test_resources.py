@@ -84,6 +84,9 @@ def test_bundled_orchestration_resources_exist_and_resolve(
     ):
         assert (bundled / "prompts" / prompt_name).is_file()
 
+    for template_name in ("factory.yaml", "config.toml", "apm.yml"):
+        assert (bundled / "templates" / template_name).is_file()
+
     core_skills = [
         "issue-triage",
         "spec-writer",
@@ -111,6 +114,9 @@ def test_bundled_orchestration_resources_exist_and_resolve(
         "agents/reviewer.agent.md",
         "prompts/triage.md",
         "prompts/review.md",
+        "templates/factory.yaml",
+        "templates/config.toml",
+        "templates/apm.yml",
     ],
 )
 def test_load_bundled_text_matches_bundled_file(relative_path: str) -> None:

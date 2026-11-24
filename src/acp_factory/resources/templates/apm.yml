@@ -1,0 +1,6 @@
+name: factory-workspace
+version: 0.1.0
+description: APM configuration for acp-factory skills and MCP dependencies
+dependencies:
+  apm: []
+  mcp: []

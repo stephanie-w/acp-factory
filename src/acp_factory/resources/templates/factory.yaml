@@ -1,0 +1,28 @@
+# factory.yaml — acp-factory configuration
+version: "1"
+
+agent:
+  # Any agent alias configured in ~/.acpterm/config.json (e.g. "opencode", "kiro", "agy")
+  # or an explicit command list: command: ["kiro-cli", "acp"]
+  name: "opencode"
+  timeout: 600
+
+setup:
+  - "uv sync"
+
+task: "Describe the feature or bugfix to implement here"
+
+checks:
+  - name: "Lint & Format"
+    cmd: "uv run ruff check ."
+  - name: "Unit Tests"
+    cmd: "uv run pytest"
+
+retry:
+  max_attempts: 3
+  keep_worktree_on_failure: true
+
+budget:
+  max_tokens_per_run: 100000
+  max_cost_usd: 2.00
+  # max_turns: 10  # Optional per-run turn limit (omitted by default)

@@ -295,6 +295,68 @@ def test_scaffolded_stage_prose_comes_from_bundled_resources(
     assert not hasattr(cli, "DEFAULT_STAGE_PROMPTS")
 
 
+def test_scaffolded_config_files_come_from_bundled_templates(tmp_path: Path) -> None:
+    """Starter configs are bundled template files, not copies embedded in cli.py."""
+    from typer.testing import CliRunner
+
+    from acp_factory import cli
+    from acp_factory.resources import load_bundled_text
+
+    runner = CliRunner()
+
+    single_file = tmp_path / "factory.yaml"
+    result = runner.invoke(cli.app, ["init", "--path", str(single_file)])
+    assert result.exit_code == 0
+    assert single_file.read_text(encoding="utf-8") == load_bundled_text(
+        "templates/factory.yaml"
+    )
+
+    result = runner.invoke(cli.app, ["init", "--multi-stage", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert (tmp_path / ".factory" / "config.toml").read_text(
+        encoding="utf-8"
+    ) == load_bundled_text("templates/config.toml")
+    assert (tmp_path / "apm.yml").read_text(encoding="utf-8") == load_bundled_text(
+        "templates/apm.yml"
+    )
+
+    assert not hasattr(cli, "STARTER_CONFIG_YAML")
+    assert not hasattr(cli, "MULTI_STAGE_CONFIG_TOML")
+    assert not hasattr(cli, "STARTER_APM_YML")
+
+
+@pytest.mark.parametrize(
+    ("template_name", "extra_args", "scaffolded_file"),
+    [
+        ("config.toml", ["--multi-stage"], ".factory/config.toml"),
+        ("apm.yml", ["--multi-stage"], "apm.yml"),
+        ("factory.yaml", [], "factory.yaml"),
+    ],
+)
+def test_scaffolded_init_writes_nothing_when_template_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    template_name: str,
+    extra_args: list[str],
+    scaffolded_file: str,
+) -> None:
+    """A missing bundled template aborts before any scaffolded file is written."""
+    from typer.testing import CliRunner
+
+    from acp_factory import cli
+
+    templates = dict(cli._SCAFFOLD_TEMPLATE_FILES)
+    templates[template_name] = "templates/does-not-exist"
+    monkeypatch.setattr(cli, "_SCAFFOLD_TEMPLATE_FILES", templates)
+
+    result = CliRunner().invoke(cli.app, ["init", *extra_args, "--path", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "Failed to load bundled scaffold resources" in result.output
+    assert not (tmp_path / scaffolded_file).exists()
+    assert not (tmp_path / "apm.yml").exists()
+
+
 def test_scaffolded_init_writes_nothing_when_bundle_is_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
