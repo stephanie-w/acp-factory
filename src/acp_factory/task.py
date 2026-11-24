@@ -5,11 +5,14 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from .acp.events import UsageTotals
+
+if TYPE_CHECKING:
+    from .config import FactoryConfig
 
 FACTORY_BLOCK_START = "<!-- factory:start -->"
 FACTORY_BLOCK_END = "<!-- factory:end -->"
@@ -64,6 +67,7 @@ LABEL_PR_READY = "factory:pr-ready"
 LABEL_DONE = "factory:done"
 LABEL_COMPLETED = "factory:completed"
 LABEL_NEEDS_HUMAN = "factory:needs-human"
+FLOW_LABEL_PREFIX = "flow:"
 
 ACTIONABLE_LABEL_TO_STAGE: dict[str, str] = {
     LABEL_TRIAGE: "triage",
@@ -497,6 +501,20 @@ class TaskContext(BaseModel):
             return "done"
         return resolve_stage_from_labels(self.labels)
 
+    def stage_for_config(self, config: FactoryConfig | None) -> str | None:
+        """Return the actionable stage using all flows declared in `config` (or PR defaults)."""
+        if self.state.upper() == "CLOSED":
+            if LABEL_COMPLETED in self.labels:
+                return None
+            return "done"
+        actionable = config.actionable_stage_labels() if config is not None else None
+        return resolve_stage_from_labels(self.labels, actionable_labels=actionable)
+
+    @property
+    def flow_label(self) -> str | None:
+        """Return the explicit `flow:<name>` selector on this issue, if present."""
+        return extract_flow_from_labels(self.labels)
+
     @classmethod
     def from_gh_json(cls, data: dict[str, Any]) -> TaskContext:
         """Construct a TaskContext from `gh issue view --json` output."""
@@ -596,11 +614,30 @@ def render_issue_body(original_body: str, factory_block: str) -> str:
     return f"{clean_orig}\n\n{managed_section}\n"
 
 
-def resolve_stage_from_labels(labels: list[str]) -> str | None:
+def extract_flow_from_labels(labels: list[str]) -> str | None:
+    """Return the flow name from a `flow:<name>` label, or None when absent."""
+    for label in labels:
+        if label.startswith(FLOW_LABEL_PREFIX):
+            name = label.removeprefix(FLOW_LABEL_PREFIX).strip()
+            if name:
+                return name
+    return None
+
+
+def resolve_stage_from_labels(
+    labels: list[str],
+    *,
+    actionable_labels: dict[str, str] | None = None,
+) -> str | None:
     """Determine the active factory stage from a list of GitHub labels."""
     if LABEL_DONE in labels:
         return "done"
-    for label, stage in ACTIONABLE_LABEL_TO_STAGE.items():
+    lookup = (
+        actionable_labels
+        if actionable_labels is not None
+        else ACTIONABLE_LABEL_TO_STAGE
+    )
+    for label, stage in lookup.items():
         if label in labels:
             return stage
     return None

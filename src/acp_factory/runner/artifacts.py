@@ -50,7 +50,9 @@ def _build_review_report(response_text: str) -> str:
     return cleaned
 
 
-_IMPLEMENTATION_SUMMARY_RE = re.compile(r"(?m)^#{1,4}\s+Implementation\s+Summary\b")
+_IMPLEMENTATION_SUMMARY_RE = re.compile(
+    r"(?m)^#{1,4}\s+(?:Implementation|Refactor)\s+Summary\b"
+)
 
 
 def _extract_implementation_notes(response_text: str) -> str | None:
@@ -143,9 +145,10 @@ def _build_notes_metadata_matches(
     *,
     branch: str | None,
     head_sha: str | None,
+    expected_stage: str = "build",
 ) -> bool:
-    """Return True when run metadata belongs to the reviewed build branch/HEAD."""
-    if data.get("stage") != "build":
+    """Return True when run metadata belongs to the reviewed build/apply branch and HEAD."""
+    if data.get("stage") != expected_stage:
         return False
     recorded_branch = data.get("branch")
     if not recorded_branch or recorded_branch != branch:
@@ -161,8 +164,9 @@ def _scan_matching_build_notes(
     *,
     branch: str | None,
     head_sha: str | None,
+    expected_stage: str = "build",
 ) -> str | None:
-    """Return notes from the newest build run matching `branch` and `head_sha`."""
+    """Return notes from the newest matching stage run for `branch` and `head_sha`."""
     if not branch:
         return None
 
@@ -173,7 +177,7 @@ def _scan_matching_build_notes(
             continue
         meta = _read_run_metadata(run_dir)
         if meta is None or not _build_notes_metadata_matches(
-            meta, branch=branch, head_sha=head_sha
+            meta, branch=branch, head_sha=head_sha, expected_stage=expected_stage
         ):
             continue
         matches.append((str(meta.get("timestamp") or run_dir.name), run_dir))
@@ -306,7 +310,8 @@ class RunArtifactStore:
         if not config.dry_run and has_transcripts:
             _update_latest_run_symlink(runs_dir, run_id)
 
-        if config.active_stage == "review" and last_response_text.strip():
+        stage_caps = config.stage_capabilities(config.active_stage)
+        if stage_caps.delta_review and last_response_text.strip():
             report_text = _build_review_report(last_response_text)
             if report_text:
                 (run_dir / "report.md").write_text(report_text, encoding="utf-8")
@@ -321,7 +326,7 @@ class RunArtifactStore:
                         text=report_text,
                     )
 
-        if config.active_stage == "build":
+        if stage_caps.worktree and not stage_caps.delta_review:
             notes_text = _extract_implementation_notes(last_response_text)
             if notes_text:
                 (run_dir / "implementation-notes.md").write_text(
@@ -347,8 +352,9 @@ class RunArtifactStore:
         branch: str | None = None,
         head_sha: str | None = None,
         require_match: bool = False,
+        expected_stage: str = "build",
     ) -> str | None:
-        """Return scoped build notes from the runs directory, or None when none apply.
+        """Return scoped build/apply notes from the runs directory, or None when none apply.
 
         Never falls back to repo-wide `<workspace>/.factory/` pointers: issue and
         branch scope are required so stale notes cannot leak into unrelated reviews.
@@ -393,13 +399,19 @@ class RunArtifactStore:
                 ):
                     continue
                 if require_match and not _build_notes_metadata_matches(
-                    meta, branch=branch, head_sha=head_sha
+                    meta,
+                    branch=branch,
+                    head_sha=head_sha,
+                    expected_stage=expected_stage,
                 ):
                     continue
             return notes
 
         if require_match:
             return _scan_matching_build_notes(
-                runs_dir, branch=branch, head_sha=head_sha
+                runs_dir,
+                branch=branch,
+                head_sha=head_sha,
+                expected_stage=expected_stage,
             )
         return None

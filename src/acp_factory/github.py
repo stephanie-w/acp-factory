@@ -11,9 +11,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import resolve_runs_dir
+from .config import FactoryConfig, resolve_runs_dir
 from .task import (
-    ALL_FACTORY_STAGE_LABELS,
     LABEL_PR_READY,
     TaskContext,
     clean_spec_block,
@@ -229,24 +228,28 @@ async def list_actionable_issues(
     limit: int = 50,
     repo_slug: str | None = None,
     include_branch_contending: bool = False,
+    config: FactoryConfig | None = None,
 ) -> list[TaskContext]:
     """List GitHub Issues that have an actionable `factory:*` stage (including closed issues with leftover worktrees).
 
-    `include_branch_contending` (fleet admission) additionally retains `pr-ready` issues
-    whose `current_stage` is None but that still occupy a branch/PR slot.
+    `include_branch_contending` (fleet admission) additionally retains branch-holding
+    gate issues (such as `pr-ready`) whose active stage is None but that still occupy a
+    branch/PR slot.
     """
     return await _list_issues_with_worktrees(
         cwd,
         include=lambda task: (
             bool(stage_label)
-            or task.current_stage is not None
-            or (include_branch_contending and _is_branch_contending(task))
+            or task.stage_for_config(config) is not None
+            or (
+                include_branch_contending and _is_branch_contending(task, config=config)
+            )
         ),
         label=stage_label,
         limit=limit,
         repo_slug=repo_slug,
         scan_worktrees=not stage_label,
-        include_worktree=lambda task: task.current_stage == "done",
+        include_worktree=lambda task: task.stage_for_config(config) == "done",
     )
 
 
@@ -291,21 +294,31 @@ def build_repo_admission(
     tasks: list[TaskContext],
     *,
     max_active_branches_per_repo: int = 1,
+    config: FactoryConfig | None = None,
 ) -> RepoAdmission:
     """Classify a repository's issues for stage-aware admission control.
 
-    Branch-contending stages (`build`, `review`, `pr-ready`) are mutually exclusive per
-    repo. A `pr-ready` issue (awaiting Human Gate 2 merge) blocks any new `build`/`review`
-    regardless of issue-number order.
+    Branch-contending stages (those with `worktree = true`) and `publish_pr` gate labels
+    (e.g. `factory:pr-ready`) are mutually exclusive per repo. A PR-ready issue awaiting
+    Human Gate 2 merge blocks any new branch-contending stage regardless of issue-number
+    order, while non-worktree stages/flows (e.g. `triage`, `spec`, `refactor-plan`, audits)
+    never consume a branch slot.
     """
     pr_ready: list[TaskContext] = []
     build_review: list[TaskContext] = []
     actionable: list[TaskContext] = []
+    pr_gate_labels = (
+        config.publish_pr_labels() if config is not None else {LABEL_PR_READY}
+    )
     for task in tasks:
-        stage = task.current_stage
-        if LABEL_PR_READY in task.labels:
+        stage = task.stage_for_config(config)
+        if any(lbl in pr_gate_labels for lbl in task.labels):
             pr_ready.append(task)
-        elif stage in ("build", "review"):
+        elif (
+            config.is_branch_contending_stage(stage)
+            if config is not None
+            else stage in ("build", "review")
+        ):
             build_review.append(task)
         if stage is not None:
             actionable.append(task)
@@ -321,12 +334,15 @@ def build_repo_admission(
     )
 
 
-def _is_branch_contending(task: TaskContext) -> bool:
-    """Return True when a task holds a branch/PR-contending stage or label.
-
-    `pr-ready` is a Human Gate 2 label (not an actionable stage), so it is detected
-    by label rather than by `current_stage`.
-    """
+def _is_branch_contending(
+    task: TaskContext, *, config: FactoryConfig | None = None
+) -> bool:
+    """Return True when a task holds a branch/PR-contending stage or gate label."""
+    if config is not None:
+        stage = task.stage_for_config(config)
+        return config.is_branch_contending_stage(stage) or any(
+            lbl in config.publish_pr_labels() for lbl in task.labels
+        )
     return task.current_stage in ("build", "review") or LABEL_PR_READY in task.labels
 
 
@@ -444,9 +460,7 @@ async def transition_issue_label(
     await ensure_label_exists(target_label, cwd=cwd, repo_slug=repo_slug)
 
     labels_to_remove = [
-        lbl
-        for lbl in task.labels
-        if lbl in ALL_FACTORY_STAGE_LABELS and lbl != target_label
+        lbl for lbl in task.labels if lbl.startswith("factory:") and lbl != target_label
     ]
     if labels_to_remove:
         rm_cmd = ["issue", "edit", str(task.issue_number)]
@@ -844,7 +858,7 @@ def build_dry_run_gh_plan(
     labels_to_remove = [
         lbl
         for lbl in task.labels
-        if lbl in ALL_FACTORY_STAGE_LABELS and lbl != verdict.target_label
+        if lbl.startswith("factory:") and lbl != verdict.target_label
     ]
     if labels_to_remove:
         rm_parts = ["gh", "issue", "edit", str(task.issue_number)]
