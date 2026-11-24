@@ -208,28 +208,42 @@ def test_factory_config_guardrails_schema_defaults() -> None:
     assert cfg.guardrails.blocked_paths == []
 
 
-async def test_factory_acp_client_injects_guardrail_hook(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+class _StubSpawner:
+    """Local process-spawn adapter fake: no acpterm globals are patched."""
+
+    def __init__(self, agent_factory: Any) -> None:
+        self._agent_factory = agent_factory
+
+    def resolve_command(self, agent_cfg: AgentConfig) -> list[str]:
+        _ = agent_cfg
+        return ["python3", "-c", "pass"]
+
+    def create_agent(self, **kwargs: Any) -> Any:
+        return self._agent_factory(**kwargs)
+
+    def build_env(self, spec: Any) -> dict[str, str]:
+        _ = spec
+        return {}
+
+    async def start(self, agent: Any, spec: Any) -> Any:
+        _ = agent, spec
+        from acp_factory.acp.spawn import SpawnHandshake
+
+        return SpawnHandshake()
+
+
+async def test_factory_acp_client_injects_guardrail_hook(tmp_path: Path) -> None:
     from acp_factory.acp import client as client_mod
 
     captured_hooks: list[Any] = []
 
     class FakeAgent:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            _ = args
+        def __init__(self, **kwargs: object) -> None:
             self.session_id = None
             captured_hooks.extend(cast(list[Any], kwargs.get("permission_hooks", [])))
 
         async def start(self, **kwargs: object) -> None:
             _ = kwargs
-
-    monkeypatch.setattr(client_mod, "ACPAgent", FakeAgent)
-    monkeypatch.setattr(
-        client_mod,
-        "resolve_factory_agent_command",
-        lambda _cfg: ["python3", "-c", "pass"],
-    )
 
     client = client_mod.FactoryACPClient(
         workspace=tmp_path,
@@ -241,6 +255,7 @@ async def test_factory_acp_client_injects_guardrail_hook(
             blocked_paths=["dist"],
         ),
         deny_runs=True,
+        spawner=_StubSpawner(FakeAgent),
     )
     await client.start()
 
@@ -259,6 +274,7 @@ async def test_factory_acp_client_injects_guardrail_hook(
         workspace=tmp_path,
         agent_config=AgentConfig(name="opencode"),
         guardrails=GuardrailsConfig(enabled=False),
+        spawner=_StubSpawner(FakeAgent),
     )
     await client_disabled.start()
     assert captured_hooks == []
@@ -1118,7 +1134,6 @@ def test_guardrails_main_runs_dir_flags(tmp_path: Path) -> None:
 )
 async def test_factory_acp_client_runs_dir_hook_rendering(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     client_kwargs: dict[str, Any],
     expected_present: list[str],
     expected_absent: list[str],
@@ -1129,20 +1144,13 @@ async def test_factory_acp_client_runs_dir_hook_rendering(
     captured_hooks: list[Any] = []
 
     class FakeAgent:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            _ = args
+        def __init__(self, **kwargs: object) -> None:
             self.session_id = None
             captured_hooks.extend(cast(list[Any], kwargs.get("permission_hooks", [])))
 
         async def start(self, **kwargs: object) -> None:
             _ = kwargs
 
-    monkeypatch.setattr(client_mod, "ACPAgent", FakeAgent)
-    monkeypatch.setattr(
-        client_mod,
-        "resolve_factory_agent_command",
-        lambda _cfg: ["python3", "-c", "pass"],
-    )
     runs_dir = tmp_path / "external-runs"
 
     client = client_mod.FactoryACPClient(
@@ -1150,6 +1158,7 @@ async def test_factory_acp_client_runs_dir_hook_rendering(
         agent_config=AgentConfig(name="opencode"),
         guardrails=GuardrailsConfig(enabled=True),
         runs_dir=runs_dir,
+        spawner=_StubSpawner(FakeAgent),
         **client_kwargs,
     )
     await client.start()

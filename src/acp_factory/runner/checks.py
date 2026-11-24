@@ -541,7 +541,7 @@ async def run_single_check(
             FactoryACPClient as _FactoryACPClient,
         )
         from ..config import AgentConfig, resolve_runs_dir
-        from ..resources import resolve_resource_dirs, resolve_resources
+        from ..resources import resolve_resource_dirs
 
         start = time.monotonic()
         effective_res_dirs = resolve_resource_dirs(
@@ -554,24 +554,32 @@ async def run_single_check(
             if check.discover_apm_resources is not None
             else discover_apm_resources
         )
-        resolved = resolve_resources(
-            persona=check.persona,
-            instructions=check.instructions,
-            skills=check.skills,
-            workspace=cwd,
-            config_dir=config_dir,
-            resource_dirs=effective_res_dirs,
-            discover_apm=effective_discover,
+
+        if acp_client is None and not check.agent:
+            raise RuntimeError(
+                f"Cannot execute review prompt check '{check.name}' without an active FactoryACPClient."
+            )
+        # Review checks always run in a dedicated read-only session: acpterm only
+        # reads the read-only flag while the process starts, so toggling a live
+        # shared session cannot enforce it.
+        base_agent_name = check.agent or (
+            acp_client.agent_config.name if acp_client else "opencode"
         )
-
-        persona_header = ""
-        if resolved.persona_text:
-            persona_header = f"# Reviewer Persona\n{resolved.persona_text}\n\n"
-
-        all_resources = list(dict.fromkeys([*resolved.instructions, *resolved.skills]))
-
-        review_instruction = (
-            f"{persona_header}"
+        review_agent_cfg = AgentConfig(
+            name=base_agent_name,
+            model=check.model
+            or (acp_client.agent_config.model if acp_client else None),
+            thought_level=check.thought_level
+            or (acp_client.agent_config.thought_level if acp_client else None),
+            persona=check.persona,
+            skills=list(check.skills),
+            instructions=list(check.instructions),
+            discover_apm_resources=effective_discover,
+            read_only=True,
+            timeout=check.timeout,
+        )
+        # Persona/instructions/skills are injected by _FactoryACPClient on first turn.
+        dedicated_instruction = (
             "## Verification Review Check\n"
             f"**Check Name:** {check.name}\n\n"
             "Evaluate the current workspace implementation against the following criteria. "
@@ -581,75 +589,28 @@ async def run_single_check(
             "with an explicit final line:\n"
             "`VERDICT: PASS` if all criteria are satisfied, or `VERDICT: FAIL` if any criteria are not met."
         )
-
-        # If the check defines a custom agent, model, or thought level
-        # (cross-agent/cross-model review), spawn a dedicated read-only session
-        # for the review check.
-        if check.agent or check.model or check.thought_level or acp_client is None:
-            if acp_client is None and not check.agent:
-                raise RuntimeError(
-                    f"Cannot execute review prompt check '{check.name}' without an active FactoryACPClient."
-                )
-            base_agent_name = check.agent or (
-                acp_client.agent_config.name if acp_client else "opencode"
-            )
-            review_agent_cfg = AgentConfig(
-                name=base_agent_name,
-                model=check.model
-                or (acp_client.agent_config.model if acp_client else None),
-                thought_level=check.thought_level
-                or (acp_client.agent_config.thought_level if acp_client else None),
-                persona=check.persona,
-                skills=list(check.skills),
-                instructions=list(check.instructions),
-                discover_apm_resources=effective_discover,
-                read_only=True,
+        async with _FactoryACPClient(
+            workspace=cwd,
+            agent_config=review_agent_cfg,
+            config_dir=config_dir,
+            resource_dirs=effective_res_dirs,
+            discover_apm_resources=effective_discover,
+            read_only=True,
+            silent=acp_client.silent if acp_client else False,
+            deny_runs=True,
+            runs_dir=(
+                acp_client.runs_dir
+                if acp_client is not None and acp_client.runs_dir is not None
+                else resolve_runs_dir(cwd)
+            ),
+            extra_env=extra_env,
+            strip_env=strip_env,
+            keep_env=keep_env,
+        ) as reviewer_client:
+            turn_res = await reviewer_client.send_prompt(
+                dedicated_instruction,
                 timeout=check.timeout,
             )
-            # Persona/instructions/skills are injected by _FactoryACPClient on first turn.
-            dedicated_instruction = (
-                "## Verification Review Check\n"
-                f"**Check Name:** {check.name}\n\n"
-                "Evaluate the current workspace implementation against the following criteria. "
-                "Do NOT modify any files during this review check.\n\n"
-                f"**Criteria:**\n{check.prompt}\n\n"
-                "Provide a concise explanation of your findings, and conclude your response "
-                "with an explicit final line:\n"
-                "`VERDICT: PASS` if all criteria are satisfied, or `VERDICT: FAIL` if any criteria are not met."
-            )
-            async with _FactoryACPClient(
-                workspace=cwd,
-                agent_config=review_agent_cfg,
-                config_dir=config_dir,
-                resource_dirs=effective_res_dirs,
-                discover_apm_resources=effective_discover,
-                read_only=True,
-                silent=acp_client.silent if acp_client else False,
-                deny_runs=True,
-                runs_dir=(
-                    acp_client.runs_dir
-                    if acp_client is not None and acp_client.runs_dir is not None
-                    else resolve_runs_dir(cwd)
-                ),
-                extra_env=extra_env,
-                strip_env=strip_env,
-                keep_env=keep_env,
-            ) as reviewer_client:
-                turn_res = await reviewer_client.send_prompt(
-                    dedicated_instruction,
-                    timeout=check.timeout,
-                )
-        else:
-            prev_ro = acp_client.read_only
-            await acp_client.set_read_only(True)
-            try:
-                turn_res = await acp_client.send_prompt(
-                    review_instruction,
-                    timeout=check.timeout,
-                    resources=all_resources or None,
-                )
-            finally:
-                await acp_client.set_read_only(prev_ro)
 
         duration = max(0.0, time.monotonic() - start)
         response_text = turn_res.summary.response_text
